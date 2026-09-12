@@ -1,0 +1,15 @@
+# pnpm 12 起，构建脚本许可等设置从 package.json 的 "pnpm" 字段迁到这里。
+#
+# autoInstallPeers: false —— 必须。@deepseek-ai/* 是 peerDependencies，由 DSH 运行时提供；
+# 若允许 pnpm 自动安装，它会从公共 registry 解析到**无关的旧版本**（0.0.1-rc.1），
+# 其传递依赖 @deepseek-ai/dsh-type-meta 根本不在 registry 上（404）。（web profile 同样如此设置。）
+autoInstallPeers: false
+
+# better-sqlite3 是原生模块，必须允许它执行 install 脚本（prebuild 下载或 node-gyp 编译）。
+# esbuild 由 tsx/vitest 使用，其 install 脚本会落平台二进制。
+# bufferutil 是 ws 的可选原生加速；ccxt 的 install 脚本对运行无必要 —— 显式忽略而非"未审阅"。
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  bufferutil: false
+  ccxt: false

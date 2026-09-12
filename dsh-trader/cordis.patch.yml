@@ -1,0 +1,73 @@
+# dsh-trader — 一行挂载全部运行部件（plan.md §9.2 / decision.md §11.3）
+#
+# 语义要点（decision.md §2.1，务必遵守）：
+#   · 新增插件必须写成 `- insert: [...]`；只写 id + name 只在 id 已存在时按 id 覆盖
+#   · `config` 是整行替换，不是深合并
+#   · 命不中任何行的 patch 只告警；空的 cordis.patch.yml 会导致启动失败
+#   · 重复 entry id 是致命错误
+#
+# 包安装进 profile 后，`dsh-trader/plugins/*` 由 package.json 的 exports 解析。
+
+- insert:
+    - id: trade-db
+      name: dsh-trader/plugins/db
+      config:
+        path: !!js dshHomePath('trading/desk.db')
+
+    - id: trade-market
+      name: dsh-trader/plugins/market
+      config:
+        venue: htx
+        crossCheckVenue: okx
+        symbols: [BTC/USDT:USDT, ETH/USDT:USDT]
+        timeframes: [1m, 15m, 1h, 4h, 1d]
+
+    - id: trade-rules
+      name: dsh-trader/plugins/rules
+      config:
+        rulePacks: [mean_reversion_v1, funding_extreme_v1]
+        cooldownMs: 900000
+        windows:
+          - { id: pre_session, at: '00:30Z' }
+          - { id: midday, everyMs: 14400000 }
+          - { id: post_session, at: '23:30Z' }
+        escape: { maxPerHour: 2, maxPerDay: 6 }
+        judgment: { maxPerHour: 3, maxPerDay: 8, provider: deepseek-official, model: deepseek-reasoner }
+
+    - id: trade-exec
+      name: dsh-trader/plugins/exec
+      config:
+        mode: paper
+        perOrderCapUsd: 200
+        maxExposureUsd: 2000
+        maxLeverage: 2
+        dailyLossLimitUsd: 100
+        maxDrawdownUsd: 300
+        maxConsecutiveLosses: 4
+        maxSpreadBps: 25
+        maxOpenOrders: 10
+        # 密钥只从环境注入，绝不写进仓库/prompt；systemd 用 EnvironmentFile=%h/.dsh/trading.env (0600)
+        apiKey: !!js process.env.TRADER_API_KEY
+        apiSecret: !!js process.env.TRADER_API_SECRET
+
+    - id: trade-supervisor
+      name: dsh-trader/plugins/supervisor
+      config:
+        deskSessionId: trade-desk
+        l2: { provider: deepseek-official, model: deepseek-flash }
+        l3: { provider: deepseek-official, model: deepseek-reasoner }
+        l3MinIntervalMs: 14400000
+        dailyBudgetUsd: 5
+        heartbeatMs: 15000
+
+    - id: trade-tools-desk
+      name: dsh-trader/plugins/tools-desk
+
+    - id: trade-tools-research
+      name: dsh-trader/plugins/tools-research
+
+    - id: trade-tools-risk
+      name: dsh-trader/plugins/tools-risk
+
+    - id: trade-commands
+      name: dsh-trader/plugins/commands

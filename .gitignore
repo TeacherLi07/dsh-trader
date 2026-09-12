@@ -1,0 +1,29 @@
+# deps / build output
+node_modules/
+lib/
+coverage/
+*.tsbuildinfo
+
+# runtime state — authoritative data lives in $DSH_HOME/trading, never in the repo
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# secrets
+.env
+*.env
+!.env.example
+
+# logs / os
+*.log
+.DS_Store
+
+# pnpm content-addressable store (repo-local)
+.pnpm-store/
+
+# research source material kept locally:
+#   pdfs are large binaries; TradingAgents is a third-party clone with its own .git
+research/pdfs/
+research/TradingAgents/
