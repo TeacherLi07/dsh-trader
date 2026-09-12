@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest'
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'src')
 const GUARDED = [
   join(SRC, 'market'),
+  join(SRC, 'predictions'),
   join(SRC, 'trigger'),
   join(SRC, 'supervisor'),
   join(SRC, 'exec', 'gate.ts'),

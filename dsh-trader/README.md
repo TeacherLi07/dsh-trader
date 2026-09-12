@@ -17,8 +17,9 @@
 | T0.2 | SQLite schema + 迁移 + `db` 插件 | ✅ 已完成（14 张表；唯一索引/CHECK/append-only 有单测） |
 | T0.3 | `clock.ts` + Config + 启动参数校验 | ✅ 已完成（含"禁止直接读墙钟"的 grep 测试） |
 | T0.6 | 计划卡 schema + `when` DSL + 求值器 | 🟡 v0 已实现并有单测；`match/store` 待接 |
+| §4.4 | 预测市场事件源（Polymarket，**只读**） | 🟡 DDL（4 张表）+ PIT 三道闸门已落地并有单测；client/store/poller/watch/tools 属 T1.8–T1.11 |
 | T0.4/T0.5/T0.7/T0.8/T0.9 | 行情 / 特征 / 触发 / 执行 / 回放 | ⬜ 未开始 |
-| P1–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
+| P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
 
 ## 开发
 

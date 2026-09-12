@@ -189,6 +189,77 @@ CREATE TABLE IF NOT EXISTS budget_ledger (
   PRIMARY KEY (day, scope)
 );
 
+-- ── 预测市场（Polymarket）事件源：只读，永不交易（plan §4.4）──────────────────
+CREATE TABLE IF NOT EXISTS pm_markets (
+  condition_id TEXT PRIMARY KEY,
+  market_id TEXT,
+  slug TEXT NOT NULL,
+  question TEXT NOT NULL,
+  event_id TEXT,
+  event_slug TEXT,
+  tags_json TEXT,
+  outcomes_json TEXT NOT NULL,
+  token_ids_json TEXT NOT NULL,
+  neg_risk INTEGER NOT NULL DEFAULT 0 CHECK (neg_risk IN (0, 1)),
+  -- 源时间：市场创建时刻（存在门控用；回放不得引用当时不存在的市场）
+  created_at INTEGER NOT NULL,
+  start_date INTEGER,
+  end_date INTEGER,
+  closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)),
+  -- 结算门控：winning_outcome 只在 resolved_at <= now 之后才允许被读出
+  resolved_at INTEGER,
+  winning_outcome TEXT,
+  liquidity_num REAL,
+  volume24h REAL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pm_markets_slug ON pm_markets (slug);
+CREATE INDEX IF NOT EXISTS pm_markets_open ON pm_markets (closed, end_date);
+
+-- 概率序列：PIT 回放的唯一合法来源（ts 为毫秒整数；源为秒，边界 ×1000）
+CREATE TABLE IF NOT EXISTS pm_series (
+  token_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  price REAL NOT NULL,
+  resolution_seconds INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  PRIMARY KEY (token_id, ts, resolution_seconds)
+) WITHOUT ROWID;
+
+-- 盘口/流动性快照：novelty 告警必须先过流动性门槛
+CREATE TABLE IF NOT EXISTS pm_quotes (
+  token_id TEXT NOT NULL,
+  observed_at INTEGER NOT NULL,
+  best_bid REAL, best_ask REAL, mid REAL, spread REAL,
+  last_trade_price REAL, volume24h REAL, liquidity REAL,
+  PRIMARY KEY (token_id, observed_at)
+) WITHOUT ROWID;
+
+-- LLM 设定的"关心事件/提醒"：结构化、有期限、有上限
+CREATE TABLE IF NOT EXISTS pm_watches (
+  watch_id TEXT PRIMARY KEY,
+  alias TEXT NOT NULL UNIQUE,                 -- 供 when DSL 引用：pm.<alias>.*
+  content_hash TEXT NOT NULL UNIQUE,          -- 重复登记同一规格 = 幂等 no-op
+  kind TEXT NOT NULL CHECK (kind IN ('threshold', 'topic', 'resolution', 'liquidity')),
+  expr TEXT,                                  -- threshold 必填；v0 DSL，布尔
+  token_ids_json TEXT NOT NULL DEFAULT '[]',
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  query TEXT,
+  purpose TEXT NOT NULL CHECK (purpose IN ('novelty', 'info', 'commitment')),
+  plan_id TEXT,
+  cooldown_ms INTEGER NOT NULL DEFAULT 900000,
+  max_triggers INTEGER NOT NULL DEFAULT 10,
+  trigger_count INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL,                -- 必填：不允许无期限关注
+  state TEXT NOT NULL CHECK (state IN ('active', 'expired', 'disabled')),
+  created_by TEXT NOT NULL CHECK (created_by IN ('model', 'human')),
+  created_at INTEGER NOT NULL,
+  last_fired_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   beat_at INTEGER NOT NULL,

@@ -36,7 +36,7 @@ agent 默认 idle，**无新信息不唤醒（零 token）**。只有三类唤�
 | **W2** | 条件命中且**计划卡未覆盖** | 3/时、8/天 | 代码 | Event Pack（含 `uncovered_condition`） |
 | **W3** | 结构化新颖性信号 | 2/时、6/天、且预算内 | 代码（**模型不能自判**） | Event Pack（明示"计划外，可 `NO_TRADE`"） |
 
-- W3 信号白名单：交易所/预言机状态异常、单 bar > k·ATR、资金费率越极端分位、清算量破历史分位、稳定币脱锚、白名单新闻源高危关键词。
+- W3 信号白名单：交易所/预言机状态异常、单 bar > k·ATR、资金费率越极端分位、清算量破历史分位、稳定币脱锚、白名单新闻源高危关键词、**预测市场概率跳变 / 新市场 / 结算**（§4.4，且必须先过流动性门槛）。
 - 超限一律**落库 + 告警**，不唤醒。
 - 规则命中后的分流：命中承诺 → 执行（不唤醒）；`invalidation` → 执行降险（不唤醒）；`novelty` → W3；`info` → 只落库；其余 → 仅当 W2 成立才入队。
 - agent 忙时不打断，只入队；仅 P0（持仓风险）允许 `steer()`。
@@ -88,12 +88,14 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
       | atr(tf,n) | ema(tf,n) | rsi(tf,n) | adx(tf,n) | vwap(tf) | zscore(tf,n)
       | vol.realized(tf,n) | oi.changePct(n) | liq.notional(windowMs)
       | funding.rate | basis.bps | plan.ageMs | window.sinceMs
+      | pm.<alias>.prob | pm.<alias>.mid | pm.<alias>.spread | pm.<alias>.volume24h
+      | pm.<alias>.change1h | pm.<alias>.change24h | pm.<alias>.ageMs
 运算 := 值 ( + | - | * | / ) 值 | 值 ( < | <= | > | >= | == | != ) 值
       | ( 表达式 ) | not 表达式 | 表达式 ( and | or ) 表达式
 函数 := crossAbove(a,b) | crossBelow(a,b) | between(x,a,b) | abs(x) | min(a,b) | max(a,b) | pct(a,b)
 ```
 
-规则：**取值与运算都是数值/布尔，DSL 没有字符串**；时间框架由承诺自带的 `tf` 字段声明（`tf ∈ {1m,15m,1h,4h,1d}`，在该 tf 的每根已收盘 bar 上求值一次），因此表达式里**不允许**出现 `bar.tf`。`n ≤ 500`；**禁止**赋值/循环/字符串/任意属性访问/网络/时间函数；**只用已收盘 bar**。`crossAbove`/`crossBelow` 需要前一根 bar，由特征层提供。
+规则：**取值与运算都是数值/布尔，DSL 没有字符串**；时间框架由承诺自带的 `tf` 字段声明（`tf ∈ {1m,15m,1h,4h,1d}`，在该 tf 的每根已收盘 bar 上求值一次），因此表达式里**不允许**出现 `bar.tf`。`pm.<alias>.*` 只在 alias 已由 `trade_prediction_watch` 注册后合法（§4.4）——DSL 没有字符串，所以预测市场**只能通过别名**进入表达式；未注册的 alias 视为未知取值 → `ok:false` → UNCOVERED，**不静默 false**。`n ≤ 500`；**禁止**赋值/循环/字符串/任意属性访问/网络/时间函数；**只用已收盘 bar**。`crossAbove`/`crossBelow` 需要前一根 bar，由特征层提供。
 
 **求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**。默认 **edge 触发**（false→true 各触发一次）；需要电平语义的用 `between`/显式条件表达。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
 
@@ -241,6 +243,46 @@ CREATE TABLE budget_ledger(
   tokens_cached INTEGER DEFAULT 0, est_usd REAL DEFAULT 0, cost_known INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY(day,scope));
 
+-- ── 预测市场（Polymarket）事件源：只读，永不交易（§4.4）──────────────────────
+CREATE TABLE pm_markets(
+  condition_id TEXT PRIMARY KEY, market_id TEXT, slug TEXT NOT NULL, question TEXT NOT NULL,
+  event_id TEXT, event_slug TEXT, tags_json TEXT,
+  outcomes_json TEXT NOT NULL, token_ids_json TEXT NOT NULL, neg_risk INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,                 -- 源时间：市场创建时刻（存在门控用）
+  start_date INTEGER, end_date INTEGER, closed INTEGER NOT NULL DEFAULT 0,
+  resolved_at INTEGER, winning_outcome TEXT,   -- 仅在结算之后可见（结算门控）
+  liquidity_num REAL, volume24h REAL,
+  first_seen_at INTEGER NOT NULL, last_seen_at INTEGER NOT NULL, observed_at INTEGER NOT NULL);
+CREATE INDEX pm_markets_slug ON pm_markets(slug);
+CREATE INDEX pm_markets_open ON pm_markets(closed, end_date);
+
+CREATE TABLE pm_series(                        -- 概率序列：PIT 回放的唯一合法来源
+  token_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,                         -- 源观测时间，**毫秒整数**（源为秒 ⇒ ×1000）
+  price REAL NOT NULL, resolution_seconds INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL, observed_at INTEGER NOT NULL,
+  PRIMARY KEY(token_id, ts, resolution_seconds)) WITHOUT ROWID;
+
+CREATE TABLE pm_quotes(                        -- 盘口/流动性快照：告警必须带流动性门槛
+  token_id TEXT NOT NULL, observed_at INTEGER NOT NULL,
+  best_bid REAL, best_ask REAL, mid REAL, spread REAL,
+  last_trade_price REAL, volume24h REAL, liquidity REAL,
+  PRIMARY KEY(token_id, observed_at)) WITHOUT ROWID;
+
+CREATE TABLE pm_watches(                       -- LLM 设定的"关心事件/提醒"：结构化、有期限、有上限
+  watch_id TEXT PRIMARY KEY, alias TEXT NOT NULL UNIQUE,
+  content_hash TEXT NOT NULL UNIQUE,           -- 重复登记同一规格 = 幂等 no-op
+  kind TEXT NOT NULL CHECK(kind IN('threshold','topic','resolution','liquidity')),
+  expr TEXT,                                   -- threshold 必填；v0 DSL，布尔
+  token_ids_json TEXT NOT NULL DEFAULT '[]', tags_json TEXT NOT NULL DEFAULT '[]', query TEXT,
+  purpose TEXT NOT NULL CHECK(purpose IN('novelty','info','commitment')), plan_id TEXT,
+  cooldown_ms INTEGER NOT NULL DEFAULT 900000, max_triggers INTEGER NOT NULL DEFAULT 10,
+  trigger_count INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL,                 -- 必填：不允许无期限关注
+  state TEXT NOT NULL CHECK(state IN('active','expired','disabled')),
+  created_by TEXT NOT NULL CHECK(created_by IN('model','human')),
+  created_at INTEGER NOT NULL, last_fired_at INTEGER);
+
 CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT NULL,
   halted INTEGER NOT NULL DEFAULT 0);
 ```
@@ -259,10 +301,69 @@ CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT N
 | 行情 K 线 | CCXT Pro WS：HTX（主）+ OKX（交叉校验）；回补走 `fetchOHLCV` 分页 | — |
 | 资金费率 / OI | CCXT REST/WS（HTX、OKX） | — |
 | 清算流 | 启动按 `has`/`features` 探测；**不可用即标记该特征不可用，不伪造** | 换源补齐 |
+| **事件概率（预测市场）** | **Polymarket 只读**：Gamma（发现/元数据）+ CLOB（盘口/价格）+ Data API v2（历史序列）；默认 60s 轮询，WSS 作为可用时的增强 | 鲸鱼集中度/持仓（Data API v2）、结算链上事件 |
 | 链上 / 宏观 / 情绪 | — | 各选定 1 个供应商并写入 ADR；宏观日历 v0 用人工 YAML；情绪仅 Fear&Greed，**不做社媒** |
 
 硬性规则：只用已收盘 bar（`close_time <= now`，CCXT 最后一根通常是进行中，必须丢弃）；时间戳统一**毫秒整数**；每个数据点存 `observed_at`/`source`/`fetched_at`；落库唯一键 `(symbol,timeframe,open_time)` + **upsert**；`market.precision`/`limits`/合约乘数/**限频**启动时读取校验；启动校准服务器时间并持续监控偏移。
 供应商路由：`"primary,fallback"` 显式链 + 行为化错误分类（无数据→记住继续；限流→跳过；未配置→跳过并备忘；其他→告警跳过）；终结返回 `NO_DATA_AVAILABLE: … Do not estimate or fabricate values`；行情（core）全链失败 → **跳过本轮并告警**，可选数据降级为 `DATA_UNAVAILABLE`。
+
+---
+
+### 4.4 事件来源：Polymarket 预测市场（只读）`[v0]`
+
+**定位**：预测市场给出的是**市场隐含的事件概率**，与新闻（发生了什么）、链上（钱在干什么）互补：新闻回答"世界怎么了"，预测市场回答"市场认为会怎样"。它**不是基准真值** —— 价格里含手续费、价差、噪声与操纵成本，**薄市场可以被很便宜地推动**。
+
+**三条红线**：
+1. **只读，永不交易**。不接 Polymarket 下单：资产错配（我们是 USDT 永续，它是 Polygon 上的条件代币），且下单受地域限制（官方 geoblock 只拦"下单"，公开行情数据不受影响）。代码里**不注册任何 pm 下单工具**。
+2. **不作执行触发**。pm 数值可以进计划卡的 `when`，但**不得**成为开仓的唯一理由；W3 唤醒后仍走正常审议与硬闸。
+3. **市场文本是不可信输入**。`question`/`description`/结算规则**由市场创建者书写** ⇒ 攻击者可控文本，一律按数据块注入并标注来源，**绝不参与工具授权**（§3.6）。
+
+**本机实测依据（2026-09-12 实测，非推测）**：
+
+| 能力 | 端点 | 实测结果 |
+|---|---|---|
+| 发现 / 元数据 | [`gamma-api.polymarket.com/markets`](https://docs.polymarket.com/market-data/discover-markets)、`/events/keyset`、`/public-search?q=` | 200。字段：`conditionId`/`clobTokenIds`/`outcomes`/`outcomePrices`/`bestBid`/`bestAsk`/`spread`/`volume24hr`/`liquidity`/`createdAt`/`endDate`/`closed`；`/markets?order=startDate&ascending=false` 取最新市场；`/markets/keyset` 支持 `after_cursor` 翻页 |
+| 盘口 / 价格 | [`clob.polymarket.com/book`](https://docs.polymarket.com/market-data/prices-order-books)、`/price` | 200。`book` 返回 `bids/asks/tick_size/min_order_size/neg_risk/timestamp/hash` |
+| 历史序列 | `clob.polymarket.com/prices-history?market=&interval=&fidelity=`；`data-api.polymarket.com/v2/prices-history?token_id=&interval=&bucket_seconds=` | 200。v1 → `{history:[{t,p}]}`（`t` 为**秒**，`fidelity` 单位是**分钟**，实测 60 ⇒ 每小时一个点）；v2 → `{data:[{timestamp,price,resolution_seconds}],pagination}`（`timestamp` 也是**秒**，`resolution_seconds=0` 表示精确 tick） |
+| 点时刻 | v2 `...&as_of=<ts>` | 200，但**耗时约 20s**（全量扫描）⇒ **禁止进热路径**，只用于审计重建 |
+| 实时流 | [`wss://ws-subscriptions-clob.polymarket.com/ws/market`](https://docs.polymarket.com/market-data/realtime-data)，订阅 `{"assets_ids":[...],"type":"market"}`，需每 10s 发文本 `PING` | ⚠️ **本机握手超时**（HTTPS 正常，疑似出站 WSS 被拦）⇒ 默认走轮询，WSS 作为可用时的增强 |
+| 官方速率（IP 级，Cloudflare **排队**而非拒绝） | [`api-reference/rate-limits`](https://docs.polymarket.com/api-reference/rate-limits) | Gamma `/markets` 300/10s、`/events` 500/10s、`/public-search` 350/10s；CLOB `/prices-history` 1000/10s、`/book` 1500/10s；Data API `/trades` 200/10s、v2 `/prices-history` 200/10s。我们用量远低于限额，但仍须**令牌桶 + 退避**，取限额 ≤20% |
+
+**已实测的取值边界**：v2 `interval=1d`/`1w` 可用；**`1h` 返回 0 行**；**`max` 超时** ⇒ `interval` 走**白名单**，禁止未验证取值；所有请求带超时与重试上限。
+
+**PIT 三道闸门**（decision.md §3.2 指出 TradingAgents 对 Polymarket "只有实时没有 as-of"，这里修掉）：
+
+| 闸门 | 规则 |
+|---|---|
+| **存在门控** | 只用 `pm_markets.created_at <= now` 的市场；回放**不得**引用"当时还不存在"的市场 |
+| **结算门控** | `closed`/`winning_outcome` 只在 `resolved_at <= now` 之后可见；**绝不**让结算结果提前进入历史回放 |
+| **序列门控** | 历史点按 `ts <= now` 过滤（`ts` 归一为**毫秒整数**；源为秒 ⇒ 边界 `×1000`） |
+
+每次取数写 `observed_at` 与 `source`；决策落库时把用到的 pm 数据指纹并入 `context_hash`（§5.1 C6）。
+
+**别名机制（让受限 DSL 能引用预测市场）**：DSH 的 `when` DSL 只有数值/布尔、**没有字符串**，所以预测市场**以别名进入词汇表**：`trade_prediction_watch` 注册 `alias`（如 `fed_sep_cut`）→ 存 alias↔token 映射 → 轮询刷新 → 特征快照暴露 `pm.<alias>.prob|mid|spread|volume24h|change1h|change24h|ageMs` → 计划卡写 `when: "pm.fed_sep_cut.prob < 0.30"`。未注册 alias = 未知取值 → UNCOVERED。
+**估计量必须一致**：`prob` 定义为**中间价**（`mid`，缺失时退化 `last_trade_price`），所用估计量写入快照与告警 payload —— 否则"概率变了"可能只是换了口径。
+
+**预测市场规则族（纯函数，`purpose` 见 §2）**：
+
+| 规则 | purpose | 触发条件（v0） | 治理 |
+|---|---|---|---|
+| `pm_level_cross` | `commitment` | 计划卡写明的 `pm.<alias>.prob` 穿越 | 命中承诺即执行，不唤醒 |
+| `pm_prob_jump` | `novelty` | `\|Δprob\|` 超窗口阈值，或超概率序列已实现波动的 k 倍 | 必须过流动性门槛；冷却 ≥15min |
+| `pm_new_market` | `novelty` | 关注的 tag/关键词下出现新市场 | 每小时 ≤N；仅白名单 tag |
+| `pm_resolution` | `info` | 关注市场结算 | 只落库 + 通知；作为复盘证据 |
+| `pm_volume_spike` | `info` | `volume24h` z-score 超阈值 | 只落库 + 通知 |
+| `pm_spread_blowout` | `info` | `spread` 超阈值 | 同时下调该 alias 置信度并在 Event Pack 标注 |
+
+**流动性门槛（硬性）**：`liquidity < liquidityFloorQuote` 或 `spread > spreadCeilBps` 的市场**不产生任何 novelty 告警**，其 `prob` **不得**进入计划卡承诺。薄市场的"跳变"是噪声或操纵，不是信息。
+
+**工具与权限**（§6.4）：
+- `trade_predictions`（**只读**；分析师、研究与辩论）：`search`（query/tag）、`market`（conditionId/slug/tokenId）、`series`（tokenId + 区间）、`event`。返回结构化摘要 + `observedAt` + `dataFingerprint` + **所用估计量**；只返回已观测点。
+- `trade_prediction_watch`（**有副作用** ⇒ 只给 desk 的裁决者）：`create`/`list`/`cancel`。create 必须给 `expires_at`；`expr` 走与计划卡相同的编译 + 词汇表校验（未知 alias/字段即拒绝）；受**上限**（默认 30 个 active）与**去重**（`content_hash` 唯一，重复登记 = 幂等 no-op）约束；每次变更写 `audit_events`。
+
+**治理形态**（与 §2/§6.3 一致）：watch 命中 → 去重（`hash(watchId, tokenId, bucketTs)`）→ 冷却 → 限流（novelty 走 W3 上限）→ 分级（P1 机会 / P2 信息）→ 入 `triggers` 表，复用既有队列与 W1/W2/W3 分流；**无新信息不唤醒**。
+
+**工程落点**：`src/predictions/{client,store,poller,watch,rules,pit}.ts` + `plugins/predictions.ts`（id `trade-predictions`，默认 `enabled: true`、`mode: read-only`）。轮询器读**注入的 `Clock`**（§7），因此回放确定性与实盘共用同一份代码。
 
 ---
 
@@ -349,10 +450,23 @@ validateIntent(intent, portfolio, config):
 
 ### 6.4 权限与密钥 `[定]`
 
-- 工具白名单：分析师只读（`trade_market`/`trade_derivatives`/`trade_news`/`trade_onchain`）；研究与辩论加 `trade_recall`/`trade_regime`；交易员 `trade_portfolio`/`trade_propose_order`/`trade_order_status`；风控 `trade_risk_check`/`trade_stress_test`/`trade_limits`（不能下单）；裁决 `trade_execute_order`/`trade_cancel`/`trade_record_decision`/`trade_workflow_run`；元循环 `trade_review`/`trade_playbook_update`（人审后生效）。
+- 工具白名单：分析师只读（`trade_market`/`trade_derivatives`/`trade_news`/`trade_onchain`/`trade_predictions`）；研究与辩论加 `trade_recall`/`trade_regime`；交易员 `trade_portfolio`/`trade_propose_order`/`trade_order_status`；风控 `trade_risk_check`/`trade_stress_test`/`trade_limits`（不能下单）；裁决 `trade_execute_order`/`trade_cancel`/`trade_record_decision`/`trade_workflow_run`/`trade_prediction_watch`；元循环 `trade_review`/`trade_playbook_update`（人审后生效）。
+- **预测市场只有只读工具 + 关注登记工具**：`trade_predictions` 只读（分析师可用），`trade_prediction_watch` 有副作用（登记/取消关注）⇒ 只给裁决者；**没有任何 pm 下单工具**（§4.4 红线 1）。
 - 用 `agentCtx.tools.restrict({allow, deny})` 按角色收窄；**desk agent 工具目标 ≤ 20**；窗口内**不增删工具**（要收窄用约束，不改工具集）。
 - 子 agent 一律剥夺副作用能力（`deny: ['trade_execute_order','trade_cancel', …]`），**能下单的工具只注册给裁决者**。
 - 密钥：systemd `EnvironmentFile=%h/.dsh/trading.env`（`0600`，不入仓库），patch 里用 `!!js process.env.*` 引用；插件**不打印密钥**；实盘 key 只开交易权限、**禁用提现**；`paper` 与 `live` 用不同 profile。凭据机制（`dsh-credentials-local`）作为后续收敛方向，`[开]` 见 §12。
+
+---
+
+### 6.5 启动参数与风控参数 `[定]`
+
+风控参数是**运行时输入**，不是代码常量，也不是配置默认值（decision §14.3）。规则：
+
+- **缺省即拒绝启动**：`mode` / `riskPct` / `limits` / `symbols` / `benchmark` 缺一即抛 `StartupParamsError`。系统**不替用户猜一个"安全的数"** —— 那会制造虚假的安全感。
+- **可显式放弃（风险自负）**：`waiver: true` 是**一等公民路径**。放弃后 `limits === null`，但**安全机制不随之放弃**：幂等、对账、心跳熔断照常生效（§6.3）；硬闸保留"永远生效"的三条检查（§6.2）。
+- **放弃必须留痕且持续可见**：写入 `config_versions`（含 `waiver` 标记）与 `audit_events`，启动摘要显式回显"当前无风控"；允许随时补上参数，补上即刻生效。
+- **参数进 prompt，但只作提示**：真正的强制在硬闸（§6.2）—— 二者都要，不能只做前者。
+- **运行期变更**：只允许人工命令修改，且改配置本身是一条审计事件（§13 纪律 7「审计优先」）。
 
 ---
 
@@ -361,7 +475,7 @@ validateIntent(intent, portfolio, config):
 这是 P0 验收"30 天回放零重复下单"的前提，原文档缺失。
 
 - 统一定义 `interface Clock { now(): number; setInterval(fn, ms): Disposer }`；实现 `SystemClock` 与 `ReplayClock`。
-- **禁止**在 `src/market/`、`src/trigger/`、`src/exec/gate.ts`、`src/supervisor/settle.ts` 里出现 `Date.now()`/`new Date()`；用一条 CI grep 测试强制。
+- **禁止**在 `src/market/`、`src/predictions/`、`src/trigger/`、`src/exec/gate.ts`、`src/supervisor/` 里出现 `Date.now()`/`new Date()`；用一条 CI grep 测试强制（`tests/clock-discipline.test.ts`，按目录整目录扫描）。
 - **回放只换 Clock 与 Broker**（`PaperBroker`），规则/计划卡匹配/硬闸/落库全部走生产同一份代码。
 - 回放输入：从 `bars`/`features` 按 `close_time` 升序推进，`close_time <= clock.now()`；触发路径与实盘一致。
 - **确定性判据**：同一区间回放两次 ⇒ `orders`/`fills`/`decisions` 的 id 集合完全相等，`client_order_id` 重复数 = 0。
@@ -397,13 +511,14 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── index.ts  config.ts
         ├── market/{feed,archive,features,rules}.ts
         ├── plan/{schema,dsl,evaluate,match,store}.ts      # ★ 新增：§3 的落点
+        ├── predictions/{client,store,poller,watch,rules,pit}.ts   # ★ §4.4 事件源（只读）
         ├── trigger/{engine,queue}.ts
         ├── memory/{schema,journal,recall,settle}.ts
         ├── exec/{broker,paper,ccxt,gate,reconcile}.ts
         ├── agents/{prompts/,tools/,roles.ts}
         ├── supervisor/{desk,heartbeat}.ts
         ├── clock.ts  cost.ts                              # ★ 新增：§7/§8
-        └── plugins/{db,market,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands}.ts
+        └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands}.ts
 ```
 
 ### 9.2 `package.json` 打包修正（原文档此处会加载失败）
@@ -446,11 +561,14 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 阶段 | 目标 | 交付物 | 量化验收（可自动验证） |
 |---|---|---|---|
 | **P0 骨架**（1–2 周） | 数据 → 特征 → 规则 → **计划卡匹配** → 纸面执行 → 落库 | `market/plan/rules/exec(Paper)/db/clock` + 回放工具 + 探针 + 压测 | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三个表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次规则命中都打印 `matched:<id>` 或 `UNCOVERED:<reason>`；④ 表达式编译成功率 100%；⑤ 探针：`resume`→`followup` 产生 `assistant/message`，且 `source.form=notice` 渲染正确；⑥ 压测：24h 合成行情后 RSS 增长 < 10%（首小时为预热）、fd 数波动 ≤ 2 |
-| **P1 判断与计划卡**（2–3 周） | 审议窗产出可执行计划卡 + 记忆闭环 | workflow 脚本（含冲突消解）、角色提示词、全部工具、结算/反思、context 组装器、预算账本 | ① 计划卡 schema 通过率 100%；② `when` 求值错误率 = 0（错误一律计 UNCOVERED 并告警）；③ 日输出计划覆盖率、W2/W3 频次、每窗口成本；④ 到期决策结算成功率 ≥ 99%（含重试），**每条决策至多一条反思**（唯一键）；⑤ kill -9 后 `resume` 恢复且无重复决策 |
-| **P1.5 通道有效性闸门** | 判定 W2/W3 是否值得保留 | A/B 回放报告（预注册指标） | 回放 ≥ 90 天或 ≥ 200 次触发；指标 = 扣费净 PnL（taker+资金费+滑点模型）+ 执行偏离次数。**保留 W2/W3 的条件**：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 的最大回撤 ≤ A × 1.2。否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统） |
+| **P1 判断与计划卡**（2–3 周） | 审议窗产出可执行计划卡 + 记忆闭环 | workflow 脚本（含冲突消解）、角色提示词、全部工具、结算/反思、context 组装器、预算账本、**预测市场事件源（§4.4）** | ① 计划卡 schema 通过率 100%；② `when` 求值错误率 = 0（错误一律计 UNCOVERED 并告警）；③ 日输出计划覆盖率、W2/W3 频次、每窗口成本；④ 到期决策结算成功率 ≥ 99%（含重试），**每条决策至多一条反思**（唯一键）；⑤ kill -9 后 `resume` 恢复且无重复决策；⑥ 预测市场专项验收（见下）全部通过 |
+| **P1.5 通道有效性闸门** | 判定 W2/W3 是否值得保留 | A/B 回放报告（预注册指标） | 回放 ≥ 90 天或 ≥ 200 次触发；指标 = 扣费净 PnL（taker+资金费+滑点模型）+ 执行偏离次数。**保留 W2/W3 的条件**：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 的最大回撤 ≤ A × 1.2。否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**pm 驱动的 W3 同样纳入此闸门**：证不出正贡献就降级为只保留 `info` 级通知 |
 | **P2 测试网实盘**（2–3 周） | 真实接口、幂等、对账、硬闸、熔断 | `CcxtBroker`、对账、外部 watchdog、`/halt` | ① 订单在途时 `kill -9` × 50 次：孤儿订单 = 0、重复成交 = 0；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` 主循环 > 3×心跳间隔 → watchdog 撤单，交易所挂单 = 0；④ 停掉模型供应商：已挂保护单仍生效、`StopGuard` 仍执行 |
 | **P3 小额实盘**（持续） | `live_confirm` → `live_auto` | 限额、告警、成本看板 | 连续 **14 天**：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算、W2 ≤ 8/天、W3 ≤ 6/天 |
 | **P4 离线整合**（长期） | sleep-time 复盘与提案 | 周级复盘、playbook 提案、regime 检索、M3 版本化 | 每周产出可读复盘；playbook 变更**必须人工批准**；记忆块有版本与 diff，可回答"为什么改掉" |
+
+**预测市场事件源专项验收（并入 P1，全部可自动判定）**：
+① 回放 30 天：**不存在**"市场未创建即被引用"或"结算结果提前可见"（SQL 断言命中行数 = 0）；② 所有 `pm_series.ts` 为**毫秒整数**且与源秒值可逆（`×1000`，边界单测）；③ 同一 alias 的 `prob` 在工具返回与告警 payload 中**估计量一致**；④ 低于流动性门槛的市场产生的 novelty 告警数 = **0**；⑤ 任意 10s 窗口对 gamma/clob/data-api 的请求数 ≤ 各自官方限额的 **20%**（令牌桶单测）；⑥ 轮询连续失败 N 次 → 降级为 `info` 告警且**交易主循环不受影响**（故障注入）；⑦ 热路径调用 v2 `as_of` 次数 = **0**（`as_of` 仅用于审计重建）；⑧ 未注册 alias 的 `when` 一律 UNCOVERED，**零静默 false**。
 
 ---
 
@@ -461,7 +579,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | ID | 任务 | 依赖 | 完成判据 |
 |---|---|---|---|
 | P-1.* | §9.3 五项前置 | — | 各条判据通过 |
-| T0.1 | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | P-1.2 | `--dump-config` exit 0 且 9 行俱在 |
+| T0.1 | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | P-1.2 | `--dump-config` exit 0 且全部 patch 行俱在（当前 9 行；T1.8 起 +1） |
 | T0.2 | SQLite schema + 迁移 + `db` 插件 | T0.1 | §4.1 DDL 落地；唯一索引/CHECK 有测试 |
 | T0.3 | `clock.ts` + Config 体系 + 参数启动校验 | T0.1 | 缺省参数**拒绝启动**；waiver 路径留痕；grep 测试通过 |
 | T0.4 | `market/feed` + `archive` + `backfill` | T0.2 | 30 天回补成功；只落已收盘 bar；断线重连有测试 |
@@ -477,6 +595,10 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库 |
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据 |
+| T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦ |
+| T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ |
+| T1.10 | `trade_prediction_watch` + watch 治理（TTL/上限/去重/冷却）+ pm 规则族 + W3 接线 | T1.9, T0.7 | §10 专项 ④；novelty 只走 W3 限流 |
+| T1.11 | `plugins/predictions.ts` 插件 + patch 行 + Config（enabled/pollMs/上限/门槛） | T1.9 | `--dump-config` 列出该行 |
 | T2.* | CcxtBroker / 对账 / watchdog / `/halt` / 故障注入 | T1.* | §10 P2 四条 |
 | T3.* | 限额与告警打磨、`live_auto` 切换 | T2.* | §10 P3 |
 | T4.* | 周级复盘、playbook 提案、regime 检索、M3 版本化 | T3.* | §10 P4 |
@@ -496,6 +618,10 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 7 | Python 数值分析接入范围 | P2+ | 只走共享数据存储，不做每 bar 调用 |
 | 8 | `headless` bundle 替换 `web` 模板以降低常驻开销 | P3 | §9.3 P-1.2 |
 | 9 | 容器化 | P3+ | decision §14.1 #6 |
+| 10 | **Polymarket WSS 可达性**（本机握手超时）：是否需要出站代理，或永久走轮询 | P1 中 | §4.4 实测；轮询已是可用的默认路径 |
+| 11 | **pm 是否允许作为"承诺"触发**（vs 仅 novelty/info） | P1.5 | 由 A/B 回放判定，防止把市场情绪当信号 |
+| 12 | 多结果 / negRisk 事件的概率归一化与一致性校验（同一 negRisk 事件下概率和 ≈1） | P1 中 | 影响别名与规则族 |
+| 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | T1.8 | 影响回放覆盖面；取值走白名单 |
 
 ---
 
@@ -508,3 +634,4 @@ patch 引用的子路径必须在 `exports` 里可达：
 5. 失败与错误状态**逐字保留**，不"擦掉失败"。
 6. 审批状态**永不经过摘要**传递；授权只来自结构化硬闸判定。
 7. 审计优先：审议过程、规则命中、意图、订单、成交、对账、参数变更**全量落库**，任意 `decision_id` 可回放当时所见。
+8. **预测市场是特征，不是真理**：薄市场/宽价差的数据不得进入承诺；pm 永不作为开仓的唯一理由，也永不下单（§4.4 红线）。

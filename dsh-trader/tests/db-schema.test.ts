@@ -51,6 +51,10 @@ describe('schema (plan §4.1 invariants)', () => {
       'price_table',
       'budget_ledger',
       'heartbeat',
+      'pm_markets',
+      'pm_series',
+      'pm_quotes',
+      'pm_watches',
     ]) {
       expect(tables).toContain(table)
     }
@@ -123,5 +127,50 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(() => insert('created')).not.toThrow()
     expect(() => insert('acked')).not.toThrow()
     expect(() => insert('flying')).toThrow()
+  })
+
+  it('keeps one row per (token_id, ts, resolution_seconds) in pm_series', () => {
+    const insert = (ts: number, resolution: number): void => {
+      db.prepare(
+        `INSERT INTO pm_series (token_id, ts, price, resolution_seconds, source, observed_at)
+         VALUES ('tok', ?, 0.5, ?, 'data-api:v2', 1)`,
+      ).run(ts, resolution)
+    }
+    insert(1_700_000_000_000, 0)
+    // 同一时刻的"桶观测"与"精确 tick"可以并存（resolution_seconds=0 表示精确 tick）
+    insert(1_700_000_000_000, 3600)
+    expect(() => insert(1_700_000_000_000, 0)).toThrow()
+  })
+
+  it('constrains pm_watches: unique alias, idempotent content hash, mandatory expiry, closed enums', () => {
+    const insert = (watchId: string, alias: string, hash: string): void => {
+      db.prepare(
+        `INSERT INTO pm_watches (watch_id, alias, content_hash, kind, purpose, expires_at, state, created_by, created_at)
+         VALUES (?, ?, ?, 'threshold', 'novelty', 9999999999999, 'active', 'model', 1)`,
+      ).run(watchId, alias, hash)
+    }
+    insert('w1', 'fed_sep_cut', 'h1')
+    expect(() => insert('w2', 'fed_sep_cut', 'h2')).toThrow() // alias 唯一
+    expect(() => insert('w3', 'other_alias', 'h1')).toThrow() // content_hash 幂等
+
+    // expires_at 必填：不允许无期限关注
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO pm_watches (watch_id, alias, content_hash, kind, purpose, state, created_by, created_at)
+           VALUES ('w4', 'no_ttl', 'h4', 'threshold', 'novelty', 'active', 'model', 1)`,
+        )
+        .run(),
+    ).toThrow()
+
+    // kind / purpose 是封闭枚举
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO pm_watches (watch_id, alias, content_hash, kind, purpose, expires_at, state, created_by, created_at)
+           VALUES ('w5', 'bad_kind', 'h5', 'teleport', 'novelty', 1, 'active', 'model', 1)`,
+        )
+        .run(),
+    ).toThrow()
   })
 })
