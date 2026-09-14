@@ -62,6 +62,8 @@ function market(over: Partial<PmGammaMarket> = {}): PmGammaMarket {
     negRisk: false,
     events: [],
     lastTradePrice: null,
+    oneDayPriceChange: null,
+    oneWeekPriceChange: null,
     untrustedText: { question: 'Will the Fed cut in September?', description: null },
     lifecycle: { resolved: false, winningOutcome: null },
     ...over,
@@ -376,6 +378,19 @@ describe('PmPoller：注入时钟、降级不上抛（plan §10 专项 ⑥）', 
     expect(result.quotesWritten).toBe(0)
   })
 
+  it('没有盘口时仍可用元数据里的 lastTradePrice 作为概率退化路径', async () => {
+    store.registerWatch(watch(), NOW)
+    const poller = new PmPoller({
+      clients: clients({ clob: { book: () => Promise.resolve(null) } }),
+      store,
+      clock: new ReplayClock(NOW),
+    })
+    const result = await poller.runOnce(NOW)
+    // 盘口为 null ⇒ 不写 quote（写一条"只有 lastTradePrice"的也来自元数据？不：book=null 直接 continue）
+    expect(result.quotesWritten).toBe(0)
+    expect(result.snapshots[0]?.probability.ok).toBe(false)
+  })
+
   it('新市场尚无盘口（book 为 null）不告警、不降级', async () => {
     store.registerWatch(watch(), NOW)
     const poller = new PmPoller({
@@ -600,6 +615,7 @@ describe('pm 规则族（plan §4.4 表 / T1.10，专项 ④）', () => {
     expect(jump?.purpose).toBe('novelty')
     expect(jump?.severity).toBe('P1')
     expect(jump?.payload.estimator).toBe('mid')
+    expect(jump?.payload.lookback).toBe('1h')
     expect(jump?.payload.prob).toBe(0.7)
     expect(jump?.isTradeTrigger).toBe(false)
   })
@@ -656,6 +672,30 @@ describe('pm 规则族（plan §4.4 表 / T1.10，专项 ④）', () => {
       CFG,
     )
     expect(offList).toHaveLength(0)
+  })
+
+  it('跳变窗口可配（plan 只写"窗口阈值"，没规定长度）', () => {
+    const long = { ...CFG, jumpLookback: '24h' as const, probJumpAbs: 0.05 }
+    expect(() => assertPmRuleConfig(long)).not.toThrow()
+    // 1h 没动、24h 动了 ⇒ 只有 24h 窗口会发信号
+    store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
+    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
+    store.recordSeries(
+      '111',
+      [
+        { ts: NOW - 25 * HOUR, price: 0.9 },
+        { ts: NOW - 1 * HOUR, price: 0.42 },
+        { ts: NOW, price: 0.42 },
+      ],
+      { source: 'x', observedAt: NOW },
+    )
+    const snapshots = store.snapshotAt(NOW)
+    expect(evaluatePmRules({ now: NOW, snapshots }, CFG).some((s) => s.ruleId === 'pm_prob_jump')).toBe(false)
+    const long24 = evaluatePmRules({ now: NOW, snapshots }, long).find((s) => s.ruleId === 'pm_prob_jump')
+    expect(long24?.payload.lookback).toBe('24h')
+    expect(long24?.payload.change24h).toBeCloseTo(-0.48, 10)
+
+    expect(() => assertPmRuleConfig({ ...CFG, jumpLookback: '5m' as never })).toThrow(/jumpLookback/)
   })
 
   it('配置自检：prob_jump 冷却低于 15min 直接拒绝', () => {

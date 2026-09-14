@@ -13,6 +13,7 @@
  */
 
 import type { Clock, Disposer } from '../clock.js'
+import type { PmInterval } from './client.js'
 import type { PmAliasSnapshot, PmStore, WatchRow } from './store.js'
 
 /** 轮询器需要的最小客户端面（便于注入假客户端做故障注入）。 */
@@ -21,6 +22,7 @@ export interface PmPollerClients {
     readonly markets: (options: {
       readonly limit?: number
       readonly newestFirst?: boolean
+      readonly order?: 'startDate' | 'volume24hr' | 'oneDayPriceChange' | 'liquidity'
       readonly closed?: boolean
     }) => Promise<{ readonly items: readonly unknown[] }>
   }
@@ -38,7 +40,7 @@ export interface PmPollerClients {
   readonly dataApi: {
     readonly pricesHistory: (options: {
       readonly tokenId: string
-      readonly interval?: '1d' | '1w'
+      readonly interval?: PmInterval
       readonly bucketSeconds?: number
     }) => Promise<readonly { readonly ts: number; readonly price: number }[]>
   }
@@ -53,7 +55,7 @@ export interface PmPollerOptions {
   /** 轮询周期；默认 60s（plan §4.4：轮询满足 60s 级需求）。 */
   readonly intervalMs?: number
   /** 每个 token 回补多少历史（`1d` 实测可用）。 */
-  readonly historyInterval?: '1d' | '1w'
+  readonly historyInterval?: PmInterval
   /** 元数据刷新：每次轮询取多少最新市场。 */
   readonly marketPageSize?: number
 }
@@ -98,8 +100,15 @@ export class PmPoller {
 
     const expiredWatches = store.expireWatches(now)
     const watches = store.activeWatches(now)
-    /** token → 元数据里的流动性与 24h 成交额（盘口端不提供这两项）。 */
-    const perToken: Record<string, { liquidity: number | null; volume24h: number | null }> = {}
+    /**
+     * token → 元数据里的流动性 / 24h 成交额 / 最新成交价。
+     * 盘口端只给 bid/ask；**没有成交价的兜底，没有 orderbook 的市场就完全没有概率** ——
+     * 而 Gamma 元数据里本来就有 `lastTradePrice`，那是 `estimateProbability` 的合法退化路径。
+     */
+    const perToken: Record<
+      string,
+      { liquidity: number | null; volume24h: number | null; lastTradePrice: number | null }
+    > = {}
 
     // ① 元数据：取最新市场（存在门控由 store 读取侧把关）
     try {
@@ -112,7 +121,11 @@ export class PmPoller {
         store.upsertMarket(asMarket, now)
         marketsSeen += 1
         for (const tokenId of asMarket.clobTokenIds) {
-          perToken[tokenId] = { liquidity: asMarket.liquidity, volume24h: asMarket.volume24hr }
+          perToken[tokenId] = {
+            liquidity: asMarket.liquidity,
+            volume24h: asMarket.volume24hr,
+            lastTradePrice: asMarket.lastTradePrice,
+          }
         }
       }
     } catch (error) {
@@ -155,6 +168,10 @@ export class PmPoller {
           ...(meta?.volume24h === null || meta?.volume24h === undefined
             ? {}
             : { volume24h: meta.volume24h }),
+          // 概率的退化路径：没有盘口中间价时用元数据里的最新成交价
+          ...(meta?.lastTradePrice === null || meta?.lastTradePrice === undefined
+            ? {}
+            : { lastTradePrice: meta.lastTradePrice }),
         })
         if (wrote) quotesWritten += 1
         tokensRefreshed += 1

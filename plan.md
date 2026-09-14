@@ -571,8 +571,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── util/canonical.ts                             # ★ 规范化 JSON + 指纹（幂等根）
         ├── market/{types,normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime,indicators,features,feature-archive,context}.ts
         ├── plan/{schema,dsl,evaluate,match,store}.ts      # ★ 新增：§3 的落点
-        ├── predictions/pit.ts                             # ★ §4.4 PIT 三闸门（已建）
-        ├── predictions/{client,store,poller,watch}.ts     # ★ §4.4 事件源（只读，T1.8/T1.9）
+        ├── predictions/{pit,client,store,poller,rules,wiring,runtime}.ts   # ★ §4.4 事件源（只读）
         ├── trigger/{queue,engine,runtime}.ts
         ├── memory/{recall,settle}.ts                      # ★ 教训检索（TTL 执行）+ 交易级结算
         ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay}.ts
@@ -581,8 +580,9 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
 
-> 目录是**目标形态**；未建的模块在 WBS 里对应 T1.5–T1.11。已落地的部分与上表一致
-> （`memory/recall` 与 `memory/settle` 已存在，`journal` 落在 `exec/`，因为它是执行链的账本）。
+> T1.1–T1.11 均已落地，目录与上表一致（`journal` 落在 `exec/`，因为它是执行链的账本）。
+> `predictions/watch.ts` 未单独成文件：watch 治理落在 `store.ts`（写入侧强制），
+> pm 规则族落在 `rules.ts`，接线落在 `wiring.ts` —— 三处都比"一个 watch.ts"更靠近各自的职责。
 
 ### 9.2 `package.json` 打包修正（原文档此处会加载失败）
 
@@ -631,6 +631,9 @@ patch 引用的子路径必须在 `exports` 里可达：
 | **P4 离线整合**（长期） | sleep-time 复盘与提案 | 周级复盘、playbook 提案、regime 检索、M3 版本化 | 每周产出可读复盘；playbook 变更**必须人工批准**；记忆块有版本与 diff，可回答"为什么改掉" |
 
 **预测市场事件源专项验收（并入 P1，全部可自动判定）**：
+**可运行判定**：`node scripts/pm-pit-check.mjs 30` → 真实数据 + 落库后 SQL 断言；
+首轮结果**全部通过**（`docs/pm-pit-acceptance-2026-09-14.md`）。**非空跑由 `pm_signals_exercised` 守住** ——
+第一版脚本就因为取了远期政治盘（日变化 ≈0.001）而在 0 行上"通过"，被这条检查抓了出来。
 ① 回放 30 天：**不存在**"市场未创建即被引用"或"结算结果提前可见"（SQL 断言命中行数 = 0）；② 所有 `pm_series.ts` 为**毫秒整数**且与源秒值可逆（`×1000`，边界单测）；③ 同一 alias 的 `prob` 在工具返回与告警 payload 中**估计量一致**；④ 低于流动性门槛的市场产生的 novelty 告警数 = **0**；⑤ 任意 10s 窗口对 gamma/clob/data-api 的请求数 ≤ 各自官方限额的 **20%**（令牌桶单测）；⑥ 轮询连续失败 N 次 → 降级为 `info` 告警且**交易主循环不受影响**（故障注入）；⑦ 热路径调用 v2 `as_of` 次数 = **0**（`as_of` 仅用于审计重建）；⑧ 未注册 alias 的 `when` 一律 UNCOVERED，**零静默 false**。
 
 ---
@@ -660,9 +663,9 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取（§8.1），决策回填 token/耗时/触发来源 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据；已可运行（`scripts/ab-gate.mjs`），首轮判定见 `docs/p1.5-gate-run-2026-09-14.md`；**LLM 判断臂仍需凭据**（§12 #20） |
 | T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦；**已实测**（`docs/pm-client-live-2026-09-14.md`），修正了 plan 表格里三处单位/语义错误 |
-| T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ |
-| T1.10 | `trade_prediction_watch` + watch 治理（TTL/上限/去重/冷却）+ pm 规则族 + W3 接线 | T1.9, T0.7 | §10 专项 ④；novelty 只走 W3 限流 |
-| T1.11 | `plugins/predictions.ts` 插件 + patch 行 + Config（enabled/pollMs/上限/门槛） | T1.9 | `--dump-config` 列出该行 |
+| T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ ✅ |
+| T1.10 | `trade_prediction_watch` + watch 治理（TTL/上限/去重/冷却）+ pm 规则族 + W3 接线 | T1.9, T0.7 | §10 专项 ④ ✅；novelty 与行情共享同一份预算（有测试） |
+| T1.11 | `plugins/predictions.ts` 插件 + patch 行 + Config（enabled/pollMs/上限/门槛） | T1.9 | `--dump-config` 列出该行（实测 11 行、exit 0） |
 | T2.* | CcxtBroker / 对账 / watchdog / `/halt` / 故障注入 | T1.* | §10 P2 四条 |
 | T3.* | 限额与告警打磨、`live_auto` 切换 | T2.* | §10 P3 |
 | T4.* | 周级复盘、playbook 提案、regime 检索、M3 版本化 | T3.* | §10 P4 |
@@ -685,7 +688,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 10 | **Polymarket WSS 走不了代理**：Node `ws` 不自动使用 `HTTP(S)_PROXY`（同一端点的 HTTPS 正常）⇒ 需要 `https-proxy-agent` 之类的 agent，或永久走轮询 | P1 中 | 轮询已是可用的默认路径 |
 | 11 | **pm 是否允许作为"承诺"触发**（vs 仅 novelty/info） | P1.5 | 由 A/B 回放判定，防止把市场情绪当信号 |
 | 12 | 多结果 / negRisk 事件的概率归一化与一致性校验（同一 negRisk 事件下概率和 ≈1） | P1 中 | 影响别名与规则族 |
-| 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | T1.8 | 影响回放覆盖面；取值走白名单 |
+| 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | ✅ 已验证 | **v2 `interval=1m` 实测可用且覆盖 30 天（1441 点）**，已入白名单；`max` 行为不一致（plan 记超时，本次实测某 token 返回 248 点/3 个月）⇒ 不入白名单 |
 | 14 | **ccxt 自带 fetch 不读代理环境变量**：本机有 `HTTP(S)_PROXY` 且 `NODE_USE_ENV_PROXY=1`；不注入全局 fetch 时 HTX 报 `ECONNREFUSED`、OKX 超时，注入后正常 | ✅ 已解决 | `applyProxyAwareFetch()` 已实现，且在 `createMarketRuntime` 默认启用；2026-09-14 实测 HTX 30 天 1h 回补：720 根取回、**719 根落库全部为已收盘 bar**（进行中的那根被正确排除） |
 | 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
 | 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |

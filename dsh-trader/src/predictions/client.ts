@@ -255,6 +255,12 @@ export interface PmGammaMarket {
   /** 所属事件（tags 挂在事件上，`/markets` 不返回顶层 tags）。 */
   readonly events: readonly { readonly id: string; readonly slug: string; readonly title: string }[]
   readonly lastTradePrice: number | null
+  /**
+   * 源自己给出的变化量（概率单位）。用来**挑选"真的动过"的样本**，
+   * 不参与决策计算 —— 决策侧仍以我们自己的序列为准（口径必须单一）。
+   */
+  readonly oneDayPriceChange: number | null
+  readonly oneWeekPriceChange: number | null
   /** 市场创建者书写的文本 ⇒ **不可信输入**，只当数据、绝不参与工具授权。 */
   readonly untrustedText: { readonly question: string; readonly description: string | null }
   readonly lifecycle: { readonly resolved: boolean; readonly winningOutcome: string | null }
@@ -280,6 +286,8 @@ interface RawGammaMarket {
   bestAsk?: unknown
   spread?: unknown
   lastTradePrice?: unknown
+  oneDayPriceChange?: unknown
+  oneWeekPriceChange?: unknown
   volume24hr?: unknown
   volume24hrClob?: unknown
   volumeNum?: unknown
@@ -351,6 +359,8 @@ export function normalizeGammaMarket(raw: RawGammaMarket): PmGammaMarket {
     bestAsk: numeric(raw.bestAsk),
     spread: numeric(raw.spread),
     lastTradePrice: numeric(raw.lastTradePrice),
+    oneDayPriceChange: numeric(raw.oneDayPriceChange),
+    oneWeekPriceChange: numeric(raw.oneWeekPriceChange),
     volume24hr: numeric(raw.volumeNum, raw.volume24hrClob, raw.volume24hr),
     liquidity: numeric(raw.liquidityNum, raw.liquidity),
     // 缺失的时间戳退化到 0（= 远古）而不是 now：宁可不引用，也不要"看起来刚创建"
@@ -382,11 +392,18 @@ export function normalizeGammaMarket(raw: RawGammaMarket): PmGammaMarket {
   }
 }
 
+/** 实测可用的排序字段（`/markets?order=…`）。 */
+export const GAMMA_ORDERS = ['startDate', 'volume24hr', 'oneDayPriceChange', 'liquidity'] as const
+export type GammaOrder = (typeof GAMMA_ORDERS)[number]
+
 export interface GammaListOptions {
   readonly limit?: number
   readonly tag?: string
   /** `startDate` 倒序 —— 用于"发现新市场"。 */
   readonly newestFirst?: boolean
+  /** 按哪个字段排序；`oneDayPriceChange` 倒序 = "今天真的动过的市场"。 */
+  readonly order?: GammaOrder
+  readonly ascending?: boolean
   readonly cursor?: string
   readonly closed?: boolean
 }
@@ -400,10 +417,11 @@ export class GammaClient {
   }
 
   async markets(options: GammaListOptions = {}): Promise<PmPage<PmGammaMarket>> {
+    const order = options.order ?? (options.newestFirst === true ? 'startDate' : undefined)
     const body = await this.http.getJson('gamma', 'markets', '/markets', {
       limit: options.limit ?? 100,
       ...(options.tag === undefined ? {} : { tag_id: options.tag }),
-      ...(options.newestFirst === true ? { order: 'startDate', ascending: 'false' } : {}),
+      ...(order === undefined ? {} : { order, ascending: options.ascending === true ? 'true' : 'false' }),
       ...(options.closed === undefined ? {} : { closed: String(options.closed) }),
       ...(options.cursor === undefined ? {} : { after_cursor: options.cursor }),
     })
@@ -501,8 +519,16 @@ export class ClobClient {
   }
 }
 
-/** 实测可用的取值白名单：`1h` 返回 0 行、`max` 超时 ⇒ **禁止**未验证取值。 */
-export const PM_INTERVALS = ['1d', '1w'] as const
+/**
+ * 实测可用的取值白名单：
+ *   · v1 `1d`/`1w` 可用；`1h` 返回 0 行；
+ *   · v2 `1d`=1442 点/1 天、`1w`=2013 点/7 天、**`1m`=1441 点/30 天**（2026-09-14 实测，
+ *     30 天覆盖是 PIT 回放需要的）；
+ *   · `max` 行为**不一致**：plan §4.4 记的是"超时"，本次实测对某 token 返回 248 点/3 个月
+ *     （分辨率很粗）⇒ 不放进白名单，需要时单独验证。
+ * 禁止未验证取值：拿不到数据与"概率没变"在数据上无法区分。
+ */
+export const PM_INTERVALS = ['1d', '1w', '1m'] as const
 export type PmInterval = (typeof PM_INTERVALS)[number]
 
 // ── Data API v2：历史（含点时刻，仅审计）────────────────────────────────────

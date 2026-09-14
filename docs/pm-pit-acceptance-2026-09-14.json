@@ -1,0 +1,502 @@
+{
+  "ranAt": "2026-09-14T15:41:55.658Z",
+  "requestedDays": 30,
+  "market": {
+    "slug": "highest-temperature-in-hong-kong-on-september-14-2026-28c",
+    "conditionId": "0x118959cdb97704ff8ed5d0769cd8a34ec8c54b4e1bcaeb325eb93ab095e96733",
+    "createdAt": 1789189001113,
+    "createdAtIso": "2026-09-12T04:56:41.113Z",
+    "liquidity": 3426.40549,
+    "spread": 0.002
+  },
+  "series": {
+    "points": 120,
+    "spanDays": 29.99
+  },
+  "book": {
+    "bids": 22,
+    "asks": 0
+  },
+  "seeded": [
+    {
+      "alias": "mkt_0",
+      "tokenId": "4478899363141277273222204152562190919155813299972517415804497036469160759577",
+      "slug": "highest-temperature-in-hong-kong-on-september-14-2026-28c",
+      "liquidity": 3426.40549,
+      "points": 120,
+      "spanDays": 2.465497685185185,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_1",
+      "tokenId": "18937143905787980845393241905747004871906766192313936911196285650655818425623",
+      "slug": "will-chicago-bears-score-the-most-points-in-week-1-of-the-2026-27-nfl-regular-season",
+      "liquidity": 6.02754,
+      "points": 226,
+      "spanDays": 4.799143518518519,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_2",
+      "tokenId": "100482685098592993894400367861938635770547167180436163439367687512841574258231",
+      "slug": "ukr1-dyn-epi-2026-09-14-exact-score-3-0",
+      "liquidity": 3287.51772,
+      "points": 638,
+      "spanDays": 13.278611111111111,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_3",
+      "tokenId": "72391731719106461752550409142751876619679554747473898939888751967086267192052",
+      "slug": "lowest-temperature-in-wuhan-on-september-14-2026-20c",
+      "liquidity": 731.07245,
+      "points": 120,
+      "spanDays": 2.465497685185185,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_4",
+      "tokenId": "39870676644377263240964878519803057798513781998854146402511968599352884193909",
+      "slug": "highest-temperature-in-wuhan-on-september-14-2026-33c",
+      "liquidity": 8567.7565,
+      "points": 120,
+      "spanDays": 2.465497685185185,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_5",
+      "tokenId": "113642644614717557784162023835139794839996371547077610729871502911626205674567",
+      "slug": "highest-temperature-in-chengdu-on-september-14-2026-22corbelow",
+      "liquidity": 7635.10122,
+      "points": 120,
+      "spanDays": 2.4659722222222222,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_6",
+      "tokenId": "103290509686363360145148473994465869554198714541901567625811845697416605611720",
+      "slug": "highest-temperature-in-paris-on-september-14-2026-29c",
+      "liquidity": 211.5067,
+      "points": 120,
+      "spanDays": 2.465127314814815,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_7",
+      "tokenId": "10888719830548914139618338495216034291253618711792425027867634924790785050732",
+      "slug": "highest-temperature-in-beijing-on-september-14-2026-26c",
+      "liquidity": 8746.02961,
+      "points": 120,
+      "spanDays": 2.4652199074074073,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_8",
+      "tokenId": "50488700452691067490906086565189821313286034619241171842249833693744448252087",
+      "slug": "msft-close-above-500-on-september-14-2026",
+      "liquidity": 2838.6435,
+      "points": 153,
+      "spanDays": 3.1536689814814816,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_9",
+      "tokenId": "51854211389500496929237755530573799216954178494541690641844077362398275719684",
+      "slug": "highest-temperature-in-shenzhen-on-september-14-2026-30c",
+      "liquidity": 2335.5852,
+      "points": 120,
+      "spanDays": 2.4661574074074073,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_10",
+      "tokenId": "45778923200105820809932919865701136938188354699453025580148661102115320494979",
+      "slug": "highest-temperature-in-taipei-on-september-14-2026-33c",
+      "liquidity": 4433.99752,
+      "points": 120,
+      "spanDays": 2.465497685185185,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_11",
+      "tokenId": "89426082982630435760236042519244212932571884271930311577671345564814920359150",
+      "slug": "will-sweden-democrats-sd-win-between-16-and-18-of-all-valid-votes-20260812172636422",
+      "liquidity": 19240.63317,
+      "points": 1441,
+      "spanDays": 29.987083333333334,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_12",
+      "tokenId": "66206905450770274890585668272018086613248204881864577944475014844697436085992",
+      "slug": "lowest-temperature-in-hong-kong-on-september-14-2026-26c",
+      "liquidity": 5790.42499,
+      "points": 120,
+      "spanDays": 2.466261574074074,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_13",
+      "tokenId": "21087497871276855276095015391607038795799602210305075213624645872684816298371",
+      "slug": "lowest-temperature-in-milan-on-september-14-2026-15c",
+      "liquidity": 523.01087,
+      "points": 120,
+      "spanDays": 2.466261574074074,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_14",
+      "tokenId": "27052107924989981635803941569783148318980524148011816504038810008201387836760",
+      "slug": "googl-close-above-340-on-september-14-2026",
+      "liquidity": 18222.59722,
+      "points": 153,
+      "spanDays": 3.1537847222222224,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_15",
+      "tokenId": "79709195525012236844701790620367729104252761457258208490019882233544672791619",
+      "slug": "highest-temperature-in-jeddah-on-september-14-2026-37c",
+      "liquidity": 1877.11275,
+      "points": 120,
+      "spanDays": 2.466261574074074,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_16",
+      "tokenId": "114711720574692959383689453865607917518478214078817284606441981163227387362029",
+      "slug": "highest-temperature-in-karachi-on-september-14-2026-39corhigher",
+      "liquidity": 3692.01976,
+      "points": 119,
+      "spanDays": 2.4444675925925927,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_17",
+      "tokenId": "102585277259109717426694039027060612859026956482499766982518082125924901315833",
+      "slug": "will-trevor-lawrence-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-passing-touchdowns",
+      "liquidity": 5588.9595,
+      "points": 231,
+      "spanDays": 4.799386574074074,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_18",
+      "tokenId": "36772222451687800267836694148542896405126044030224490573215235709127005074742",
+      "slug": "pltr-up-or-down-on-september-14-2026",
+      "liquidity": 21192.10999,
+      "points": 141,
+      "spanDays": 3.1538078703703705,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_19",
+      "tokenId": "40326812859998624276292075838013021900310126557281236961753338041972547068501",
+      "slug": "highest-temperature-in-chongqing-on-september-14-2026-23corbelow",
+      "liquidity": 1035.56145,
+      "points": 120,
+      "spanDays": 2.4658796296296295,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_20",
+      "tokenId": "79407368312325642649129663281021505136974919123785062185108115301590083588838",
+      "slug": "will-the-sweden-democrats-sd-win-the-third-most-seats-in-the-2026-swedish-parliamentary-election",
+      "liquidity": 41158.04562,
+      "points": 1441,
+      "spanDays": 29.987199074074073,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_21",
+      "tokenId": "52334878018814685972547014875009160054717120171100348069688980422350429906466",
+      "slug": "will-the-moderate-party-m-win-the-second-most-seats-in-the-2026-swedish-parliamentary-election",
+      "liquidity": 31980.30878,
+      "points": 1434,
+      "spanDays": 29.98721064814815,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_22",
+      "tokenId": "23504000255433317123702854201729314481832151049031484919433864804748916677445",
+      "slug": "will-drake-maye-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-interceptions-thrown",
+      "liquidity": 766.4775,
+      "points": 226,
+      "spanDays": 4.799328703703703,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_23",
+      "tokenId": "42126033836733969444818794857462639095308519636297137670283535611266822454183",
+      "slug": "will-the-price-of-bitcoin-be-between-78000-80000-on-september-14-2026",
+      "liquidity": 5359.27,
+      "points": 58,
+      "spanDays": 7.028900462962963,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_24",
+      "tokenId": "79198504233445388633990738115059932668009112667137134233106822119968960631966",
+      "slug": "lowest-temperature-in-moscow-on-september-14-2026-8c",
+      "liquidity": 76.2058,
+      "points": 120,
+      "spanDays": 2.4658101851851852,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_25",
+      "tokenId": "53489057312116667971129409256203307862079591526766473798129486593693798461313",
+      "slug": "coin-up-or-down-on-september-14-2026",
+      "liquidity": 922.24251,
+      "points": 141,
+      "spanDays": 3.153865740740741,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_26",
+      "tokenId": "74787032410529411162826822210195406163735599664419023792670536712805285594477",
+      "slug": "lowest-temperature-in-chengdu-on-september-14-2026-19c",
+      "liquidity": 490.815,
+      "points": 120,
+      "spanDays": 2.4656018518518517,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_27",
+      "tokenId": "58529047902736704243761301636998482191315800495642012793808199005046385147910",
+      "slug": "ukr1-dyn-epi-2026-09-14-spread-home-2pt5",
+      "liquidity": 28171.43124,
+      "points": 542,
+      "spanDays": 12.403310185185186,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_28",
+      "tokenId": "8896158652130023171560573460278059906623049434272380107293830633980798807368",
+      "slug": "will-mamdani-say-trump-or-president-during-his-announcement-20260930-20260831-20260910",
+      "liquidity": 199.09549,
+      "points": 127,
+      "spanDays": 2.6324768518518518,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_29",
+      "tokenId": "63620156659960885309051395530365403426760637045690577908008552033550572895447",
+      "slug": "will-the-centre-party-c-win-the-fifth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320204",
+      "liquidity": 14980.90268,
+      "points": 1441,
+      "spanDays": 29.987256944444443,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_30",
+      "tokenId": "46966022805249481872778076487472732361949144961608679144118111615996040681612",
+      "slug": "highest-temperature-in-warsaw-on-september-14-2026-19c",
+      "liquidity": 713.00373,
+      "points": 120,
+      "spanDays": 2.4664467592592594,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_31",
+      "tokenId": "25327866806329713282667550111576673131225192433542967028331185703098437172893",
+      "slug": "highest-temperature-in-madrid-on-september-14-2026-35c",
+      "liquidity": 474.5454,
+      "points": 120,
+      "spanDays": 2.4664930555555555,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_32",
+      "tokenId": "10569632538224194790555815918532629872231216192310665357525564127976982132749",
+      "slug": "lowest-temperature-in-singapore-on-september-14-2026-27c",
+      "liquidity": 142.4935,
+      "points": 120,
+      "spanDays": 2.4658101851851852,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_33",
+      "tokenId": "48022243325887371135806599534509493010922047343751329135001838073722002863204",
+      "slug": "bitcoin-above-78k-on-september-14-2026",
+      "liquidity": 15604.4382,
+      "points": 58,
+      "spanDays": 7.0289930555555555,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_34",
+      "tokenId": "6555605928239139880719054983349807316843708784990662901472667043336130568532",
+      "slug": "will-mamdani-say-safe-or-safer-or-safety-during-his-announcement-20260930-20260831-20260910",
+      "liquidity": 297.31855,
+      "points": 128,
+      "spanDays": 2.6324768518518518,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_35",
+      "tokenId": "80585660524733251754116445257255304923979666505292193509793135145163510920780",
+      "slug": "lowest-temperature-in-guangzhou-on-september-14-2026-27c",
+      "liquidity": 96.06,
+      "points": 120,
+      "spanDays": 2.465902777777778,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_36",
+      "tokenId": "110203993905240827154185754735122393066222924406372432499177433483064111945527",
+      "slug": "will-the-left-party-v-win-the-fourth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320105",
+      "liquidity": 19474.86994,
+      "points": 1441,
+      "spanDays": 29.987314814814816,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_37",
+      "tokenId": "97312892812033894560930985055620125345903339977772484895638585454327418323618",
+      "slug": "lowest-temperature-in-beijing-on-september-14-2026-13c",
+      "liquidity": 184.9113,
+      "points": 120,
+      "spanDays": 2.46650462962963,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_38",
+      "tokenId": "114144606258170740271015593967436522986189691527212663935743602361990323600293",
+      "slug": "will-mamdani-say-school-during-his-announcement-20260930-20260831-20260910",
+      "liquidity": 129.39802,
+      "points": 125,
+      "spanDays": 2.6331712962962963,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_39",
+      "tokenId": "43895729998910727554192822660436783386794137814588938463976737412170187802198",
+      "slug": "msft-up-or-down-on-september-14-2026",
+      "liquidity": 20766.45659,
+      "points": 144,
+      "spanDays": 3.15400462962963,
+      "hasProb": true
+    }
+  ],
+  "watch": {
+    "alias": "mkt_0",
+    "tokenId": "4478899363141277273222204152562190919155813299972517415804497036469160759577",
+    "snapshots": 40
+  },
+  "acceptanceRules": {
+    "jumpLookback": "24h",
+    "probJumpAbs": 0.03,
+    "spreadCeilBps": 300
+  },
+  "signals": [
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_17",
+      "purpose": "info",
+      "severity": "P2",
+      "estimator": "mid",
+      "change": null,
+      "lookback": null
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_22",
+      "purpose": "info",
+      "severity": "P2",
+      "estimator": "mid",
+      "change": null,
+      "lookback": null
+    },
+    {
+      "ruleId": "pm_prob_jump",
+      "alias": "mkt_39",
+      "purpose": "novelty",
+      "severity": "P1",
+      "estimator": "mid",
+      "change": 0.7215,
+      "lookback": "24h"
+    }
+  ],
+  "defaultConfigSignals": [
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_17"
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_22"
+    },
+    {
+      "ruleId": "pm_prob_jump",
+      "alias": "mkt_39"
+    }
+  ],
+  "routed": [
+    {
+      "ruleId": "pm_spread_blowout",
+      "wake": "none",
+      "disposition": {
+        "kind": "info"
+      }
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "wake": "none",
+      "disposition": {
+        "kind": "info"
+      }
+    },
+    {
+      "ruleId": "pm_prob_jump",
+      "wake": "W3",
+      "disposition": {
+        "kind": "novelty"
+      }
+    }
+  ],
+  "sql": {
+    "existenceViolations": 0,
+    "resolutionViolations": 0,
+    "noveltyRows": 1,
+    "thinNovelty": 0,
+    "estimatorMismatches": 0
+  },
+  "evaluator": {
+    "registered": {
+      "ok": true,
+      "value": false
+    },
+    "unregistered": {
+      "ok": false,
+      "reason": "求值失败：未知取值 pm.definitely_not_registered.prob"
+    }
+  },
+  "clientStats": {
+    "requests": 81,
+    "retries": 0,
+    "failures": 0,
+    "consecutiveFailures": 0,
+    "degraded": false,
+    "asOfCalls": 0,
+    "tokens": {
+      "gamma:markets": 59,
+      "dataApi:prices-history": 0,
+      "clob:book": 260
+    }
+  },
+  "checks": {
+    "pm_signals_exercised": true,
+    "existence_gate_zero_violations": true,
+    "resolution_gate_zero_violations": true,
+    "thin_market_novelty_zero": true,
+    "estimator_consistent": true,
+    "unregistered_alias_uncovered": true,
+    "registered_alias_evaluates": true,
+    "hot_path_as_of_zero": true,
+    "token_buckets_never_negative": true,
+    "series_span_covers_window": true
+  },
+  "allPassed": true,
+  "note": "真实数据 + 落库后 SQL 断言。判据 ② 的毫秒整数与 ⑥ 的降级由单测覆盖（这里只跑真实链路）。若样本里没有任何市场真的跳变，判据 ③④ 会空跑 —— pm_signals_exercised 专门拦住这种\"假通过\"。"
+}
