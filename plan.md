@@ -224,7 +224,7 @@ CREATE TABLE triggers(
   trigger_id TEXT PRIMARY KEY, dedup_key TEXT NOT NULL UNIQUE, symbol TEXT,
   rule_id TEXT, purpose TEXT NOT NULL, bar_ts INTEGER, payload_json TEXT NOT NULL,
   -- 最终去向。只有 novelty/judgment 消耗唤醒预算；被冷却/限流压掉的仍然落库但不算预算
-  disposition TEXT NOT NULL CHECK(disposition IN('info','novelty','judgment','cooldown','rate_limited')),
+  disposition TEXT NOT NULL CHECK(disposition IN('info','novelty','judgment','cooldown','rate_limited','executed')),
   state TEXT NOT NULL CHECK(state IN('queued','claimed','done','expired')),
   created_at INTEGER NOT NULL, expires_at INTEGER);
 
@@ -469,6 +469,7 @@ validateIntent(intent, portfolio, config):
 - **可显式放弃（风险自负）**：`waiver: true` 是**一等公民路径**。放弃后 `limits === null`，但**安全机制不随之放弃**：幂等、对账、心跳熔断照常生效（§6.3）；硬闸保留"永远生效"的三条检查（§6.2）。
 - **放弃必须留痕且持续可见**：写入 `config_versions`（含 `waiver` 标记）与 `audit_events`，启动摘要显式回显"当前无风控"；允许随时补上参数，补上即刻生效。
 - **参数进 prompt，但只作提示**：真正的强制在硬闸（§6.2）—— 二者都要，不能只做前者。
+- **参数必须自洽**：`riskPct`、止损距离与单笔名义上限要相互自洽 —— `notional ≈ equity × riskPct ÷ (stopDistance / price)`。BTC 的 2×ATR 止损只有价格的 ~0.5%，所以 `riskPct = 1%` 会推出约 **2× 权益**的名义金额，必然被单笔上限拒绝。**不自洽时启动就该拒绝**，而不是让每一单都在硬闸处被打回（见 §12 #17）。
 - **运行期变更**：只允许人工命令修改，且改配置本身是一条审计事件（§13 纪律 7「审计优先」）。
 
 ---
@@ -629,6 +630,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 14 | **ccxt 自带 fetch 不读代理环境变量**：本机有 `HTTP(S)_PROXY` 且 `NODE_USE_ENV_PROXY=1`；不注入全局 fetch 时 HTX 报 `ECONNREFUSED`、OKX 超时，注入后正常 | ✅ 已解决 | `applyProxyAwareFetch()` 已实现，且在 `createMarketRuntime` 默认启用；2026-09-14 实测 HTX 30 天 1h 回补：720 根取回、**719 根落库全部为已收盘 bar**（进行中的那根被正确排除） |
 | 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
 | 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |
+| 17 | **建议风控参数不自洽**：`SUGGESTED_LIMITS` 的 200/2000 上限与 BTC 尺度不匹配 —— `notional ≈ equity × riskPct ÷ (stopDistance/price)`，实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），改 0.2% 后 104 次成交 | P1 中 | 需要按"止损距离/价格"标定建议参数，并在启动时校验 `riskPct`/止损/上限三者自洽（§6.5） |
 
 ---
 

@@ -11,7 +11,14 @@ import { canonicalJson } from '../util/canonical.js'
 export type TriggerPurpose = 'invalidation' | 'commitment' | 'novelty' | 'info'
 export type TriggerState = 'queued' | 'claimed' | 'done' | 'expired'
 /** 触发最终的去向。**只有 `novelty` / `judgment` 消耗唤醒预算**。 */
-export type TriggerDisposition = 'info' | 'novelty' | 'judgment' | 'cooldown' | 'rate_limited'
+export type TriggerDisposition =
+  | 'info'
+  | 'novelty'
+  | 'judgment'
+  | 'cooldown'
+  | 'rate_limited'
+  /** 被计划卡覆盖并**确定性执行**（零 token）。 */
+  | 'executed'
 
 /** 消耗唤醒预算的去向 —— 冷却/限流压掉的不算（否则被压掉的重试会自我放大预算占用）。 */
 export const BUDGET_DISPOSITIONS: readonly TriggerDisposition[] = ['novelty', 'judgment']

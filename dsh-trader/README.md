@@ -22,7 +22,8 @@
 | §4.4 | 预测市场事件源（Polymarket，**只读**） | 🟡 DDL（4 张表）+ PIT 三道闸门已落地并有单测；client/store/poller/watch/tools 属 T1.8–T1.11 |
 | T0.7 | 规则引擎 + 触发治理（去重/冷却/限流/分级 + `TriggerQueue`） | ✅ 已完成（同一 bar 回放两遍**零重复触发**由 `dedup_key` 唯一键保证；内置 2 个只使用已实现指标的规则包） |
 | T0.8a | 纸面撮合 `exec/paper` + 对账 `exec/reconcile` | ✅ 已完成（滑点/手续费、`clientOrderId` 幂等、保护单为挂单；对账纯函数覆盖孤儿单/未知持仓/无保护单） |
-| T0.8b/T0.9 | 确定性回放 / 探针与压测 | ⬜ 未开始 |
+| T0.8b | 确定性回放 `exec/replay` + `sizing` + `journal` | ✅ 已完成（P0 验收 ②③ 通过：真实 HTX 30 天 719 根回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0、命中全部可归因） |
+| T0.9 | resume/followup 探针 + 24h 压测 | ⬜ 未开始 |
 | P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
 
 ## 开发

@@ -74,6 +74,7 @@ export class PaperBroker implements Broker {
   readonly venue: Venue
   #cash: number
   #positions = new Map<string, PaperPosition>()
+  #lastPrice = new Map<string, number>()
   #orders = new Map<string, PaperOrder>()
   #byClientId = new Map<string, string>()
   #realizedPnl = 0
@@ -95,6 +96,8 @@ export class PaperBroker implements Broker {
    * 撮合按 **bar 内可能的路径** 保守处理：先判止损（不利方向优先），再判止盈。
    */
   onBar(symbol: string, candle: PaperCandle): readonly OrderAck[] {
+    // 回放时 bar 就是价格来源：先记住收盘价，再按 high/low 检查保护单
+    this.#lastPrice.set(symbol, candle.close)
     const acks: OrderAck[] = []
     for (const order of this.#orders.values()) {
       if (order.symbol !== symbol || order.status !== 'acked') continue
@@ -279,7 +282,8 @@ export class PaperBroker implements Broker {
   // ── 内部 ─────────────────────────────────────────────────────────────────
 
   #price(symbol: string): number | undefined {
-    return this.options.book.price(symbol)
+    // 优先用最近一根 bar 的收盘价（回放/纸面），否则回落到注入的 book
+    return this.#lastPrice.get(symbol) ?? this.options.book.price(symbol)
   }
 
   #withSlippage(reference: number, side: OrderSide): number {

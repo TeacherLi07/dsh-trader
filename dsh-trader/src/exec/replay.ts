@@ -1,0 +1,493 @@
+/**
+ * 确定性回放（plan §10 P0 验收 ②③ / T0.8b）。
+ *
+ * 一条链路走到底：**bar → 保护单检查 → 特征 → 计划卡匹配 → 执行(硬闸) → 规则/触发**。
+ * 全部时间来自注入的 `Clock`、全部价格来自归档 bar，因此"回放两遍结果完全一致"可被断言。
+ *
+ * 日志契约（验收 ③「每次命中都能归因」）：
+ *   · `matched:<conditionId>`  —— 计划卡条件命中并确定性执行（零 token）
+ *   · `UNCOVERED:<reason>`     —— 计划卡条件无法求值
+ *   · `UNCOVERED:rule:<ruleId>` —— 判断类规则命中但计划卡没覆盖（W2 输入）
+ *   · `rule:<ruleId>:<disposition>` —— 每条规则命中都有一条归属记录
+ *   · `denied:<conditionId>:<reason>` —— 被硬闸拒绝
+ */
+
+import type Database from 'better-sqlite3'
+import { ReplayClock, type Clock } from '../clock.js'
+import type { RiskLimits, RunMode } from '../config.js'
+import { BarArchive } from '../market/archive.js'
+import { createFeatureContext } from '../market/context.js'
+import { FeatureEngine } from '../market/features.js'
+import { matchPlan, planDedupKey } from '../plan/match.js'
+import type {
+  LevelAction,
+  OpenAction,
+  PlanAction,
+  PlanCard,
+  ReduceAction,
+  TrailingAction,
+} from '../plan/schema.js'
+import { PlanStore } from '../plan/store.js'
+import { RuleWatch, TriggerGovernor, type RuleSpec } from '../trigger/engine.js'
+import type { TriggerQueue } from '../trigger/queue.js'
+import { fingerprint } from '../util/canonical.js'
+import { ALLOW, validateIntent, type GatePolicy } from './gate.js'
+import type { AccountSnapshot, Broker, OrderAck, OrderRequest, PositionSnapshot } from './broker.js'
+import { DecisionJournal } from './journal.js'
+import { computeSize, stopPriceFor, takeProfitFor } from './sizing.js'
+
+/** 纸面/回放 broker 额外提供"用一根 bar 推进撮合"的能力。 */
+export interface ReplayBroker extends Broker {
+  onBar(symbol: string, candle: { high: number; low: number; close: number }): readonly OrderAck[]
+  realizedPnl?(): number
+}
+
+export interface ReplayDeps {
+  readonly db: Database.Database
+  readonly bars: BarArchive
+  readonly plans: PlanStore
+  readonly queue: TriggerQueue
+  readonly broker: ReplayBroker
+  readonly clock: Clock
+  readonly rules?: readonly RuleSpec[]
+  readonly riskPct: number
+  readonly mode: RunMode
+  readonly limits: RiskLimits | null
+}
+
+export interface ReplayRequest {
+  readonly symbol: string
+  readonly timeframe: string
+  readonly since: number
+  readonly until: number
+  readonly maxBars?: number
+}
+
+export interface ReplayCounters {
+  readonly bars: number
+  readonly matched: number
+  readonly uncovered: number
+  readonly denied: number
+  readonly executed: number
+}
+
+export interface ReplayResult {
+  readonly counters: ReplayCounters
+  readonly decisionIds: readonly string[]
+  readonly intentIds: readonly string[]
+  readonly clientOrderIds: readonly string[]
+  readonly fillIds: readonly string[]
+  readonly triggerKeys: readonly string[]
+  readonly log: readonly string[]
+  /** 恒应为 0（`client_order_id` 唯一约束）—— P0 验收 ② 的硬指标。 */
+  readonly duplicateClientOrderIds: number
+  readonly realizedPnl: number
+}
+
+interface ExecuteArgs {
+  readonly journal: DecisionJournal
+  readonly broker: Broker
+  readonly clock: Clock
+  readonly plan: PlanCard
+  readonly conditionId: string
+  readonly action: PlanAction
+  readonly symbol: string
+  readonly barTs: number
+  readonly referencePrice: number
+  readonly atr: number | null
+  readonly account: AccountSnapshot
+  readonly position: PositionSnapshot | undefined
+  readonly riskPct: number
+  readonly mode: RunMode
+  readonly limits: RiskLimits | null
+  readonly alreadyIntended: (clientOrderId: string) => boolean
+}
+
+interface ExecuteOutcome {
+  readonly executed: boolean
+  readonly reason?: string
+  readonly decisionId: string
+}
+
+function advanceClock(clock: Clock, ts: number): void {
+  if (clock instanceof ReplayClock) clock.advanceTo(ts)
+}
+
+async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
+  const now = args.clock.now()
+  const decisionId = `dec:${args.plan.planId}:${args.conditionId}:${args.symbol}:${args.barTs}`
+  const clientOrderId = `co:${args.plan.planId}:${args.conditionId}:${args.barTs}`
+  const contextHash = fingerprint({
+    planId: args.plan.planId,
+    conditionId: args.conditionId,
+    symbol: args.symbol,
+    barTs: args.barTs,
+  })
+  const action = args.action
+
+  const record = (
+    executed: boolean,
+    extra: { sizeQty?: number; stopPrice?: number; takeProfit?: number; rationale?: string } = {},
+  ): void => {
+    args.journal.recordDecision({
+      decisionId,
+      symbol: args.symbol,
+      planId: args.plan.planId,
+      decidedAt: now,
+      contextHash,
+      action: action.action,
+      executed,
+      ...extra,
+    })
+  }
+
+  // ── 无订单动作 ────────────────────────────────────────────────────────────
+  if (action.action === 'noop') {
+    record(false, { rationale: 'noop' })
+    return { executed: false, reason: 'noop', decisionId }
+  }
+  if (action.action === 'escalate') {
+    record(false, { rationale: action.reason })
+    return { executed: false, reason: `escalate:${action.reason}`, decisionId }
+  }
+  if (action.action === 'halt') {
+    record(true, { rationale: action.reason ?? 'halt' })
+    return { executed: true, decisionId }
+  }
+  if (action.action === 'cancel_all') {
+    await args.broker.cancelAll(action.scope === 'all' ? undefined : args.symbol)
+    record(true)
+    return { executed: true, decisionId }
+  }
+  if (action.action === 'set_stop' || action.action === 'set_target' || action.action === 'set_trailing') {
+    if (args.position === undefined || args.position.qty === 0) {
+      record(false, { rationale: '无持仓，无法挂保护单' })
+      return { executed: false, reason: '无持仓', decisionId }
+    }
+    const protective =
+      action.action === 'set_stop'
+        ? { stopLossPrice: (action as LevelAction).price }
+        : action.action === 'set_target'
+          ? { takeProfitPrice: (action as LevelAction).price }
+          : { trailingPercent: (action as TrailingAction).percent }
+    const ack = await args.broker.placeProtective({ symbol: args.symbol, ...protective })
+    args.journal.recordIntent({
+      intentId: `pi:${decisionId}`,
+      clientOrderId: `pco:${args.plan.planId}:${args.conditionId}:${args.barTs}`,
+      decisionId,
+      venue: args.broker.venue,
+      symbol: args.symbol,
+      state: ack.state === 'filled' ? 'filled' : 'acked',
+      type: 'protective',
+      side: (args.position.qty ?? 0) > 0 ? 'sell' : 'buy',
+      qty: Math.abs(args.position.qty),
+      reduceOnly: true,
+      createdAt: now,
+      ...(ack.exchangeOrderId === undefined ? {} : { exchangeOrderId: ack.exchangeOrderId }),
+    })
+    record(true)
+    return { executed: true, decisionId }
+  }
+
+  // ── 订单动作：先定仓、再过硬闸、最后下单 ──────────────────────────────────
+  let intent: OrderRequest | undefined
+  let stopPrice: number | undefined
+  let takeProfit: number | undefined
+  let sizeQty: number | undefined
+
+  if (action.action === 'open') {
+    const open = action as OpenAction
+    const entry = args.referencePrice
+    const derivedStop = stopPriceFor(entry, open.side, open.stop, args.atr)
+    if (derivedStop === undefined) {
+      record(false, { rationale: '无法推导止损价（ATR 暖机中或方法缺失）' })
+      return { executed: false, reason: '无法推导止损价', decisionId }
+    }
+    const sizing = computeSize({
+      equityQuote: args.account.equityQuote,
+      riskPct: open.riskPct ?? args.riskPct,
+      entryPrice: entry,
+      stopPrice: derivedStop,
+      ...(args.limits === null ? {} : { maxNotionalUsd: args.limits.perOrderCapUsd }),
+    })
+    if (!sizing.ok) {
+      record(false, { rationale: sizing.reason })
+      return { executed: false, reason: sizing.reason, decisionId }
+    }
+    stopPrice = derivedStop
+    takeProfit = takeProfitFor(entry, open.side, derivedStop, open.target?.rMultiple)
+    sizeQty = sizing.qty
+    intent = {
+      intentId: clientOrderId,
+      clientOrderId,
+      decisionId,
+      symbol: args.symbol,
+      type: open.method,
+      side: open.side === 'long' ? 'buy' : 'sell',
+      qty: sizing.qty,
+      notionalUsd: sizing.notionalUsd,
+      reduceOnly: false,
+      ...(open.method === 'limit' && open.limitOffsetBps !== undefined
+        ? { price: entry * (1 - open.limitOffsetBps / 10_000) }
+        : {}),
+      stopLossPrice: derivedStop,
+      ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
+    }
+  } else if (action.action === 'reduce' || action.action === 'close') {
+    const position = args.position
+    if (position === undefined || position.qty === 0) {
+      record(false, { rationale: '无持仓可减/可平' })
+      return { executed: false, reason: '无持仓', decisionId }
+    }
+    const fraction = action.action === 'close' ? 1 : (action as ReduceAction).fraction
+    const qty = Math.abs(position.qty) * fraction
+    sizeQty = qty
+    intent = {
+      intentId: clientOrderId,
+      clientOrderId,
+      decisionId,
+      symbol: args.symbol,
+      type: action.action === 'reduce' ? ((action as ReduceAction).method ?? 'market') : 'market',
+      side: position.qty > 0 ? 'sell' : 'buy',
+      qty,
+      notionalUsd: qty * args.referencePrice,
+      reduceOnly: true,
+    }
+  }
+
+  if (intent === undefined) {
+    record(false, { rationale: `未实现的动作：${action.action}` })
+    return { executed: false, reason: `未实现的动作：${action.action}`, decisionId }
+  }
+
+  const policy: GatePolicy = {
+    mode: args.mode,
+    limits: args.limits,
+    tradingWindowOpen: true,
+    // 同一根 bar 重放时，已存在的 intent 会让硬闸拒绝 —— 幂等的第二道保险
+    duplicateDecision: args.alreadyIntended(intent.clientOrderId),
+    paperVenue: 'paper',
+  }
+  const verdict = validateIntent(intent, args.account, policy)
+  if (verdict.kind === 'deny') {
+    record(false, {
+      sizeQty,
+      ...(stopPrice === undefined ? {} : { stopPrice }),
+      rationale: verdict.reason,
+    })
+    return { executed: false, reason: verdict.reason, decisionId }
+  }
+  if (verdict !== ALLOW) {
+    record(false, { rationale: '硬闸未放行' })
+    return { executed: false, reason: '硬闸未放行', decisionId }
+  }
+
+  const ack = await args.broker.placeOrder(intent)
+  args.journal.recordDecision({
+    decisionId,
+    symbol: args.symbol,
+    planId: args.plan.planId,
+    decidedAt: now,
+    contextHash,
+    action: action.action,
+    executed: ack.state === 'filled',
+    ...(sizeQty === undefined ? {} : { sizeQty }),
+    ...(stopPrice === undefined ? {} : { stopPrice }),
+    ...(takeProfit === undefined ? {} : { takeProfit }),
+  })
+  args.journal.recordIntent({
+    intentId: `oi:${decisionId}`,
+    clientOrderId: intent.clientOrderId,
+    decisionId,
+    venue: args.broker.venue,
+    symbol: args.symbol,
+    state: ack.state,
+    type: intent.type,
+    side: intent.side,
+    qty: intent.qty,
+    notionalUsd: intent.notionalUsd,
+    reduceOnly: intent.reduceOnly === true,
+    createdAt: now,
+    ...(intent.price === undefined ? {} : { price: intent.price }),
+    ...(ack.exchangeOrderId === undefined ? {} : { exchangeOrderId: ack.exchangeOrderId }),
+  })
+  if (ack.exchangeOrderId !== undefined) {
+    args.journal.recordOrder({
+      orderId: ack.exchangeOrderId,
+      venue: args.broker.venue,
+      exchangeOrderId: ack.exchangeOrderId,
+      clientOrderId: intent.clientOrderId,
+      symbol: args.symbol,
+      status: ack.state,
+      qty: intent.qty,
+      filledQty: ack.state === 'filled' ? intent.qty : 0,
+      updatedAt: now,
+    })
+    if (ack.state === 'filled') {
+      args.journal.recordFill({
+        fillId: `fill:${ack.exchangeOrderId}`,
+        orderId: ack.exchangeOrderId,
+        qty: intent.qty,
+        price: args.referencePrice,
+        fee: 0,
+        feeCurrency: 'USDT',
+        ts: now,
+      })
+    }
+    // 成交后**立即**挂保护单（HTX 不支持原子括号单 ⇒ 存在暴露窗口，plan §8.2）
+    if (action.action === 'open' && ack.state === 'filled' && stopPrice !== undefined) {
+      await args.broker.placeProtective({
+        symbol: args.symbol,
+        stopLossPrice: stopPrice,
+        ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
+      })
+    }
+  }
+
+  return { executed: ack.state === 'filled', decisionId }
+}
+
+export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<ReplayResult> {
+  const bars = deps.bars.closedBars(request.symbol, request.timeframe, {
+    since: request.since,
+    until: request.until,
+    limit: request.maxBars ?? 100_000,
+  })
+
+  const journal = new DecisionJournal(deps.db)
+  const engine = new FeatureEngine()
+  const watch =
+    deps.rules !== undefined && deps.rules.length > 0
+      ? new RuleWatch(deps.rules, new TriggerGovernor(deps.queue, deps.clock))
+      : undefined
+
+  const log: string[] = []
+  let matched = 0
+  let uncovered = 0
+  let denied = 0
+  let executed = 0
+
+  for (const bar of bars) {
+    // 1) 时钟推进到本 bar 收盘；保护单先按 bar 的 high/low 触发（毫秒级不依赖 LLM）
+    advanceClock(deps.clock, bar.closeTime)
+    deps.broker.onBar(request.symbol, { high: bar.high, low: bar.low, close: bar.close })
+
+    // 2) 特征（增量）
+    const snapshot = engine.onClosedCandle(bar)
+
+    // 3) 实时重取账户与持仓（上下文里的数字只用于"理解"，不用于"计算"）
+    const account = await deps.broker.getAccount()
+    const positions = await deps.broker.getPositions()
+    const position = positions.find((candidate) => candidate.symbol === request.symbol)
+
+    const context = createFeatureContext(snapshot, {
+      extra: {
+        'position.qty': position?.qty ?? 0,
+        'position.avgPrice': position?.avgPrice ?? 0,
+        'position.unrealizedPnl': position?.unrealizedPnlUsd ?? 0,
+        'equity.quote': account.equityQuote,
+        'price.last': bar.close,
+      },
+    })
+
+    // 4) 计划卡：先清理过期，再匹配
+    const plan = deps.plans.active(request.symbol)
+    let matchedThisBar = false
+    if (plan !== undefined) {
+      const outcome = matchPlan({
+        plan,
+        timeframe: request.timeframe,
+        barTs: bar.openTime,
+        now: bar.closeTime,
+        context,
+        alreadyFired: (dedupKey) => deps.queue.has(dedupKey),
+      })
+
+      if (outcome.kind === 'invalidation' || outcome.kind === 'commitment') {
+        matchedThisBar = true
+        matched += 1
+        log.push(`matched:${outcome.id}`)
+        const result = await executePlanAction({
+          journal,
+          broker: deps.broker,
+          clock: deps.clock,
+          plan,
+          conditionId: outcome.id,
+          action: outcome.action,
+          symbol: request.symbol,
+          barTs: bar.openTime,
+          referencePrice: bar.close,
+          atr: snapshot.values.atr14,
+          account,
+          position,
+          riskPct: deps.riskPct,
+          mode: deps.mode,
+          limits: deps.limits,
+          alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
+        })
+        // 计划条件命中也要落库：这样 `alreadyFired` 才能跨重启工作，审计里也能看到"执行了什么"
+        deps.queue.enqueue({
+          triggerId: planDedupKey(plan.planId, outcome.id, request.symbol, bar.openTime),
+          dedupKey: planDedupKey(plan.planId, outcome.id, request.symbol, bar.openTime),
+          symbol: request.symbol,
+          ruleId: `${plan.planId}:${outcome.id}`,
+          purpose: outcome.kind,
+          barTs: bar.openTime,
+          disposition: 'executed',
+          state: 'done',
+          createdAt: deps.clock.now(),
+          payload: {
+            planId: plan.planId,
+            conditionId: outcome.id,
+            expression: outcome.expression,
+            executed: result.executed,
+            reason: result.reason ?? null,
+          },
+        })
+        if (result.executed) executed += 1
+        else {
+          denied += 1
+          log.push(`denied:${outcome.id}:${result.reason ?? 'unknown'}`)
+        }
+      } else if (outcome.kind === 'uncovered') {
+        uncovered += 1
+        log.push(`UNCOVERED:${outcome.reason}`)
+      } else if (outcome.kind === 'expired') {
+        deps.plans.expire(bar.closeTime)
+      }
+    }
+
+    // 5) 规则与触发治理
+    if (watch !== undefined) {
+      const outcome = watch.onBar({
+        symbol: request.symbol,
+        timeframe: request.timeframe,
+        barTs: bar.openTime,
+        context,
+      })
+      for (const hit of outcome.hits) {
+        const decision = outcome.decisions.find((candidate) => candidate.dedupKey === hit.dedupKey)
+        log.push(`rule:${hit.ruleId}:${decision?.disposition.kind ?? 'unknown'}`)
+        if (
+          (hit.purpose === 'commitment' || hit.purpose === 'invalidation') &&
+          !matchedThisBar
+        ) {
+          uncovered += 1
+          log.push(`UNCOVERED:rule:${hit.ruleId}`)
+        }
+      }
+    }
+  }
+
+  return {
+    counters: { bars: bars.length, matched, uncovered, denied, executed },
+    decisionIds: journal.decisionIds(),
+    intentIds: journal.intentIds(),
+    clientOrderIds: journal.clientOrderIds(),
+    fillIds: journal.fillIds(),
+    triggerKeys: journal.triggerKeys(),
+    log,
+    duplicateClientOrderIds: journal.duplicateClientOrderIds(),
+    realizedPnl: deps.broker.realizedPnl?.() ?? 0,
+  }
+}
