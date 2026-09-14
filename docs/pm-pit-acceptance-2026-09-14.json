@@ -1,398 +1,1512 @@
 {
-  "ranAt": "2026-09-14T15:41:55.658Z",
+  "ranAt": "2026-09-14T15:51:36.525Z",
   "requestedDays": 30,
   "market": {
-    "slug": "highest-temperature-in-hong-kong-on-september-14-2026-28c",
-    "conditionId": "0x118959cdb97704ff8ed5d0769cd8a34ec8c54b4e1bcaeb325eb93ab095e96733",
-    "createdAt": 1789189001113,
-    "createdAtIso": "2026-09-12T04:56:41.113Z",
-    "liquidity": 3426.40549,
-    "spread": 0.002
+    "slug": "will-chicago-bears-score-the-most-points-in-week-1-of-the-2026-27-nfl-regular-season",
+    "conditionId": "0xe7c7bf3d936579dec828ac70146aa99c2fff643238f41b30375780b43b3283b1",
+    "createdAt": 1788986274487,
+    "createdAtIso": "2026-09-09T20:37:54.487Z",
+    "liquidity": 7.25254,
+    "spread": 0.016
   },
   "series": {
-    "points": 120,
+    "points": 226,
     "spanDays": 29.99
   },
   "book": {
-    "bids": 22,
-    "asks": 0
+    "bids": 8,
+    "asks": 5
   },
   "seeded": [
-    {
-      "alias": "mkt_0",
-      "tokenId": "4478899363141277273222204152562190919155813299972517415804497036469160759577",
-      "slug": "highest-temperature-in-hong-kong-on-september-14-2026-28c",
-      "liquidity": 3426.40549,
-      "points": 120,
-      "spanDays": 2.465497685185185,
-      "hasProb": true
-    },
     {
       "alias": "mkt_1",
       "tokenId": "18937143905787980845393241905747004871906766192313936911196285650655818425623",
       "slug": "will-chicago-bears-score-the-most-points-in-week-1-of-the-2026-27-nfl-regular-season",
-      "liquidity": 6.02754,
+      "liquidity": 7.25254,
       "points": 226,
-      "spanDays": 4.799143518518519,
+      "spanDays": 4.803518518518518,
       "hasProb": true
-    },
-    {
-      "alias": "mkt_2",
-      "tokenId": "100482685098592993894400367861938635770547167180436163439367687512841574258231",
-      "slug": "ukr1-dyn-epi-2026-09-14-exact-score-3-0",
-      "liquidity": 3287.51772,
-      "points": 638,
-      "spanDays": 13.278611111111111,
-      "hasProb": false
     },
     {
       "alias": "mkt_3",
-      "tokenId": "72391731719106461752550409142751876619679554747473898939888751967086267192052",
-      "slug": "lowest-temperature-in-wuhan-on-september-14-2026-20c",
-      "liquidity": 731.07245,
-      "points": 120,
-      "spanDays": 2.465497685185185,
+      "tokenId": "50795218465356331728848224361573192268227587365155240074719997436214994605029",
+      "slug": "will-chris-olave-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-receiving-yards",
+      "liquidity": 140.58582,
+      "points": 221,
+      "spanDays": 4.803310185185185,
       "hasProb": true
-    },
-    {
-      "alias": "mkt_4",
-      "tokenId": "39870676644377263240964878519803057798513781998854146402511968599352884193909",
-      "slug": "highest-temperature-in-wuhan-on-september-14-2026-33c",
-      "liquidity": 8567.7565,
-      "points": 120,
-      "spanDays": 2.465497685185185,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_5",
-      "tokenId": "113642644614717557784162023835139794839996371547077610729871502911626205674567",
-      "slug": "highest-temperature-in-chengdu-on-september-14-2026-22corbelow",
-      "liquidity": 7635.10122,
-      "points": 120,
-      "spanDays": 2.4659722222222222,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_6",
-      "tokenId": "103290509686363360145148473994465869554198714541901567625811845697416605611720",
-      "slug": "highest-temperature-in-paris-on-september-14-2026-29c",
-      "liquidity": 211.5067,
-      "points": 120,
-      "spanDays": 2.465127314814815,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_7",
-      "tokenId": "10888719830548914139618338495216034291253618711792425027867634924790785050732",
-      "slug": "highest-temperature-in-beijing-on-september-14-2026-26c",
-      "liquidity": 8746.02961,
-      "points": 120,
-      "spanDays": 2.4652199074074073,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_8",
-      "tokenId": "50488700452691067490906086565189821313286034619241171842249833693744448252087",
-      "slug": "msft-close-above-500-on-september-14-2026",
-      "liquidity": 2838.6435,
-      "points": 153,
-      "spanDays": 3.1536689814814816,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_9",
-      "tokenId": "51854211389500496929237755530573799216954178494541690641844077362398275719684",
-      "slug": "highest-temperature-in-shenzhen-on-september-14-2026-30c",
-      "liquidity": 2335.5852,
-      "points": 120,
-      "spanDays": 2.4661574074074073,
-      "hasProb": false
     },
     {
       "alias": "mkt_10",
-      "tokenId": "45778923200105820809932919865701136938188354699453025580148661102115320494979",
-      "slug": "highest-temperature-in-taipei-on-september-14-2026-33c",
-      "liquidity": 4433.99752,
-      "points": 120,
-      "spanDays": 2.465497685185185,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_11",
-      "tokenId": "89426082982630435760236042519244212932571884271930311577671345564814920359150",
-      "slug": "will-sweden-democrats-sd-win-between-16-and-18-of-all-valid-votes-20260812172636422",
-      "liquidity": 19240.63317,
-      "points": 1441,
-      "spanDays": 29.987083333333334,
+      "tokenId": "50488700452691067490906086565189821313286034619241171842249833693744448252087",
+      "slug": "msft-close-above-500-on-september-14-2026",
+      "liquidity": 3088.6694,
+      "points": 153,
+      "spanDays": 3.157835648148148,
       "hasProb": false
     },
     {
       "alias": "mkt_12",
-      "tokenId": "66206905450770274890585668272018086613248204881864577944475014844697436085992",
-      "slug": "lowest-temperature-in-hong-kong-on-september-14-2026-26c",
-      "liquidity": 5790.42499,
-      "points": 120,
-      "spanDays": 2.466261574074074,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_13",
-      "tokenId": "21087497871276855276095015391607038795799602210305075213624645872684816298371",
-      "slug": "lowest-temperature-in-milan-on-september-14-2026-15c",
-      "liquidity": 523.01087,
-      "points": 120,
-      "spanDays": 2.466261574074074,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_14",
-      "tokenId": "27052107924989981635803941569783148318980524148011816504038810008201387836760",
-      "slug": "googl-close-above-340-on-september-14-2026",
-      "liquidity": 18222.59722,
-      "points": 153,
-      "spanDays": 3.1537847222222224,
+      "tokenId": "89426082982630435760236042519244212932571884271930311577671345564814920359150",
+      "slug": "will-sweden-democrats-sd-win-between-16-and-18-of-all-valid-votes-20260812172636422",
+      "liquidity": 17915.45808,
+      "points": 1441,
+      "spanDays": 29.991215277777776,
       "hasProb": false
     },
     {
       "alias": "mkt_15",
-      "tokenId": "79709195525012236844701790620367729104252761457258208490019882233544672791619",
-      "slug": "highest-temperature-in-jeddah-on-september-14-2026-37c",
-      "liquidity": 1877.11275,
-      "points": 120,
-      "spanDays": 2.466261574074074,
+      "tokenId": "27052107924989981635803941569783148318980524148011816504038810008201387836760",
+      "slug": "googl-close-above-340-on-september-14-2026",
+      "liquidity": 17919.27263,
+      "points": 153,
+      "spanDays": 3.1578472222222222,
       "hasProb": false
     },
     {
       "alias": "mkt_16",
-      "tokenId": "114711720574692959383689453865607917518478214078817284606441981163227387362029",
-      "slug": "highest-temperature-in-karachi-on-september-14-2026-39corhigher",
-      "liquidity": 3692.01976,
-      "points": 119,
-      "spanDays": 2.4444675925925927,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_17",
-      "tokenId": "102585277259109717426694039027060612859026956482499766982518082125924901315833",
-      "slug": "will-trevor-lawrence-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-passing-touchdowns",
-      "liquidity": 5588.9595,
-      "points": 231,
-      "spanDays": 4.799386574074074,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_18",
-      "tokenId": "36772222451687800267836694148542896405126044030224490573215235709127005074742",
-      "slug": "pltr-up-or-down-on-september-14-2026",
-      "liquidity": 21192.10999,
-      "points": 141,
-      "spanDays": 3.1538078703703705,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_19",
-      "tokenId": "40326812859998624276292075838013021900310126557281236961753338041972547068501",
-      "slug": "highest-temperature-in-chongqing-on-september-14-2026-23corbelow",
-      "liquidity": 1035.56145,
+      "tokenId": "21087497871276855276095015391607038795799602210305075213624645872684816298371",
+      "slug": "lowest-temperature-in-milan-on-september-14-2026-15c",
+      "liquidity": 515.93133,
       "points": 120,
-      "spanDays": 2.4658796296296295,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_20",
-      "tokenId": "79407368312325642649129663281021505136974919123785062185108115301590083588838",
-      "slug": "will-the-sweden-democrats-sd-win-the-third-most-seats-in-the-2026-swedish-parliamentary-election",
-      "liquidity": 41158.04562,
-      "points": 1441,
-      "spanDays": 29.987199074074073,
+      "spanDays": 2.4702546296296295,
       "hasProb": false
     },
     {
       "alias": "mkt_21",
-      "tokenId": "52334878018814685972547014875009160054717120171100348069688980422350429906466",
-      "slug": "will-the-moderate-party-m-win-the-second-most-seats-in-the-2026-swedish-parliamentary-election",
-      "liquidity": 31980.30878,
-      "points": 1434,
-      "spanDays": 29.98721064814815,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_22",
-      "tokenId": "23504000255433317123702854201729314481832151049031484919433864804748916677445",
-      "slug": "will-drake-maye-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-interceptions-thrown",
-      "liquidity": 766.4775,
-      "points": 226,
-      "spanDays": 4.799328703703703,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_23",
-      "tokenId": "42126033836733969444818794857462639095308519636297137670283535611266822454183",
-      "slug": "will-the-price-of-bitcoin-be-between-78000-80000-on-september-14-2026",
-      "liquidity": 5359.27,
-      "points": 58,
-      "spanDays": 7.028900462962963,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_24",
-      "tokenId": "79198504233445388633990738115059932668009112667137134233106822119968960631966",
-      "slug": "lowest-temperature-in-moscow-on-september-14-2026-8c",
-      "liquidity": 76.2058,
-      "points": 120,
-      "spanDays": 2.4658101851851852,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_25",
-      "tokenId": "53489057312116667971129409256203307862079591526766473798129486593693798461313",
-      "slug": "coin-up-or-down-on-september-14-2026",
-      "liquidity": 922.24251,
-      "points": 141,
-      "spanDays": 3.153865740740741,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_26",
-      "tokenId": "74787032410529411162826822210195406163735599664419023792670536712805285594477",
-      "slug": "lowest-temperature-in-chengdu-on-september-14-2026-19c",
-      "liquidity": 490.815,
-      "points": 120,
-      "spanDays": 2.4656018518518517,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_27",
-      "tokenId": "58529047902736704243761301636998482191315800495642012793808199005046385147910",
-      "slug": "ukr1-dyn-epi-2026-09-14-spread-home-2pt5",
-      "liquidity": 28171.43124,
-      "points": 542,
-      "spanDays": 12.403310185185186,
+      "tokenId": "102585277259109717426694039027060612859026956482499766982518082125924901315833",
+      "slug": "will-trevor-lawrence-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-passing-touchdowns",
+      "liquidity": 7320.27072,
+      "points": 231,
+      "spanDays": 4.803680555555555,
       "hasProb": true
     },
     {
       "alias": "mkt_28",
-      "tokenId": "8896158652130023171560573460278059906623049434272380107293830633980798807368",
-      "slug": "will-mamdani-say-trump-or-president-during-his-announcement-20260930-20260831-20260910",
-      "liquidity": 199.09549,
-      "points": 127,
-      "spanDays": 2.6324768518518518,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_29",
-      "tokenId": "63620156659960885309051395530365403426760637045690577908008552033550572895447",
-      "slug": "will-the-centre-party-c-win-the-fifth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320204",
-      "liquidity": 14980.90268,
-      "points": 1441,
-      "spanDays": 29.987256944444443,
+      "tokenId": "42126033836733969444818794857462639095308519636297137670283535611266822454183",
+      "slug": "will-the-price-of-bitcoin-be-between-78000-80000-on-september-14-2026",
+      "liquidity": 5431.56704,
+      "points": 58,
+      "spanDays": 7.033055555555555,
       "hasProb": false
     },
     {
-      "alias": "mkt_30",
-      "tokenId": "46966022805249481872778076487472732361949144961608679144118111615996040681612",
-      "slug": "highest-temperature-in-warsaw-on-september-14-2026-19c",
-      "liquidity": 713.00373,
-      "points": 120,
-      "spanDays": 2.4664467592592594,
+      "alias": "mkt_29",
+      "tokenId": "36772222451687800267836694148542896405126044030224490573215235709127005074742",
+      "slug": "pltr-up-or-down-on-september-14-2026",
+      "liquidity": 21043.43092,
+      "points": 141,
+      "spanDays": 3.158078703703704,
       "hasProb": false
     },
     {
       "alias": "mkt_31",
-      "tokenId": "25327866806329713282667550111576673131225192433542967028331185703098437172893",
-      "slug": "highest-temperature-in-madrid-on-september-14-2026-35c",
-      "liquidity": 474.5454,
-      "points": 120,
-      "spanDays": 2.4664930555555555,
+      "tokenId": "53489057312116667971129409256203307862079591526766473798129486593693798461313",
+      "slug": "coin-up-or-down-on-september-14-2026",
+      "liquidity": 890.00406,
+      "points": 141,
+      "spanDays": 3.158136574074074,
       "hasProb": false
     },
     {
-      "alias": "mkt_32",
-      "tokenId": "10569632538224194790555815918532629872231216192310665357525564127976982132749",
-      "slug": "lowest-temperature-in-singapore-on-september-14-2026-27c",
-      "liquidity": 142.4935,
-      "points": 120,
-      "spanDays": 2.4658101851851852,
-      "hasProb": true
-    },
-    {
       "alias": "mkt_33",
-      "tokenId": "48022243325887371135806599534509493010922047343751329135001838073722002863204",
-      "slug": "bitcoin-above-78k-on-september-14-2026",
-      "liquidity": 15604.4382,
-      "points": 58,
-      "spanDays": 7.0289930555555555,
+      "tokenId": "63620156659960885309051395530365403426760637045690577908008552033550572895447",
+      "slug": "will-the-centre-party-c-win-the-fifth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320204",
+      "liquidity": 14985.61118,
+      "points": 1441,
+      "spanDays": 29.991469907407406,
       "hasProb": false
     },
     {
       "alias": "mkt_34",
-      "tokenId": "6555605928239139880719054983349807316843708784990662901472667043336130568532",
-      "slug": "will-mamdani-say-safe-or-safer-or-safety-during-his-announcement-20260930-20260831-20260910",
-      "liquidity": 297.31855,
-      "points": 128,
-      "spanDays": 2.6324768518518518,
-      "hasProb": true
-    },
-    {
-      "alias": "mkt_35",
-      "tokenId": "80585660524733251754116445257255304923979666505292193509793135145163510920780",
-      "slug": "lowest-temperature-in-guangzhou-on-september-14-2026-27c",
-      "liquidity": 96.06,
-      "points": 120,
-      "spanDays": 2.465902777777778,
-      "hasProb": true
+      "tokenId": "54249139933776636201868584044433855274524959823671308378774606689793034790854",
+      "slug": "meta-close-above-650-on-september-14-2026",
+      "liquidity": 16904.6317,
+      "points": 153,
+      "spanDays": 3.1595370370370373,
+      "hasProb": false
     },
     {
       "alias": "mkt_36",
-      "tokenId": "110203993905240827154185754735122393066222924406372432499177433483064111945527",
-      "slug": "will-the-left-party-v-win-the-fourth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320105",
-      "liquidity": 19474.86994,
-      "points": 1441,
-      "spanDays": 29.987314814814816,
+      "tokenId": "46966022805249481872778076487472732361949144961608679144118111615996040681612",
+      "slug": "highest-temperature-in-warsaw-on-september-14-2026-19c",
+      "liquidity": 754.08973,
+      "points": 120,
+      "spanDays": 2.470474537037037,
       "hasProb": false
     },
     {
       "alias": "mkt_37",
-      "tokenId": "97312892812033894560930985055620125345903339977772484895638585454327418323618",
-      "slug": "lowest-temperature-in-beijing-on-september-14-2026-13c",
-      "liquidity": 184.9113,
-      "points": 120,
-      "spanDays": 2.46650462962963,
-      "hasProb": false
-    },
-    {
-      "alias": "mkt_38",
-      "tokenId": "114144606258170740271015593967436522986189691527212663935743602361990323600293",
-      "slug": "will-mamdani-say-school-during-his-announcement-20260930-20260831-20260910",
-      "liquidity": 129.39802,
-      "points": 125,
-      "spanDays": 2.6331712962962963,
+      "tokenId": "6555605928239139880719054983349807316843708784990662901472667043336130568532",
+      "slug": "will-mamdani-say-safe-or-safer-or-safety-during-his-announcement-20260930-20260831-20260910",
+      "liquidity": 297.31855,
+      "points": 128,
+      "spanDays": 2.6366435185185186,
       "hasProb": true
     },
     {
+      "alias": "mkt_38",
+      "tokenId": "110203993905240827154185754735122393066222924406372432499177433483064111945527",
+      "slug": "will-the-left-party-v-win-the-fourth-most-seats-in-the-2026-swedish-parliamentary-election-20260812164320105",
+      "liquidity": 20185.95104,
+      "points": 1441,
+      "spanDays": 29.991493055555555,
+      "hasProb": false
+    },
+    {
       "alias": "mkt_39",
+      "tokenId": "25327866806329713282667550111576673131225192433542967028331185703098437172893",
+      "slug": "highest-temperature-in-madrid-on-september-14-2026-35c",
+      "liquidity": 498.5863,
+      "points": 120,
+      "spanDays": 2.472025462962963,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_40",
       "tokenId": "43895729998910727554192822660436783386794137814588938463976737412170187802198",
       "slug": "msft-up-or-down-on-september-14-2026",
       "liquidity": 20766.45659,
       "points": 144,
-      "spanDays": 3.15400462962963,
+      "spanDays": 3.1595601851851853,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_41",
+      "tokenId": "48022243325887371135806599534509493010922047343751329135001838073722002863204",
+      "slug": "bitcoin-above-78k-on-september-14-2026",
+      "liquidity": 15062.06152,
+      "points": 58,
+      "spanDays": 7.034560185185185,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_43",
+      "tokenId": "112203126332378892285536496283675697264835923267207100151085283552484457769802",
+      "slug": "will-top-esports-make-a-roster-change-by-december-20260805205516492",
+      "liquidity": 60.14581,
+      "points": 1374,
+      "spanDays": 29.992893518518517,
       "hasProb": true
+    },
+    {
+      "alias": "mkt_45",
+      "tokenId": "105122133657225789613275447181386389459357835455143075565872665166203288204118",
+      "slug": "lowest-temperature-in-chicago-on-september-14-2026-52-53f",
+      "liquidity": 463.73768,
+      "points": 114,
+      "spanDays": 2.3470601851851853,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_47",
+      "tokenId": "23844376855612675796249133133086158892934631932322220002650594120834372728415",
+      "slug": "will-tyler-shough-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-passing-yards",
+      "liquidity": 1222.3087,
+      "points": 226,
+      "spanDays": 4.805069444444444,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_49",
+      "tokenId": "23504000255433317123702854201729314481832151049031484919433864804748916677445",
+      "slug": "will-drake-maye-finish-week-1-of-the-2026-27-nfl-regular-season-with-the-most-interceptions-thrown",
+      "liquidity": 801.4779,
+      "points": 226,
+      "spanDays": 4.802615740740741,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_51",
+      "tokenId": "40124417131491757678082073825156033822441631313150070951445568336452021308849",
+      "slug": "will-caleb-williams-be-the-highest-scoring-qb-in-week-1-of-the-2026-27-nfl-season",
+      "liquidity": 261.8973,
+      "points": 458,
+      "spanDays": 9.867974537037037,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_52",
+      "tokenId": "59154120880690602173105943451252821124114324548944890663919784898460263262438",
+      "slug": "will-grobinas-sc-be-relegated-from-virsliga-latvia-2026",
+      "liquidity": 73.5337,
+      "points": 801,
+      "spanDays": 18.763726851851853,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_54",
+      "tokenId": "683178080794468540909356050233970009534367917011294756077367851238422966803",
+      "slug": "sweden-parliamentary-election-more-votes-to-v-or-c-20260812170140802",
+      "liquidity": 10996.27571,
+      "points": 1439,
+      "spanDays": 29.992893518518517,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_55",
+      "tokenId": "25950572666326881928996657201720060825847366730859323364232124791810567676287",
+      "slug": "highest-temperature-in-munich-on-september-14-2026-22c",
+      "liquidity": 1174.37324,
+      "points": 120,
+      "spanDays": 2.4722222222222223,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_56",
+      "tokenId": "39958063799030110094056479271530105693768718989468596612047295331720639232982",
+      "slug": "highest-temperature-in-london-on-september-14-2026-25c",
+      "liquidity": 364.1592,
+      "points": 120,
+      "spanDays": 2.472337962962963,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_58",
+      "tokenId": "110041978600887138954276278106501053886848309411861954352777263178114238669428",
+      "slug": "lowest-temperature-in-paris-on-september-14-2026-16c",
+      "liquidity": 395.81195,
+      "points": 121,
+      "spanDays": 2.492303240740741,
+      "hasProb": true
+    },
+    {
+      "alias": "mkt_59",
+      "tokenId": "49420904825258694934461948590001008729501097134228188820651629375266291356770",
+      "slug": "hood-up-or-down-on-september-14-2026",
+      "liquidity": 20117.1707,
+      "points": 150,
+      "spanDays": 3.159872685185185,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_62",
+      "tokenId": "34649339183449029029773864871504399572194026947778955391058864961179082590360",
+      "slug": "ethereum-up-or-down-on-september-14-2026",
+      "liquidity": 7317.93005,
+      "points": 97,
+      "spanDays": 1.993263888888889,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_63",
+      "tokenId": "18757597923724956676837611803584264031656803008820497180468862015158558218532",
+      "slug": "elon-musk-of-tweets-september-12-september-14-2026-40-64",
+      "liquidity": 686.89555,
+      "points": 193,
+      "spanDays": 3.9932754629629628,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_67",
+      "tokenId": "61119240220301200842831219804483220361803493876651835594137951492591514533",
+      "slug": "iran-oman-hormuz-agreement-by-september-14",
+      "liquidity": 53949.93396,
+      "points": 811,
+      "spanDays": 16.86832175925926,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_68",
+      "tokenId": "19884202204363090591845974364927513432419394537229594683046302661092511466716",
+      "slug": "will-ulf-kristersson-be-the-next-prime-minister-of-sweden",
+      "liquidity": 139550.2325,
+      "points": 1441,
+      "spanDays": 29.993333333333332,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_70",
+      "tokenId": "6761884778816083542753350539779617201084594664234729655783875952381923983097",
+      "slug": "will-magdalena-andersson-be-the-next-prime-minister-of-sweden",
+      "liquidity": 79335.8129,
+      "points": 1441,
+      "spanDays": 29.99335648148148,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_71",
+      "tokenId": "71199490957924041886735411161957276777778685991536415526722488030509401889440",
+      "slug": "will-wti-reach-105-in-september-2026",
+      "liquidity": 31922.98453,
+      "points": 816,
+      "spanDays": 16.972569444444446,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_72",
+      "tokenId": "80375409348393744542315747174990476422409715528428308248204098016085745050058",
+      "slug": "atp-sinclai-xiao-2026-09-14",
+      "liquidity": 95549.6936,
+      "points": 83,
+      "spanDays": 1.7017361111111111,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_73",
+      "tokenId": "5615282760875985231868508008056959876238536896643315063916840237042205273721",
+      "slug": "will-there-be-no-change-in-fed-interest-rates-after-the-september-2026-meeting-615",
+      "liquidity": 968818.3499,
+      "points": 1441,
+      "spanDays": 29.993391203703705,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_74",
+      "tokenId": "63842529068710005716169325380315470359047749786610778647370693404952498013178",
+      "slug": "will-the-fed-increase-interest-rates-by-25-bps-after-the-september-2026-meeting-649",
+      "liquidity": 1279916.3044,
+      "points": 1441,
+      "spanDays": 29.993333333333332,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_75",
+      "tokenId": "26798869926304433421718759585706922139603224724716300096034805359434315468493",
+      "slug": "elon-musk-of-tweets-september-12-september-14-2026-65-89",
+      "liquidity": 978.4279,
+      "points": 193,
+      "spanDays": 3.9934606481481483,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_76",
+      "tokenId": "110531092871817326177676615981488848062239024242021648855998953959660629545985",
+      "slug": "us-x-iran-effective-ceasefire-by-september-4",
+      "liquidity": 31308.8651,
+      "points": 609,
+      "spanDays": 12.660104166666667,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_77",
+      "tokenId": "71233794533117360282819188482714533422838090539927786096475518512934288036113",
+      "slug": "nfl-den-kc-2026-09-15-total-43pt5",
+      "liquidity": 1263984.0741,
+      "points": 1440,
+      "spanDays": 29.993483796296296,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_78",
+      "tokenId": "76021158154800283506736373387406796400944223245340439968328287263438060046566",
+      "slug": "lal-elc-rea-2026-09-15-rea",
+      "liquidity": 254171.6832,
+      "points": 597,
+      "spanDays": 12.41013888888889,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_79",
+      "tokenId": "83783489454659420807679723574840032660002326710045123865554753994450797728825",
+      "slug": "strait-of-hormuz-traffic-returns-to-normal-by-december-31",
+      "liquidity": 357911.2891,
+      "points": 1441,
+      "spanDays": 29.993333333333332,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_81",
+      "tokenId": "35198549486569600595408965368290795524428922595732253580266052028158040373233",
+      "slug": "clarity-act-signed-into-law-in-2026",
+      "liquidity": 283609.9556,
+      "points": 1441,
+      "spanDays": 29.993506944444444,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_82",
+      "tokenId": "31653956477830165372337334687889690366058437085864298395551634809453963934221",
+      "slug": "nfl-den-kc-2026-09-15",
+      "liquidity": 2788623.6416,
+      "points": 1441,
+      "spanDays": 29.99357638888889,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_83",
+      "tokenId": "106233712367645539181596140869268579156762610139668118997611470887835225313394",
+      "slug": "sea-tor-rom-2026-09-14-tor",
+      "liquidity": 358049.2806,
+      "points": 659,
+      "spanDays": 13.701909722222222,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_84",
+      "tokenId": "53298664464252587864890144941144503811507003613353733441479199018952323371634",
+      "slug": "epl-lee-new-2026-09-14-new",
+      "liquidity": 2188178.3456,
+      "points": 649,
+      "spanDays": 13.493553240740741,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_85",
+      "tokenId": "43853966738403637461259093397144541816355598332094201152243477203086112394850",
+      "slug": "will-ethereum-reach-2600-in-september-2026-from-september-11",
+      "liquidity": 42772.5261,
+      "points": 141,
+      "spanDays": 2.9101157407407405,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_86",
+      "tokenId": "49084048476353771153083262278964615095037480324537117350127265918750912547378",
+      "slug": "will-the-democrats-win-the-2028-us-presidential-election",
+      "liquidity": 262812.4223,
+      "points": 1440,
+      "spanDays": 29.99355324074074,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_87",
+      "tokenId": "43218196981038089437419549159354453443673993312119998406872053191642458645610",
+      "slug": "sea-int-udi-2026-09-14-int",
+      "liquidity": 300294.8418,
+      "points": 659,
+      "spanDays": 13.701967592592593,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_88",
+      "tokenId": "5704535028627813610807450987863678382834984459808017027367262166853701331994",
+      "slug": "us-announces-end-of-iranian-blockade-by-september-14-2026",
+      "liquidity": 83798.96884,
+      "points": 1296,
+      "spanDays": 26.97283564814815,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_90",
+      "tokenId": "109876868437950584369987384406356259939519193117253465815665152916226511121427",
+      "slug": "will-flvio-bolsonaro-win-the-2026-brazilian-presidential-election",
+      "liquidity": 249891.01773,
+      "points": 1441,
+      "spanDays": 29.993472222222223,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_91",
+      "tokenId": "99379294781349093043706751561052316731560754011566338922840409336958588137803",
+      "slug": "sea-tor-rom-2026-09-14-rom",
+      "liquidity": 708648.6949,
+      "points": 659,
+      "spanDays": 13.702037037037037,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_92",
+      "tokenId": "84544690125087154137118613306698276825095299984144139969604593483886799821560",
+      "slug": "lal-vil-bet-2026-09-14-bet",
+      "liquidity": 349188.0532,
+      "points": 645,
+      "spanDays": 13.410324074074074,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_93",
+      "tokenId": "350977769852917329387037893294763093471844346281449484439085576212613048126",
+      "slug": "putin-out-before-2027-346",
+      "liquidity": 807653.717,
+      "points": 1441,
+      "spanDays": 29.993564814814814,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_94",
+      "tokenId": "45442114403462819822336442614322001986581905220395167192947022001917347356896",
+      "slug": "sea-com-par-2026-09-14-com",
+      "liquidity": 337450.5424,
+      "points": 659,
+      "spanDays": 13.702094907407407,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_96",
+      "tokenId": "101040420236481079077393026772174192261262803877417817462744147440746788606483",
+      "slug": "israel-closes-its-airspace-by-september-30",
+      "liquidity": 132886.19208,
+      "points": 1296,
+      "spanDays": 26.972916666666666,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_97",
+      "tokenId": "96308556109755835434254900303426519652053230974356832970824534225192181988516",
+      "slug": "will-donald-trump-win-the-nobel-peace-prize-in-2026-382",
+      "liquidity": 274675.88562,
+      "points": 1440,
+      "spanDays": 29.99375,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_98",
+      "tokenId": "59226162751411958698158426899722532714096625688096542121038780675009172335910",
+      "slug": "will-the-las-vegas-raiders-win-the-2027-nfl-league-championship",
+      "liquidity": 161037.94898,
+      "points": 1441,
+      "spanDays": 29.993645833333332,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_100",
+      "tokenId": "22661408117572404298835747787110316573023856676573692281045058711503226126679",
+      "slug": "mlb-lad-cin-2026-09-14",
+      "liquidity": 533117.0986,
+      "points": 295,
+      "spanDays": 6.118738425925926,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_101",
+      "tokenId": "58586698206671111351541994612941732101497912139425521300244830828474140769434",
+      "slug": "bitcoin-above-70k-on-september-15-2026",
+      "liquidity": 55285.33517,
+      "points": 275,
+      "spanDays": 5.702025462962963,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_103",
+      "tokenId": "9221383556608449303835174806846320148935846556873035382860978740383478459961",
+      "slug": "will-brighton-win-the-2026-27-english-premier-league-epl-championship-20260701200428754",
+      "liquidity": 509640.44327,
+      "points": 1441,
+      "spanDays": 29.993773148148147,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_104",
+      "tokenId": "94559586571241563470235664821564670251180951772614764383113614156422396181162",
+      "slug": "will-china-invade-taiwan-before-2027",
+      "liquidity": 533961.90643,
+      "points": 1441,
+      "spanDays": 29.993877314814814,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_105",
+      "tokenId": "46694911209504709842407102211694105151918150655785824361504208059495748983717",
+      "slug": "will-ebba-busch-be-the-next-prime-minister-of-sweden",
+      "liquidity": 83909.12807,
+      "points": 1440,
+      "spanDays": 29.993900462962962,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_106",
+      "tokenId": "57748138085022719760345772310040703848567377822400132842014290209986511882046",
+      "slug": "will-the-fed-decrease-interest-rates-by-25-bps-after-the-september-2026-meeting-586",
+      "liquidity": 3665453.61548,
+      "points": 1429,
+      "spanDays": 29.993854166666665,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_108",
+      "tokenId": "88912926533493988427719291698947688154042720958310632316541141466409683822293",
+      "slug": "will-the-fed-increase-interest-rates-by-50-bps-after-the-september-2026-meeting-664",
+      "liquidity": 1092621.30578,
+      "points": 1441,
+      "spanDays": 29.993854166666665,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_110",
+      "tokenId": "33339798372916037220786136133406478491116150628220441951753426683441228279665",
+      "slug": "will-shakhtar-donetsk-win-the-2026-27-uefa-champions-league-championship-20260701202025578",
+      "liquidity": 388948.21689,
+      "points": 1439,
+      "spanDays": 29.994027777777777,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_111",
+      "tokenId": "55115078421062885512539156303747803058407616201213034911037320915726138659123",
+      "slug": "will-the-us-invade-iran-before-2027",
+      "liquidity": 644513.2415,
+      "points": 1439,
+      "spanDays": 29.993877314814814,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_112",
+      "tokenId": "90316549612322190080383058429390138624395168192057993099824241356775422634534",
+      "slug": "epl-lee-new-2026-09-14-lee",
+      "liquidity": 1284203.2035,
+      "points": 649,
+      "spanDays": 13.494050925925926,
+      "hasProb": false
+    },
+    {
+      "alias": "mkt_115",
+      "tokenId": "75372873087579948641536266174626338685888271622256232606868790076520820975093",
+      "slug": "wta-bulgaru-gjorche-2026-09-14",
+      "liquidity": 90634.6624,
+      "points": 37,
+      "spanDays": 0.7441087962962963,
+      "hasProb": false
+    }
+  ],
+  "snapshotDiagnostics": [
+    {
+      "alias": "mkt_1",
+      "prob": 0.986,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 7.25254 低于门槛 1000",
+      "liquidityQuote": 7.25254,
+      "spreadBps": 160,
+      "change1h": 0.0040000000000000036,
+      "change24h": 0.9309999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_3",
+      "prob": 0.9199999999999999,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 140.58582 低于门槛 1000",
+      "liquidityQuote": 140.58582,
+      "spreadBps": 600,
+      "change1h": 0.21750000000000003,
+      "change24h": 0.9145000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_10",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.47000000000000003,
+      "change24h": 0.8300000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_12",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.0020000000000000018,
+      "change24h": 0.8245,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_15",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.08550000000000002,
+      "change24h": 0.8205,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_16",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.0004999999999999449,
+      "change24h": 0.8,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_21",
+      "prob": 0.8285,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "点差 550.0bps 超过上限 300bps",
+      "liquidityQuote": 7320.27072,
+      "spreadBps": 550,
+      "change1h": -0.000500000000000056,
+      "change24h": 0.7839999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_28",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.6299999999999999,
+      "change24h": 0.73,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_29",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.4575,
+      "change24h": 0.7525,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_31",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.009000000000000008,
+      "change24h": 0.7495,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_33",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.7435,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_34",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.18499999999999994,
+      "change24h": 0.6299999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_36",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.0050000000000000044,
+      "change24h": 0.7415,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_37",
+      "prob": 0.995,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 297.31855 低于门槛 1000",
+      "liquidityQuote": 297.31855,
+      "spreadBps": 80,
+      "change1h": 0.485,
+      "change24h": 0.735,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_38",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.7195,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_39",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.010000000000000009,
+      "change24h": 0.4,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_40",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.14150000000000007,
+      "change24h": 0.7215,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_41",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.555,
+      "change24h": 0.635,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_43",
+      "prob": 0.973,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 60.14581 低于门槛 1000",
+      "liquidityQuote": 60.14581,
+      "spreadBps": 400,
+      "change1h": 0.007000000000000006,
+      "change24h": 0.7175,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_45",
+      "prob": 0.9944999999999999,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 463.73768 低于门槛 1000",
+      "liquidityQuote": 463.73768,
+      "spreadBps": 90,
+      "change1h": 0,
+      "change24h": 0.7095,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_47",
+      "prob": 0.9299999999999999,
+      "estimator": "mid",
+      "liquidityPass": true,
+      "liquidityReason": null,
+      "liquidityQuote": 1222.3087,
+      "spreadBps": 200,
+      "change1h": 0,
+      "change24h": 0.7050000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_49",
+      "prob": 0.85,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 801.4779 低于门槛 1000",
+      "liquidityQuote": 801.4779,
+      "spreadBps": 600,
+      "change1h": 0.025000000000000022,
+      "change24h": 0.76,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_51",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.050000000000000044,
+      "change24h": 0.68,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_52",
+      "prob": 0.78,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 73.5337 低于门槛 1000",
+      "liquidityQuote": 73.5337,
+      "spreadBps": 2200,
+      "change1h": -0.015000000000000013,
+      "change24h": 0.6950000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_54",
+      "prob": 0.998,
+      "estimator": "mid",
+      "liquidityPass": true,
+      "liquidityReason": null,
+      "liquidityQuote": 10996.27571,
+      "spreadBps": 20,
+      "change1h": 0,
+      "change24h": 0.6679999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_55",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.10999999999999999,
+      "change24h": 0.6699999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_56",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.05999999999999994,
+      "change24h": 0.6699999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_58",
+      "prob": 0.9955,
+      "estimator": "mid",
+      "liquidityPass": false,
+      "liquidityReason": "流动性 395.81195 低于门槛 1000",
+      "liquidityQuote": 395.81195,
+      "spreadBps": 50,
+      "change1h": 0.0010000000000000009,
+      "change24h": 0.6405000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_59",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.06499999999999995,
+      "change24h": 0.625,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_62",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.08499999999999996,
+      "change24h": 0.33999999999999997,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_63",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.37300000000000005,
+      "change24h": 0.266,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_67",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.0055,
+      "change24h": -0.3315,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_68",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.010000000000000009,
+      "change24h": -0.16,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_70",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.16999999999999993,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_71",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.0615,
+      "change24h": 0.23850000000000005,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_72",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.10499999999999998,
+      "change24h": -0.06000000000000005,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_73",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.04999999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_74",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.04999999999999993,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_75",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.374,
+      "change24h": 0.17149999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_76",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.05500000000000005,
+      "change24h": 0,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_77",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.030000000000000027,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_78",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.030000000000000027,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_79",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.03999999999999998,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_81",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.009999999999999953,
+      "change24h": 0.010000000000000009,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_82",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.010000000000000009,
+      "change24h": 0.020000000000000018,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_83",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.01999999999999999,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_84",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.010000000000000009,
+      "change24h": -0.020000000000000018,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_85",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.010000000000000009,
+      "change24h": 0.020000000000000018,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_86",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.020000000000000018,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_87",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.029999999999999916,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_88",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.020499999999999997,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_90",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.008000000000000007,
+      "change24h": 0.01150000000000001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_91",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.010000000000000009,
+      "change24h": 0.020000000000000018,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_92",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.010000000000000009,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_93",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.010000000000000002,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_94",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.010000000000000009,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_96",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.000500000000000056,
+      "change24h": 0.008500000000000063,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_97",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.0075,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_98",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.006,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_100",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.010000000000000009,
+      "change24h": 0.0050000000000000044,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_101",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.0010000000000000009,
+      "change24h": 0.0045000000000000595,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_103",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0.0025000000000000005,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_104",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.003999999999999997,
+      "change24h": 0.0015000000000000013,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_105",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0.0005,
+      "change24h": -0.0025,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_106",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": -0.001,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_108",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_110",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_111",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_112",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": 0,
+      "change24h": 0,
+      "seriesPoints": 1
+    },
+    {
+      "alias": "mkt_115",
+      "prob": null,
+      "estimator": null,
+      "liquidityPass": false,
+      "liquidityReason": "没有可见的盘口快照",
+      "liquidityQuote": null,
+      "spreadBps": null,
+      "change1h": -0.13,
+      "change24h": null,
+      "seriesPoints": 1
     }
   ],
   "watch": {
-    "alias": "mkt_0",
-    "tokenId": "4478899363141277273222204152562190919155813299972517415804497036469160759577",
-    "snapshots": 40
+    "alias": "mkt_1",
+    "tokenId": "18937143905787980845393241905747004871906766192313936911196285650655818425623",
+    "snapshots": 70
   },
   "acceptanceRules": {
     "jumpLookback": "24h",
-    "probJumpAbs": 0.03,
-    "spreadCeilBps": 300
+    "probJumpAbs": 0.35250000000000004,
+    "spreadCeilBps": 300,
+    "observedMaxChange": 0.7050000000000001,
+    "derivedFromData": true
   },
   "signals": [
     {
       "ruleId": "pm_spread_blowout",
-      "alias": "mkt_17",
+      "alias": "mkt_3",
       "purpose": "info",
       "severity": "P2",
       "estimator": "mid",
@@ -401,7 +1515,16 @@
     },
     {
       "ruleId": "pm_spread_blowout",
-      "alias": "mkt_22",
+      "alias": "mkt_21",
+      "purpose": "info",
+      "severity": "P2",
+      "estimator": "mid",
+      "change": null,
+      "lookback": null
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_43",
       "purpose": "info",
       "severity": "P2",
       "estimator": "mid",
@@ -410,29 +1533,92 @@
     },
     {
       "ruleId": "pm_prob_jump",
-      "alias": "mkt_39",
+      "alias": "mkt_47",
       "purpose": "novelty",
       "severity": "P1",
       "estimator": "mid",
-      "change": 0.7215,
+      "change": 0.7050000000000001,
+      "lookback": "24h"
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_49",
+      "purpose": "info",
+      "severity": "P2",
+      "estimator": "mid",
+      "change": null,
+      "lookback": null
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_52",
+      "purpose": "info",
+      "severity": "P2",
+      "estimator": "mid",
+      "change": null,
+      "lookback": null
+    },
+    {
+      "ruleId": "pm_prob_jump",
+      "alias": "mkt_54",
+      "purpose": "novelty",
+      "severity": "P1",
+      "estimator": "mid",
+      "change": 0.6679999999999999,
       "lookback": "24h"
     }
   ],
   "defaultConfigSignals": [
     {
       "ruleId": "pm_spread_blowout",
-      "alias": "mkt_17"
+      "alias": "mkt_3"
     },
     {
       "ruleId": "pm_spread_blowout",
-      "alias": "mkt_22"
+      "alias": "mkt_21"
     },
     {
-      "ruleId": "pm_prob_jump",
-      "alias": "mkt_39"
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_43"
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_49"
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "alias": "mkt_52"
     }
   ],
   "routed": [
+    {
+      "ruleId": "pm_spread_blowout",
+      "wake": "none",
+      "disposition": {
+        "kind": "info"
+      }
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "wake": "none",
+      "disposition": {
+        "kind": "info"
+      }
+    },
+    {
+      "ruleId": "pm_spread_blowout",
+      "wake": "none",
+      "disposition": {
+        "kind": "info"
+      }
+    },
+    {
+      "ruleId": "pm_prob_jump",
+      "wake": "W3",
+      "disposition": {
+        "kind": "novelty"
+      }
+    },
     {
       "ruleId": "pm_spread_blowout",
       "wake": "none",
@@ -458,7 +1644,7 @@
   "sql": {
     "existenceViolations": 0,
     "resolutionViolations": 0,
-    "noveltyRows": 1,
+    "noveltyRows": 2,
     "thinNovelty": 0,
     "estimatorMismatches": 0
   },
@@ -473,20 +1659,21 @@
     }
   },
   "clientStats": {
-    "requests": 81,
+    "requests": 240,
     "retries": 0,
     "failures": 0,
     "consecutiveFailures": 0,
     "degraded": false,
     "asOfCalls": 0,
     "tokens": {
-      "gamma:markets": 59,
+      "gamma:markets": 58,
       "dataApi:prices-history": 0,
-      "clob:book": 260
+      "clob:book": 181
     }
   },
   "checks": {
     "pm_signals_exercised": true,
+    "sample_has_real_jump": true,
     "existence_gate_zero_violations": true,
     "resolution_gate_zero_violations": true,
     "thin_market_novelty_zero": true,
@@ -498,5 +1685,5 @@
     "series_span_covers_window": true
   },
   "allPassed": true,
-  "note": "真实数据 + 落库后 SQL 断言。判据 ② 的毫秒整数与 ⑥ 的降级由单测覆盖（这里只跑真实链路）。若样本里没有任何市场真的跳变，判据 ③④ 会空跑 —— pm_signals_exercised 专门拦住这种\"假通过\"。"
+  "note": "真实数据 + 落库后 SQL 断言。判据 ② 的毫秒整数与 ⑥ 的降级由单测覆盖（这里只跑真实链路）。跳变阈值由本批样本的真实最大变化推导（报告里给出 observedMaxChange），因此不随行情波动而飘；样本完全没动过会报 inconclusive 而不是通过。"
 }

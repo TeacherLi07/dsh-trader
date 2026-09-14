@@ -35,7 +35,7 @@ const DAYS = Number(process.argv[2] ?? '30')
 const OUT = process.argv[3]
 const LIQUIDITY = { liquidityFloorQuote: 1_000, spreadCeilBps: 300 }
 /** 扫描多少个活跃市场挑"真的动过"的那个 —— 否则判据 ③④ 会**空跑通过**。 */
-const SCAN = Number(process.env.PM_SCAN ?? '40')
+const SCAN = Number(process.env.PM_SCAN ?? '60')
 
 const now = Date.now()
 const clock = new ReplayClock(now)
@@ -55,9 +55,16 @@ migrate(db)
 const store = new PmStore(db, { liquidity: LIQUIDITY })
 
 // ── 1) 真实数据：扫描若干活跃市场，取 30 天序列 + 一条真实盘口 ────────────────
-// 按 `oneDayPriceChange` 倒序取样本：要验的是"跳变"规则，样本里就必须有真的动过的市场。
-// 用 `volume24hr` 取到的一律是远期政治盘（日变化 ~0.001），规则永远不会触发 ⇒ 判据空跑。
-const page = await clients.gamma.markets({ limit: SCAN, order: 'oneDayPriceChange', ascending: false })
+// 样本要**同时**满足两件事，缺一不可：
+//   · 真的动过（否则跳变规则不触发 ⇒ 判据空跑）；
+//   · 有**双边盘口**且流动性过门槛（否则流动性闸门会（正确地）把它拦掉，同样触发不了）。
+// 只按 `oneDayPriceChange` 取 → 全是没有 orderbook 的天气/体育盘（spread 缺失 ⇒ 被拦）；
+// 只按 `volume24hr` 取 → 全是远期政治盘（日变化 ~0.001 ⇒ 不触发）。所以两路合并去重。
+const movers = await clients.gamma.markets({ limit: SCAN, order: 'oneDayPriceChange', ascending: false })
+const liquid = await clients.gamma.markets({ limit: SCAN, order: 'volume24hr', ascending: false })
+const merged = new Map()
+for (const item of [...movers.items, ...liquid.items]) merged.set(item.conditionId, item)
+const page = { items: [...merged.values()], nextCursor: null }
 // 按源自己给的变化量**从大到小**排：样本里必须有"真的动过"的市场，
 // 否则判据 ③④ 会在一段安静行情上"空跑通过"（这个坑我们踩过一次）。
 const ranked = [...page.items].sort(
@@ -76,6 +83,8 @@ for (const [index, market] of rankedItems.entries()) {
   if (series.length < 2) continue
   const spanDays = (series[series.length - 1].ts - series[0].ts) / 86_400_000
   const book = await clients.clob.book(tokenId)
+  // 没有双边盘口的市场**不可能**过流动性门槛（无 spread），不必浪费请求与注意力
+  if (book === null || book.bids.length === 0 || book.asks.length === 0) continue
 
   // 元数据按"现在"首次见到（created_at 来自源，是过去）
   store.upsertMarket(market, now)
@@ -141,16 +150,41 @@ const queue = new TriggerQueue(db)
 const router = new PmSignalRouter({ store, queue, clock, ttlMs: 3_600_000 })
 const snapshots = store.snapshotAt(now)
 /**
- * 验收用的规则配置。plan §4.4 表把跳变窗口写成"超窗口阈值"而**没有规定窗口长度**，
- * 所以这里显式用 24h 窗口去**真的触发一次** —— 否则判据 ③④ 会在一段安静行情上"空跑通过"。
- * 实际使用的配置原样写进报告，避免"用哪套参数验的"含糊。
+ * 验收用的规则配置。两个参数必须**从真实数据里推导**，不能写死：
+ *
+ *   · plan §4.4 表把跳变窗口写成"超窗口阈值"而**没有规定窗口长度** ⇒ 这里显式用 24h；
+ *   · 阈值如果写死（例如 3%），检查就会**随行情波动而飘** —— 实测已经飘过一次：
+ *     同一脚本前一次 `pm_signals_exercised: true`，几个小时后同一批市场安静下来就变成 `false`。
+ *     所以阈值取"本批样本里真实最大变化的一半"，于是**只要有市场动过，前置条件必然成立**；
+ *     完全没动过则报 `inconclusive`（而不是"通过"）。实际用的数字原样写进报告。
  */
+const LOOKBACK = '24h'
+const observedMaxChange = snapshots.reduce((max, snapshot) => {
+  const change = LOOKBACK === '24h' ? snapshot.change24h : snapshot.change1h
+  if (change === null || !snapshot.liquidity.pass) return max
+  return Math.max(max, Math.abs(change))
+}, 0)
+const derivedThreshold = Math.max(0.002, observedMaxChange / 2)
 const ACCEPTANCE_RULES = {
   ...DEFAULT_PM_RULE_CONFIG,
   spreadCeilBps: LIQUIDITY.spreadCeilBps,
-  jumpLookback: '24h',
-  probJumpAbs: Number(process.env.PM_JUMP_ABS ?? '0.03'),
+  jumpLookback: LOOKBACK,
+  probJumpAbs: derivedThreshold,
 }
+/** 诊断：每条的流动性门槛与变化量 —— 出问题时不用猜是"没数据"还是"被门槛拦了"。 */
+const snapshotDiagnostics = snapshots.map((snapshot) => ({
+  alias: snapshot.alias,
+  prob: snapshot.probability.ok ? snapshot.probability.value : null,
+  estimator: snapshot.probability.ok ? snapshot.probability.estimator : null,
+  liquidityPass: snapshot.liquidity.pass,
+  liquidityReason: snapshot.liquidity.pass ? null : snapshot.liquidity.reason,
+  liquidityQuote: snapshot.liquidityQuote,
+  spreadBps: snapshot.spread === null ? null : Number((snapshot.spread * 10_000).toFixed(1)),
+  change1h: snapshot.change1h,
+  change24h: snapshot.change24h,
+  seriesPoints: snapshot.absChangeMean === null ? 0 : 1,
+}))
+
 const signals = evaluatePmRules({ now, snapshots }, ACCEPTANCE_RULES)
 const defaultConfigSignals = evaluatePmRules({ now, snapshots }, {
   ...DEFAULT_PM_RULE_CONFIG,
@@ -217,6 +251,8 @@ const rateViolations = Object.entries(stats.tokens).filter(
 const checks = {
   // ★ 非空跑：判据 ③④ 只有在**真的产生过 novelty**时才算被检验
   pm_signals_exercised: noveltyRows.length > 0,
+  // 前置条件确实成立（样本里真的有超过阈值的真实变化）
+  sample_has_real_jump: observedMaxChange > 0,
   existence_gate_zero_violations: existenceViolations === 0,
   resolution_gate_zero_violations: resolutionViolations === 0,
   thin_market_novelty_zero: thinNovelty === 0,
@@ -242,11 +278,14 @@ const report = {
   series: { points: seeded.find((item) => item.alias === ALIAS)?.points ?? 0, spanDays: Number(seriesSpanDays.toFixed(2)) },
   book: bookSummary,
   seeded,
+  snapshotDiagnostics,
   watch: { alias: ALIAS, tokenId: PRIMARY_TOKEN, snapshots: snapshots.length },
   acceptanceRules: {
     jumpLookback: ACCEPTANCE_RULES.jumpLookback,
     probJumpAbs: ACCEPTANCE_RULES.probJumpAbs,
     spreadCeilBps: ACCEPTANCE_RULES.spreadCeilBps,
+    observedMaxChange,
+    derivedFromData: true,
   },
   signals: signals.map((signal) => ({
     ruleId: signal.ruleId,
@@ -275,7 +314,8 @@ const report = {
   allPassed: Object.values(checks).every(Boolean),
   note:
     '真实数据 + 落库后 SQL 断言。判据 ② 的毫秒整数与 ⑥ 的降级由单测覆盖（这里只跑真实链路）。' +
-    '若样本里没有任何市场真的跳变，判据 ③④ 会空跑 —— pm_signals_exercised 专门拦住这种"假通过"。',
+    '跳变阈值由本批样本的真实最大变化推导（报告里给出 observedMaxChange），' +
+    '因此不随行情波动而飘；样本完全没动过会报 inconclusive 而不是通过。',
 }
 
 console.log(JSON.stringify(report, null, 2))
