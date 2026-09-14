@@ -268,6 +268,31 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     expect(ports.journal.intentIds()).toHaveLength(1)
   })
 
+  it('决策的 context_hash 由代码给出，模型无法伪造（T1.5）', async () => {
+    // 端口里带了本轮组装出的 ctxHash ⇒ 决策按它落库
+    ports = { ...ports, contextHash: 'sha256:assembled' }
+    await call('trade_execute_order', openArgs)
+    expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('sha256:assembled')
+
+    // 模型就算自己塞一个 contextHash 入参也不会被采用
+    await call('trade_record_decision', {
+      decisionId: 'd-model-claim',
+      symbol: SYMBOL,
+      action: 'no_trade',
+      contextHash: 'sha256:伪造的',
+    })
+    expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('sha256:assembled')
+  })
+
+  it('没有组装过上下文时，占位符显式标明"未组装"而不是伪装成真哈希', async () => {
+    await call('trade_record_decision', {
+      decisionId: 'd-fallback',
+      symbol: SYMBOL,
+      action: 'no_trade',
+    })
+    expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('unassembled-manual:d-fallback')
+  })
+
   it('reduces and closes a live position by fraction', async () => {
     await call('trade_execute_order', openArgs)
     const opened = (await broker.getPositions())[0]!.qty

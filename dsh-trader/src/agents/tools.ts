@@ -33,6 +33,12 @@ export interface ToolPorts {
   readonly riskPct: number
   /** 结算视界（plan §7.9）：决策记录时算出 `reflection_due_at = now + 视界`。 */
   readonly reflectionHorizonMs?: number
+  /**
+   * 本轮组装出的 `ctxHash`（plan §5.1 / T1.5）。
+   * 未提供时决策落库为 `exec:<id>` —— 一个**显式标明"未组装"**的占位符，
+   * 而不是伪装成真哈希（否则"同一 contextHash"的对拍就失去意义）。
+   */
+  readonly contextHash?: string
 }
 
 /** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
@@ -480,7 +486,7 @@ const tradeExecuteOrder: ToolDefinition = {
       decisionId: effectiveDecisionId,
       symbol,
       decidedAt: ports.clock.now(),
-      contextHash: `exec:${decisionId}`,
+      contextHash: ports.contextHash ?? `unassembled-exec:${decisionId}`,
       action,
       executed: false,
       ...(sizeQty === undefined ? {} : { sizeQty }),
@@ -596,7 +602,6 @@ const tradeRecordDecision: ToolDefinition = {
     takeProfit: { type: 'number' },
     confidence: { type: 'number' },
     rationale: { type: 'string' },
-    contextHash: { type: 'string' },
   },
   async execute(args, ports) {
     const decisionId = requireString(args, 'decisionId')
@@ -606,7 +611,8 @@ const tradeRecordDecision: ToolDefinition = {
       throw new ToolArgumentError(`action 必须是 ${DECISION_ACTIONS.join('|')} 之一，收到 ${rawAction}`)
     }
     const action = rawAction as DecisionAction
-    const contextHash = optionalString(args, 'contextHash') ?? `manual:${decisionId}`
+    // `contextHash` **不接受模型入参**：哈希由代码给出，模型无法伪造"我看到过什么"
+    const contextHash = ports.contextHash ?? `unassembled-manual:${decisionId}`
     const sizeQty = optionalNumber(args, 'sizeQty')
     const stopPrice = optionalNumber(args, 'stopPrice')
     const takeProfit = optionalNumber(args, 'takeProfit')

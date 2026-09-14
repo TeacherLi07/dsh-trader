@@ -214,6 +214,12 @@ CREATE TABLE outcomes(                                -- 结算结果：**交易
   stop_hit INTEGER NOT NULL DEFAULT 0, fees_quote REAL NOT NULL DEFAULT 0,
   evidence_refs_json TEXT NOT NULL);
 
+CREATE TABLE context_snapshots(                     -- 上下文组装快照（§5.1）：ctxHash 可复现、changedParts 可审计
+  ctx_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL, symbol TEXT,
+  part_hashes_json TEXT NOT NULL,                   -- {C1: "sha256:..", ...}；C6 永不入 context
+  changed_parts_json TEXT NOT NULL, char_counts_json TEXT NOT NULL,
+  overflow_json TEXT NOT NULL DEFAULT '[]');
+
 CREATE TABLE order_intents(                           -- 唯一闸门：校验通过才写入
   intent_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL UNIQUE,  -- 幂等键
   decision_id TEXT REFERENCES decisions(decision_id), venue TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -619,7 +625,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
 | T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
 | T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额；**TTL 在读取侧真的执行**（`memory/recall`） |
-| T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库 |
+| T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库（`context_snapshots`）；`context_hash` 只由代码写入，模型不可伪造 |
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据 |
 | T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦ |

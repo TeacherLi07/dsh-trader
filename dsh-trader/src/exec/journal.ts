@@ -91,6 +91,8 @@ export interface DecisionSummary {
   readonly stopPrice: number | null
   readonly confidence: number | null
   readonly rationale: string | null
+  /** 决策时的上下文指纹（plan §5.1「绝不可丢」）—— 审计与对拍的锚点。 */
+  readonly contextHash: string
   readonly outcomeId: string | null
 }
 
@@ -116,6 +118,7 @@ interface DecisionRow {
   stop_price: number | null
   confidence: number | null
   rationale: string | null
+  context_hash: string
   outcome_id: string | null
 }
 
@@ -618,7 +621,7 @@ export class DecisionJournal {
   ): readonly DecisionSummary[] {
     const limit = options.limit ?? 20
     const sql =
-      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, outcome_id FROM decisions'
+      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, context_hash, outcome_id FROM decisions'
     const rows = (
       options.symbol === undefined
         ? this.#statements.get(`${sql} ORDER BY decided_at DESC LIMIT ?`).all(limit)
@@ -635,6 +638,7 @@ export class DecisionJournal {
       stopPrice: row.stop_price,
       confidence: row.confidence,
       rationale: row.rationale,
+      contextHash: row.context_hash,
       outcomeId: row.outcome_id,
     }))
   }

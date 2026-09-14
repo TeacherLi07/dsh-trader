@@ -99,6 +99,18 @@ CREATE TABLE IF NOT EXISTS outcomes (
   evidence_refs_json TEXT NOT NULL
 );
 
+-- 上下文组装快照（plan §5.1 / T1.5）：让 ctxHash 可复现、changedParts 可审计
+CREATE TABLE IF NOT EXISTS context_snapshots (
+  ctx_hash TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  symbol TEXT,
+  -- {C1: "sha256:..", C2: ...}；C6 永不入 context，因此不出现
+  part_hashes_json TEXT NOT NULL,
+  changed_parts_json TEXT NOT NULL,
+  char_counts_json TEXT NOT NULL,
+  overflow_json TEXT NOT NULL DEFAULT '[]'
+);
+
 -- 唯一闸门：只有通过硬闸的意图才会写入这里
 CREATE TABLE IF NOT EXISTS order_intents (
   intent_id TEXT PRIMARY KEY,

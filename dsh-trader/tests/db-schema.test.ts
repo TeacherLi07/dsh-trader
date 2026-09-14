@@ -41,6 +41,8 @@ describe('schema (plan §4.1 invariants)', () => {
       'features',
       'plan_cards',
       'decisions',
+      'outcomes',
+      'context_snapshots',
       'order_intents',
       'orders',
       'fills',
