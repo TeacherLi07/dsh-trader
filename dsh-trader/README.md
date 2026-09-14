@@ -24,6 +24,8 @@
 | T0.8a | 纸面撮合 `exec/paper` + 对账 `exec/reconcile` | ✅ 已完成（滑点/手续费、`clientOrderId` 幂等、保护单为挂单；对账纯函数覆盖孤儿单/未知持仓/无保护单） |
 | T0.8b | 确定性回放 `exec/replay` + `sizing` + `journal` | ✅ 已完成（P0 验收 ②③ 通过：真实 HTX 30 天 719 根回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0、命中全部可归因） |
 | T0.9 | 闭环探针 + R5 压测 | ✅ 已完成（`scripts/probe-check.mjs`：第一遍 create、第二遍 **resume**，且注入消息在 session 日志里落盘为 `form: 'notice'`；`scripts/soak.mjs`：24h 稳态 +2.73%、fd 波动 0、WAL 有界）|
+| — | **P0 验收**：plan §10 六条全部通过 | ✅ `tag: phase-p0` |
+| T1.1 | 判断流程：冻结 pack + workflow 脚本 + 角色提示词 | ✅ 已完成（脚本用 `.toString()` 内嵌 `pack.ts` 的纯函数，杜绝沙箱与库漂移；**真实脚本文本可在进程内用假 agent 执行**，253 单测覆盖 hash 守卫/冲突消解/收敛即停/只回结构化字段） |
 | P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
 
 ## 开发
