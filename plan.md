@@ -589,7 +589,8 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T0.5 | `features`（纯函数、增量维护） | T0.4 | 与全量重算逐点一致；含边界与缺失数据测试 |
 | T0.6 | `plan/dsl` + `evaluate` + `match` + `store` | T0.2, T0.5 | 每算子/每错误分支单测；UNCOVERED 路径可达 |
 | T0.7 | `rules` + `trigger`（去重/冷却/限流/分级） | T0.6 | 同一 bar 重复回放零重复触发 |
-| T0.8 | `exec/broker` + `paper` + `gate` + `reconcile` 骨架 + 回放工具 | T0.2, T0.6 | §10 P0 验收 ②③ |
+| T0.8a | `exec/paper`（纸面撮合）+ `reconcile`，与 `gate` 共用同一 `Broker` 接口 | T0.2, T0.6 | 撮合含滑点/手续费、按 `clientOrderId` 幂等、保护单是挂单而非立即成交；对账是纯函数 |
+| T0.8b | 确定性回放工具：features → plan match → rules → gate → paper | T0.8a, T0.7, T0.5 | §10 P0 验收 ②③：回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0 |
 | T0.9 | 探针（resume/followup/source）+ R5 压测脚本 | T0.1 | §10 P0 验收 ⑤⑥ |
 | T1.1 | `workflow` 脚本（冻结 pack、并行分析师、冲突消解、辩论、裁决） | T0.7 | 同一 `contextHash` 传所有分析师；只回结构化字段 + 工件指针 |
 | T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
