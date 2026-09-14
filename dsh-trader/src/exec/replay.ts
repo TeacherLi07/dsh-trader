@@ -54,6 +54,8 @@ export interface ReplayDeps {
   readonly riskPct: number
   readonly mode: RunMode
   readonly limits: RiskLimits | null
+  /** 判断通道（W2/W3）。不注入 = A 臂（纯机械执行）。 */
+  readonly judgment?: JudgmentChannel
 }
 
 export interface ReplayRequest {
@@ -83,7 +85,44 @@ export interface ReplayResult {
   /** 恒应为 0（`client_order_id` 唯一约束）—— P0 验收 ② 的硬指标。 */
   readonly duplicateClientOrderIds: number
   readonly realizedPnl: number
+  /** 每笔已实现盈亏（按产生顺序）—— P1.5 闸门要的是分布，不是一个总和。 */
+  readonly tradePnl: readonly number[]
+  /** 判断通道的裁决计数（A/B 闸门的两臂差异来源）。 */
+  readonly judgment: JudgmentCounters
 }
+
+/** 判断通道（W2/W3）在一次命中上的裁决。 */
+export interface JudgmentVerdict {
+  readonly approve: boolean
+  readonly reason: string
+}
+
+export interface JudgmentInput {
+  readonly symbol: string
+  readonly timeframe: string
+  readonly barTs: number
+  readonly planId: string
+  readonly conditionId: string
+  readonly expression: string
+  readonly action: PlanAction
+  readonly referencePrice: number
+  readonly atr: number | null
+  readonly equityQuote: number
+  readonly positionQty: number
+}
+
+/**
+ * 判断通道钩子（plan §10 P1.5）。
+ * A 臂（机械执行）不注入它；B 臂注入它，于是两臂唯一差异就是"判断层是否经手"。
+ */
+export type JudgmentChannel = (input: JudgmentInput) => Promise<JudgmentVerdict>
+
+export interface JudgmentCounters {
+  readonly reviewed: number
+  readonly approved: number
+  readonly vetoed: number
+}
+
 
 interface ExecuteArgs {
   readonly journal: DecisionJournal
@@ -367,6 +406,19 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
   let uncovered = 0
   let denied = 0
   let executed = 0
+  let reviewed = 0
+  let approved = 0
+  let vetoed = 0
+  const tradePnl: number[] = []
+  let lastRealized = deps.broker.realizedPnl?.() ?? 0
+
+  /** 每根 bar 后把新实现的盈亏记成一笔 —— 闸门要的是分布而不是总和。 */
+  const samplePnl = (): void => {
+    const now = deps.broker.realizedPnl?.() ?? 0
+    const delta = now - lastRealized
+    if (delta !== 0) tradePnl.push(delta)
+    lastRealized = now
+  }
 
   for (const bar of bars) {
     // 1) 时钟推进到本 bar 收盘；保护单先按 bar 的 high/low 触发（毫秒级不依赖 LLM）
@@ -408,24 +460,54 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
         matchedThisBar = true
         matched += 1
         log.push(`matched:${outcome.id}`)
-        const result = await executePlanAction({
-          journal,
-          broker: deps.broker,
-          clock: deps.clock,
-          plan,
-          conditionId: outcome.id,
-          action: outcome.action,
-          symbol: request.symbol,
-          barTs: bar.openTime,
-          referencePrice: bar.close,
-          atr: snapshot.values.atr14,
-          account,
-          position,
-          riskPct: deps.riskPct,
-          mode: deps.mode,
-          limits: deps.limits,
-          alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
-        })
+
+        // 判断通道（B 臂）在机械命中之后、执行之前介入；否决也要留痕
+        let vetoedHere = false
+        if (deps.judgment !== undefined) {
+          reviewed += 1
+          const verdict = await deps.judgment({
+            symbol: request.symbol,
+            timeframe: request.timeframe,
+            barTs: bar.openTime,
+            planId: plan.planId,
+            conditionId: outcome.id,
+            expression: outcome.expression,
+            action: outcome.action,
+            referencePrice: bar.close,
+            atr: snapshot.values.atr14,
+            equityQuote: account.equityQuote,
+            positionQty: position?.qty ?? 0,
+          })
+          if (verdict.approve) {
+            approved += 1
+            log.push(`judgment:approve:${outcome.id}:${verdict.reason}`)
+          } else {
+            vetoed += 1
+            vetoedHere = true
+            log.push(`judgment:veto:${outcome.id}:${verdict.reason}`)
+          }
+        }
+
+        const result = vetoedHere
+          ? { executed: false, decisionId: `veto:${outcome.id}`, reason: 'judgment_veto' }
+          : await executePlanAction({
+              journal,
+              broker: deps.broker,
+              clock: deps.clock,
+              plan,
+              conditionId: outcome.id,
+              action: outcome.action,
+              symbol: request.symbol,
+              barTs: bar.openTime,
+              referencePrice: bar.close,
+              atr: snapshot.values.atr14,
+              account,
+              position,
+              riskPct: deps.riskPct,
+              mode: deps.mode,
+              limits: deps.limits,
+              alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
+            })
         // 计划条件命中也要落库：这样 `alreadyFired` 才能跨重启工作，审计里也能看到"执行了什么"
         deps.queue.enqueue({
           triggerId: planDedupKey(plan.planId, outcome.id, request.symbol, bar.openTime),
@@ -446,10 +528,11 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
           },
         })
         if (result.executed) executed += 1
-        else {
+        else if (!vetoedHere) {
           denied += 1
           log.push(`denied:${outcome.id}:${result.reason ?? 'unknown'}`)
         }
+        samplePnl()
       } else if (outcome.kind === 'uncovered') {
         uncovered += 1
         log.push(`UNCOVERED:${outcome.reason}`)
@@ -489,6 +572,8 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
     triggerKeys: journal.triggerKeys(),
     log,
     duplicateClientOrderIds: journal.duplicateClientOrderIds(),
-    realizedPnl: deps.broker.realizedPnl?.() ?? 0,
+    realizedPnl: lastRealized,
+    tradePnl,
+    judgment: { reviewed, approved, vetoed },
   }
 }

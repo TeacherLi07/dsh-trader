@@ -1,0 +1,134 @@
+{
+  "venue": "htx",
+  "symbol": "BTC/USDT",
+  "timeframe": "1h",
+  "days": 92,
+  "backfill": {
+    "pages": 5,
+    "fetched": 2208,
+    "written": 2207,
+    "stoppedBy": "reached_until"
+  },
+  "thresholds": {
+    "iterations": 10000,
+    "confidence": 0.95,
+    "seed": 20260914,
+    "maxDrawdownRatio": 1.2,
+    "minBars": 2160,
+    "minTriggers": 200,
+    "minReviewed": 1,
+    "minPairedSamples": 20
+  },
+  "armA": {
+    "counters": {
+      "bars": 2207,
+      "matched": 2,
+      "uncovered": 14,
+      "denied": 0,
+      "executed": 2
+    },
+    "judgment": {
+      "reviewed": 0,
+      "approved": 0,
+      "vetoed": 0
+    },
+    "realizedPnl": -19.15721642546853,
+    "tradePnlCount": 1,
+    "metrics": {
+      "trades": 1,
+      "netPnlUsd": -19.15721642546853,
+      "maxDrawdownUsd": 19.15721642546853,
+      "executionDeviations": 0,
+      "bars": 2207,
+      "triggers": 16,
+      "judgment": {
+        "reviewed": 0,
+        "approved": 0,
+        "vetoed": 0
+      }
+    }
+  },
+  "armB": {
+    "counters": {
+      "bars": 2207,
+      "matched": 2,
+      "uncovered": 14,
+      "denied": 0,
+      "executed": 2
+    },
+    "judgment": {
+      "reviewed": 2,
+      "approved": 2,
+      "vetoed": 0
+    },
+    "realizedPnl": -19.15721642546853,
+    "tradePnlCount": 1,
+    "metrics": {
+      "trades": 1,
+      "netPnlUsd": -19.15721642546853,
+      "maxDrawdownUsd": 19.15721642546853,
+      "executionDeviations": 0,
+      "bars": 2207,
+      "triggers": 16,
+      "judgment": {
+        "reviewed": 2,
+        "approved": 2,
+        "vetoed": 0
+      }
+    }
+  },
+  "ci": {
+    "mean": 0,
+    "lower": 0,
+    "upper": 0,
+    "samples": 1,
+    "iterations": 10000,
+    "confidence": 0.95
+  },
+  "verdict": {
+    "keep": false,
+    "a": {
+      "trades": 1,
+      "netPnlUsd": -19.15721642546853,
+      "maxDrawdownUsd": 19.15721642546853,
+      "executionDeviations": 0,
+      "bars": 2207,
+      "triggers": 16,
+      "judgment": {
+        "reviewed": 0,
+        "approved": 0,
+        "vetoed": 0
+      }
+    },
+    "b": {
+      "trades": 1,
+      "netPnlUsd": -19.15721642546853,
+      "maxDrawdownUsd": 19.15721642546853,
+      "executionDeviations": 0,
+      "bars": 2207,
+      "triggers": 16,
+      "judgment": {
+        "reviewed": 2,
+        "approved": 2,
+        "vetoed": 0
+      }
+    },
+    "ci": {
+      "mean": 0,
+      "lower": 0,
+      "upper": 0,
+      "samples": 1,
+      "iterations": 10000,
+      "confidence": 0.95
+    },
+    "drawdownRatio": 1,
+    "failures": [
+      "净 PnL 差值 bootstrap 95% CI 下界 0.0000 ≤ 0"
+    ],
+    "inconclusive": [
+      "可配对逐笔 1 < 要求 20 —— bootstrap 在此样本量上退化"
+    ]
+  },
+  "judge": "stand-in",
+  "note": "B 臂为确定性替身；LLM 判断通道需要模型凭据（plan §12 第 20 项）。样本不足时判定为\"结论无效\"。"
+}
