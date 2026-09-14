@@ -32,6 +32,22 @@ export interface DecisionRecord {
   readonly reflectionDueAt?: number
 }
 
+/** 在途意图（崩溃恢复的输入）。 */
+export interface InFlightIntent {
+  readonly clientOrderId: string
+  readonly intentId: string
+  readonly decisionId: string | null
+  readonly symbol: string
+  readonly venue: string
+  readonly state: 'created' | 'unknown'
+  readonly type: string | null
+  readonly side: string | null
+  readonly qty: number | null
+  readonly price: number | null
+  readonly reduceOnly: boolean
+  readonly createdAt: number
+}
+
 export interface OrderIntentRecord {
   readonly intentId: string
   readonly clientOrderId: string
@@ -664,6 +680,58 @@ export class DecisionJournal {
         'UPDATE order_intents SET state = ?, acked_at = ?, exchange_order_id = ? WHERE client_order_id = ?',
       )
       .run(state, ackedAt, exchangeOrderId ?? null, clientOrderId)
+  }
+
+  /**
+   * **在途意图**（plan §4.2 崩溃恢复）：`created` 且没有 ack 的记录 ——
+   * 我们不知道交易所到底有没有收到它。这是崩溃恢复唯一可靠的查询线索。
+   */
+  inFlightIntents(): readonly InFlightIntent[] {
+    const rows = this.#statements
+      .get(
+        `SELECT client_order_id, intent_id, decision_id, symbol, venue, state, type, side, qty,
+                price, reduce_only, created_at
+         FROM order_intents
+         WHERE acked_at IS NULL AND state IN ('created', 'unknown')
+         ORDER BY created_at ASC, client_order_id ASC`,
+      )
+      .all() as {
+      client_order_id: string
+      intent_id: string
+      decision_id: string | null
+      symbol: string
+      venue: string
+      state: string
+      type: string | null
+      side: string | null
+      qty: number | null
+      price: number | null
+      reduce_only: number
+      created_at: number
+    }[]
+    return rows.map((row) => ({
+      clientOrderId: row.client_order_id,
+      intentId: row.intent_id,
+      decisionId: row.decision_id,
+      symbol: row.symbol,
+      venue: row.venue,
+      state: row.state as 'created' | 'unknown',
+      type: row.type,
+      side: row.side,
+      qty: row.qty,
+      price: row.price,
+      reduceOnly: row.reduce_only === 1,
+      createdAt: row.created_at,
+    }))
+  }
+
+  /** 无法判定交易所状态 ⇒ 标 `unknown`（绝不猜：由恢复流程告警并冻结该标的）。 */
+  markIntentUnknown(clientOrderId: string, at: number): boolean {
+    const result = this.#statements
+      .get("UPDATE order_intents SET state = 'unknown' WHERE client_order_id = ? AND acked_at IS NULL")
+      .run(clientOrderId)
+    void at
+    return Number(result.changes) > 0
   }
 
   // ── 检索（供 `trade_recall` 使用）────────────────────────────────────────────

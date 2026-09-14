@@ -1,0 +1,66 @@
+{
+  "ranAt": "2026-09-14T15:46:44.431Z",
+  "dbPath": "/tmp/dsh-crash-Td8gaB/crash.db",
+  "child": {
+    "ready": true,
+    "killSignal": "SIGKILL",
+    "exit": {
+      "code": null,
+      "signal": "SIGKILL"
+    },
+    "pid": 60075
+  },
+  "intentsBeforeRecovery": [
+    {
+      "clientOrderId": "co-crash-1",
+      "state": "created",
+      "symbol": "BTC/USDT"
+    }
+  ],
+  "recovery": {
+    "scanned": 1,
+    "resolved": [
+      {
+        "clientOrderId": "co-crash-1",
+        "outcome": {
+          "kind": "unknown",
+          "reason": "broker 不支持按 client_order_id 查询（无法区分\"没发出去\"与\"已成交\"）"
+        }
+      }
+    ],
+    "freezeSymbols": [
+      "BTC/USDT"
+    ],
+    "alerts": [
+      {
+        "level": "critical",
+        "code": "orphan_intent_unknown",
+        "message": "在途意图 co-crash-1（BTC/USDT）状态未知：交易所没有可查询的记录 ⇒ 冻结该标的的自动交易，需人工核对后再放开。原因：broker 不支持按 client_order_id 查询（无法区分\"没发出去\"与\"已成交\"）"
+      }
+    ],
+    "secondPassScanned": 1
+  },
+  "sql": {
+    "intents_total": 1,
+    "intents_created_unacked": 0,
+    "intents_unknown": 1,
+    "decisions_total": 1,
+    "outcomes_total": 0,
+    "fills_total": 0,
+    "audit_is_append_only_ok": true
+  },
+  "checks": {
+    "crash_scene_persisted_after_sigkill": true,
+    "sigkill_delivered": true,
+    "no_created_unacked_left": true,
+    "unknown_freezes_symbol": true,
+    "no_duplicate_decisions": true,
+    "no_duplicate_intents": true,
+    "no_duplicate_client_order_ids": true,
+    "recovery_idempotent": true,
+    "recovery_never_reorders": true,
+    "alert_is_actionable": true
+  },
+  "allPassed": true,
+  "note": "真实的 SIGKILL + 重开库恢复。paper broker 是内存实现，崩溃后无法回答 client_order_id 查询 ⇒ 按 plan §4.2 判\"未知\"并冻结标的。P2 ① 会用真交易所接口覆盖\"孤儿订单 = 0\"。"
+}
