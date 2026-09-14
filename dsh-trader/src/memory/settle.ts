@@ -209,6 +209,15 @@ export interface SettlementRunResult {
   readonly scanned: number
   readonly settled: number
   readonly skipped: number
+  /**
+   * 因**数据不足**而推迟的条数（保持 pending，下一轮重试）。
+   *
+   * 为什么必须显式区分"没结算"和"不能结算"：没有价格基准时写一条
+   * `entry_price = 0` 的 outcome 会污染 lessons 与 alpha 统计 —— 那是**编造数据**。
+   */
+  readonly deferred: number
+  /** 被推迟的决策 id（可操作：缺的是哪个标的的行情一眼可见）。 */
+  readonly deferredIds: readonly string[]
   readonly reflectionsWritten: number
   readonly reflectionsRejected: readonly { readonly decisionId: string; readonly reason: string }[]
   readonly errors: readonly { readonly decisionId: string; readonly reason: string }[]
@@ -224,6 +233,7 @@ export class SettlementScheduler {
 
     let settled = 0
     let skipped = 0
+    const deferredIds: string[] = []
     let reflectionsWritten = 0
     const reflectionsRejected: { decisionId: string; reason: string }[] = []
     const errors: { decisionId: string; reason: string }[] = []
@@ -232,14 +242,27 @@ export class SettlementScheduler {
       try {
         const fills = this.deps.journal.fillsForDecision(decision.decisionId)
         const entry = fills.length > 0 ? (fills[0] as FillView) : undefined
-        const direction: 1 | -1 = entry?.side === 'sell' ? -1 : 1
-        const entryPrice = entry?.price ?? this.entryFromBars(decision)
 
         const horizonEnd = decision.decidedAt + this.deps.horizonMs
         const bars = this.deps.bars.closedBars(decision.symbol, this.deps.timeframe, {
           since: decision.decidedAt,
           until: horizonEnd + timeframeMs(this.deps.timeframe),
         })
+
+        // 数据可用性闸门：没有成交**也没有**行情 ⇒ 没有价格基准。
+        // 有成交但没有 bar ⇒ 算不出出场价。两种都不许"编"一个结算，
+        // 保持 pending 等下一轮重试（行情回补完成后自然能结算）。
+        if (bars.length === 0 && entry === undefined) {
+          deferredIds.push(decision.decisionId)
+          continue
+        }
+        if (bars.length === 0) {
+          deferredIds.push(decision.decisionId)
+          continue
+        }
+
+        const direction: 1 | -1 = entry?.side === 'sell' ? -1 : 1
+        const entryPrice = entry?.price ?? (bars[0] as { close: number }).close
         const benchmarkBars = this.deps.bars.closedBars(
           this.deps.benchmarkSymbol,
           this.deps.timeframe,
@@ -302,15 +325,15 @@ export class SettlementScheduler {
       }
     }
 
-    return { scanned: pending.length, settled, skipped, reflectionsWritten, reflectionsRejected, errors }
-  }
-
-  /** 没有成交的决策（例如 no_trade）：用决策后的第一根 bar 收盘价作为参考入场价。 */
-  private entryFromBars(decision: PendingSettlement): number {
-    const bars = this.deps.bars.closedBars(decision.symbol, this.deps.timeframe, {
-      since: decision.decidedAt,
-      until: decision.decidedAt + this.deps.horizonMs + timeframeMs(this.deps.timeframe),
-    })
-    return bars.length > 0 ? (bars[0] as { close: number }).close : 0
+    return {
+      scanned: pending.length,
+      settled,
+      skipped,
+      deferred: deferredIds.length,
+      deferredIds,
+      reflectionsWritten,
+      reflectionsRejected,
+      errors,
+    }
   }
 }

@@ -214,3 +214,47 @@ describe('T0.8b acceptance: deterministic replay (plan §10 P0 ②③)', () => {
     h.db.close()
   })
 })
+
+describe('回放/机械执行也要进结算队列（P1 ④ 的前置）', () => {
+  it('★ 成交的决策必须登记 reflection_due_at，否则结算器永远扫不到东西', async () => {
+    const { db, deps } = harness(7)
+    deps.plans.save(card(), START)
+    const result = await replay(deps, { symbol: SYMBOL, timeframe: TF, since: START, until: START + BARS * HOUR })
+    expect(result.counters.executed).toBeGreaterThan(0)
+
+    const { DecisionJournal } = await import('../src/exec/journal.js')
+    const journal = new DecisionJournal(db)
+    // 关键：pending 不为 0。少了这一步，整条反思闭环在回测里根本不会跑，
+    // 而"结算成功率 ≥99%"会在 0 个样本上"通过"。
+    const pending = journal.pendingSettlements(START + BARS * HOUR + 24 * HOUR, 1000)
+    expect(pending.length).toBe(result.counters.executed)
+    for (const decision of pending) {
+      expect(decision.action === 'open' || decision.action === 'reduce' || decision.action === 'close').toBe(true)
+    }
+  })
+
+  it('结算本身幂等：同一批到期决策跑两遍不会多出 outcome', async () => {
+    const { db, deps } = harness(7)
+    deps.plans.save(card(), START)
+    await replay(deps, { symbol: SYMBOL, timeframe: TF, since: START, until: START + BARS * HOUR })
+    const { DecisionJournal } = await import('../src/exec/journal.js')
+    const { SettlementScheduler } = await import('../src/memory/settle.js')
+    const { BarArchive } = await import('../src/market/archive.js')
+    const scheduler = new SettlementScheduler({
+      journal: new DecisionJournal(db),
+      bars: new BarArchive(db),
+      clock: new ReplayClock(START),
+      timeframe: TF,
+      horizonMs: 4 * HOUR,
+      benchmarkSymbol: SYMBOL,
+      slippageBps: 5,
+    })
+    const at = START + (BARS + 48) * HOUR
+    const first = await scheduler.runOnce(at, 1000)
+    const second = await scheduler.runOnce(at, 1000)
+    expect(first.settled).toBeGreaterThan(0)
+    expect(second.skipped).toBe(0)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM outcomes').get() as { n: number }).n).toBe(first.settled)
+    expect(new DecisionJournal(db).duplicateClientOrderIds()).toBe(0)
+  })
+})

@@ -1,0 +1,106 @@
+{
+  "ranAt": "2026-09-14T15:45:00.892Z",
+  "days": 30,
+  "symbol": "BTC/USDT",
+  "timeframe": "1h",
+  "backfill": {
+    "pages": 2,
+    "fetched": 720,
+    "written": 719,
+    "bars": 719
+  },
+  "replay": {
+    "bars": 719,
+    "matched": 112,
+    "uncovered": 14,
+    "denied": 8,
+    "executed": 104
+  },
+  "settlement": {
+    "dueTotal": 104,
+    "settled": 104,
+    "pending": 0,
+    "rate": 1,
+    "passes": [
+      {
+        "attempt": 1,
+        "scanned": 104,
+        "settled": 104,
+        "skipped": 0,
+        "deferred": 0,
+        "deferredIds": []
+      },
+      {
+        "attempt": 2,
+        "scanned": 0,
+        "settled": 0,
+        "skipped": 0,
+        "deferred": 0,
+        "deferredIds": []
+      }
+    ]
+  },
+  "sql": {
+    "duplicate_client_order_ids": 0,
+    "decisions_with_multiple_outcomes": 0,
+    "decisions_with_multiple_lessons": 0,
+    "outcomes_total": 104,
+    "pending_total": 0
+  },
+  "daily": {
+    "day": "2026-08-21",
+    "asOf": 1787353200000,
+    "coverage": {
+      "symbols": [
+        "BTC/USDT"
+      ],
+      "withActivePlan": [
+        "BTC/USDT"
+      ],
+      "ratio": 1
+    },
+    "frequency": {
+      "byPurpose": {
+        "commitment": 24,
+        "info": 38,
+        "novelty": 8
+      },
+      "byDisposition": {
+        "executed": 24,
+        "info": 38,
+        "novelty": 6,
+        "rate_limited": 2
+      },
+      "budgetConsuming": {
+        "judgment": 0,
+        "novelty": 6
+      }
+    },
+    "cost": {
+      "totalUsd": 0,
+      "windows": [],
+      "costKnown": true
+    },
+    "decisions": {
+      "total": 24,
+      "executed": 24,
+      "settled": 24
+    },
+    "warnings": []
+  },
+  "checks": {
+    "plan_card_valid": true,
+    "plan_when_compiles": true,
+    "replay_log_attributable": true,
+    "uncovered_is_reported": true,
+    "daily_coverage_metric": true,
+    "daily_frequency_metric": true,
+    "daily_cost_consistent": true,
+    "settlement_rate_ge_99": true,
+    "one_outcome_per_decision": true,
+    "one_lesson_per_decision": true,
+    "no_duplicate_client_order_ids": true
+  },
+  "allPassed": true,
+  "note": "①–④ 用真实行情跑可运行判定；⑤（kill -9 resume）由 scripts/crash-recovery-check.mjs 单独验证。P1.5 通道有效性闸门见 scripts/ab-gate.mjs。"
+}

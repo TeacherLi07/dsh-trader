@@ -401,3 +401,87 @@ describe('SettlementScheduler', () => {
     expect(journal.outcomeFor('d-hold')?.entryPrice).toBe(102)
   })
 })
+
+describe('结算的数据可用性（P1 ④）', () => {
+  it('★ 缺数据时**不得**凭空结算：没有成交也没有 bar ⇒ 保持 pending 等重试', async () => {
+    // 决策存在、到期了，但该标的根本没有 bar（数据缺口）
+    journal.recordDecision({
+      decisionId: 'd-nodata',
+      symbol: 'BTC/USDT',
+      decidedAt: T0,
+      contextHash: 'ctx:nodata',
+      action: 'open',
+      executed: false,
+    })
+    journal.markDecisionReflectionDue('d-nodata', T0 + HORIZON)
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.scanned).toBe(1)
+    // 关键：不能写一条 entry_price=0 的假结算
+    expect(result.settled).toBe(0)
+    expect(result.deferred).toBe(1)
+    expect(journal.outcomeFor('d-nodata')).toBeUndefined()
+    // 仍然留在待结算队列里，下一轮还能补
+    expect(journal.pendingSettlements(NOW)).toHaveLength(1)
+  })
+
+  it('数据补齐后重试成功（"含重试"是可验证的）', async () => {
+    journal.recordDecision({
+      decisionId: 'd-retry',
+      symbol: 'BTC/USDT',
+      decidedAt: T0,
+      contextHash: 'ctx:retry',
+      action: 'open',
+      executed: false,
+    })
+    journal.markDecisionReflectionDue('d-retry', T0 + HORIZON)
+    expect((await scheduler().runOnce(NOW)).deferred).toBe(1)
+
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100, 100, 101, 101, 101])
+    const second = await scheduler().runOnce(NOW)
+    expect(second.settled).toBe(1)
+    expect(second.deferred).toBe(0)
+    expect(journal.outcomeFor('d-retry')?.entryPrice).toBe(100)
+  })
+
+  it('有成交价但窗口内没有 bar ⇒ 同样推迟（不能用 0 当出场价）', async () => {
+    executedDecision({ decisionId: 'd-fillonly' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+    expect((await scheduler().runOnce(NOW)).deferred).toBe(1)
+    expect(journal.outcomeFor('d-fillonly')).toBeUndefined()
+  })
+
+  it('结算成功率：到期决策里已结算的比例（≥99% 的判据落点）', async () => {
+    // 200 条有数据的到期决策 + 2 条无数据的（数据缺口）
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100, 100, 101, 101, 101])
+    for (let index = 0; index < 200; index += 1) {
+      executedDecision(
+        { decisionId: `d-ok-${index}`, reflectionDueAt: T0 + HORIZON },
+        { side: 'buy', price: 100, qty: 1, fee: 0 },
+      )
+    }
+    for (const symbol of ['NODATA/USDT', 'ALSONODATA/USDT']) {
+      journal.recordDecision({
+        decisionId: `d-missing-${symbol}`,
+        symbol,
+        decidedAt: T0,
+        contextHash: `ctx:${symbol}`,
+        action: 'open',
+        executed: false,
+      })
+      journal.markDecisionReflectionDue(`d-missing-${symbol}`, T0 + HORIZON)
+    }
+    // 全部到期
+    db.prepare('UPDATE decisions SET reflection_due_at = ? WHERE reflection_due_at IS NOT NULL').run(T0 + HORIZON)
+
+    const run = await scheduler().runOnce(NOW, 500)
+    expect(run.scanned).toBe(202)
+    expect(run.settled).toBe(200)
+    expect(run.deferred).toBe(2)
+    const rate = run.settled / (run.settled + run.deferred)
+    expect(rate).toBeGreaterThanOrEqual(0.99)
+    // "每条决策至多一条反思"仍然成立
+    expect(db.prepare('SELECT COUNT(*) AS n FROM outcomes').get()).toEqual({ n: 200 })
+  })
+})

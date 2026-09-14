@@ -54,6 +54,8 @@ export interface ReplayDeps {
   readonly riskPct: number
   readonly mode: RunMode
   readonly limits: RiskLimits | null
+  /** 结算视界（plan §7.9）；默认 4h，与 `DEFAULT_REFLECTION_HORIZON_MS` 同值。 */
+  readonly reflectionHorizonMs?: number
   /** 判断通道（W2/W3）。不注入 = A 臂（纯机械执行）。 */
   readonly judgment?: JudgmentChannel
 }
@@ -140,6 +142,7 @@ interface ExecuteArgs {
   readonly riskPct: number
   readonly mode: RunMode
   readonly limits: RiskLimits | null
+  readonly reflectionHorizonMs: number
   readonly alreadyIntended: (clientOrderId: string) => boolean
 }
 
@@ -384,8 +387,19 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     }
   }
 
+  // ★ 成交后登记结算到期时刻（plan §7.9）：**回放/机械执行路径也必须进结算队列**。
+  // 少了这一步，`SettlementScheduler` 在回放数据上永远扫不到任何东西 ——
+  // 反思闭环与 P1 ④ 的成功率都会"在没有样本的情况下通过"。
+  if (ack.state === 'filled' && SLOT_FILLING_ACTIONS.has(action.action)) {
+    args.journal.markDecisionExecuted(decisionId)
+    args.journal.markDecisionReflectionDue(decisionId, now + args.reflectionHorizonMs)
+  }
+
   return { executed: ack.state === 'filled', decisionId }
 }
+
+/** 会改变仓位、因而需要结算的动作。 */
+const SLOT_FILLING_ACTIONS = new Set(['open', 'reduce', 'close'])
 
 export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<ReplayResult> {
   const bars = deps.bars.closedBars(request.symbol, request.timeframe, {
@@ -506,6 +520,7 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
               riskPct: deps.riskPct,
               mode: deps.mode,
               limits: deps.limits,
+              reflectionHorizonMs: deps.reflectionHorizonMs ?? 4 * 3_600_000,
               alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
             })
         // 计划条件命中也要落库：这样 `alreadyFired` 才能跨重启工作，审计里也能看到"执行了什么"
