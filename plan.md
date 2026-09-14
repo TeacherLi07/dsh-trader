@@ -117,6 +117,11 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 
 模型**不能**给 `qty`、`price`、`stop_price` 的绝对数字（`set_stop/set_target` 的显式价位除外，且仍需过硬闸）。
 
+> **⚠️ 两套动作词汇必须分开**（实现时踩到过）：上面这张表是**计划卡**的 `then.action`；
+> **决策日志**（`decisions.action`）是另一套，多出 `no_trade`（看过、不动）与 `review`（拿不准、升级），
+> 而卡片上的 `escalate` 落到日志时记作 `review`（`toDecisionAction()`）。
+> 两者混用会让类型与数据库 CHECK 约束不一致 —— 现在 `ACTION_KINDS` 与 `DECISION_ACTIONS` 是两个独立常量，并有单测锁定。
+
 ### 3.4 仓位与保护位由代码推导 `[v0]`
 
 ```

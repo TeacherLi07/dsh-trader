@@ -26,7 +26,9 @@
 | T0.9 | 闭环探针 + R5 压测 | ✅ 已完成（`scripts/probe-check.mjs`：第一遍 create、第二遍 **resume**，且注入消息在 session 日志里落盘为 `form: 'notice'`；`scripts/soak.mjs`：24h 稳态 +2.73%、fd 波动 0、WAL 有界）|
 | — | **P0 验收**：plan §10 六条全部通过 | ✅ `tag: phase-p0` |
 | T1.1 | 判断流程：冻结 pack + workflow 脚本 + 角色提示词 | ✅ 已完成（脚本用 `.toString()` 内嵌 `pack.ts` 的纯函数，杜绝沙箱与库漂移；**真实脚本文本可在进程内用假 agent 执行**，253 单测覆盖 hash 守卫/冲突消解/收敛即停/只回结构化字段） |
-| P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
+| T1.2 | 角色工具箱与模型路由 `agents/roles.ts` | ✅ 已完成（只读角色**断言无副作用工具**、judge 独占执行权、desk ≤ 20；未实现工具由 `missingTools()` 显式报告） |
+| T1.3 | 交易工具 `agents/tools.ts`（10 个，含 propose/execute） | ✅ 已完成（**propose 绝不触达交易所**、**execute 内二次硬闸**、意图先落库→ack 后置状态、被拒也写审计链） |
+| P1（T1.4–T1.11 含 §4.4 预测市场）/ P1.5–P4 | 结算反思、context 组装、预算、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
 
 ## 开发
 

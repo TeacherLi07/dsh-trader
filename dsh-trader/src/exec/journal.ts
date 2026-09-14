@@ -12,8 +12,8 @@
 
 import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
-import { fingerprint } from '../util/canonical.js'
-import type { ActionKind } from '../plan/schema.js'
+import { canonicalJson, fingerprint } from '../util/canonical.js'
+import type { DecisionAction } from '../plan/schema.js'
 
 export interface DecisionRecord {
   readonly decisionId: string
@@ -21,7 +21,7 @@ export interface DecisionRecord {
   readonly planId?: string
   readonly decidedAt: number
   readonly contextHash: string
-  readonly action: ActionKind
+  readonly action: DecisionAction
   readonly sizeQty?: number
   readonly stopPrice?: number
   readonly takeProfit?: number
@@ -68,6 +68,50 @@ export interface FillRecord {
   readonly fee: number
   readonly feeCurrency: string
   readonly ts: number
+}
+
+export interface DecisionSummary {
+  readonly decisionId: string
+  readonly symbol: string
+  readonly decidedAt: number
+  readonly action: string
+  readonly sizeQty: number | null
+  readonly stopPrice: number | null
+  readonly confidence: number | null
+  readonly rationale: string | null
+  readonly outcomeId: string | null
+}
+
+export interface LessonSummary {
+  readonly lessonId: string
+  readonly decisionId: string
+  readonly symbol: string | null
+  readonly text: string
+  readonly evidenceRefs: string
+  readonly regimeBucket: string | null
+  readonly createdAt: number
+}
+
+interface DecisionRow {
+  decision_id: string
+  symbol: string
+  decided_at: number
+  action: string
+  size_qty: number | null
+  stop_price: number | null
+  confidence: number | null
+  rationale: string | null
+  outcome_id: string | null
+}
+
+interface LessonRow {
+  lesson_id: string
+  decision_id: string
+  symbol: string | null
+  text: string
+  evidence_refs_json: string
+  regime_bucket: string | null
+  created_at: number
 }
 
 export class DecisionJournal {
@@ -242,5 +286,123 @@ export class DecisionJournal {
       this.#statements.get('SELECT 1 AS x FROM order_intents WHERE client_order_id = ?').get(clientOrderId) !==
       undefined
     )
+  }
+
+  // ── 状态迁移（plan §8.2："意图先落库，收到 ack 再置 acked"）──────────────────
+
+  /** 该决策 id 是否已经存在（避免"拒绝记录"与既有决策撞主键）。 */
+  hasDecision(decisionId: string): boolean {
+    return (
+      this.#statements.get('SELECT 1 AS x FROM decisions WHERE decision_id = ?').get(decisionId) !==
+      undefined
+    )
+  }
+
+  /**
+   * 追加一条审计事件（append-only，带哈希链）。
+   *
+   * 用途是"被拒绝的尝试"：它不该写进 `decisions`（同一 decision_id 再写一行会撞主键），
+   * 但**必须留痕**（plan §9.1 审计优先）。
+   */
+  appendAudit(event: {
+    readonly actor: 'model' | 'human' | 'system'
+    readonly kind: string
+    readonly payload: unknown
+    readonly ts: number
+  }): string {
+    const last = this.#statements
+      .get('SELECT hash FROM audit_events ORDER BY seq DESC LIMIT 1')
+      .get() as { hash: string } | undefined
+    const prevHash = last?.hash ?? null
+    const hash = fingerprint({
+      prevHash,
+      ts: event.ts,
+      actor: event.actor,
+      kind: event.kind,
+      payload: event.payload,
+    })
+    this.#statements
+      .get(
+        `INSERT INTO audit_events (ts, actor, kind, payload_json, prev_hash, hash)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(event.ts, event.actor, event.kind, canonicalJson(event.payload), prevHash, hash)
+    return hash
+  }
+
+  /**
+   * 标记决策已执行。`executed` **不参与** contentHash（它是结果不是内容），
+   * 因此这个 UPDATE 不会破坏幂等根。
+   */
+  markDecisionExecuted(decisionId: string): void {
+    this.#statements.get('UPDATE decisions SET executed = 1 WHERE decision_id = ?').run(decisionId)
+  }
+
+  /** 收到交易所 ack 后推进意图状态；`created` 且无 ack 的记录是崩溃恢复的查询线索。 */
+  markIntentAcked(
+    clientOrderId: string,
+    state: 'acked' | 'filled' | 'rejected' | 'canceled',
+    exchangeOrderId: string | undefined,
+    ackedAt: number,
+  ): void {
+    this.#statements
+      .get(
+        'UPDATE order_intents SET state = ?, acked_at = ?, exchange_order_id = ? WHERE client_order_id = ?',
+      )
+      .run(state, ackedAt, exchangeOrderId ?? null, clientOrderId)
+  }
+
+  // ── 检索（供 `trade_recall` 使用）────────────────────────────────────────────
+
+  /** 最近的决策（可按标的过滤）—— 判断前的 just-in-time 检索。 */
+  recentDecisions(
+    options: { readonly symbol?: string; readonly limit?: number } = {},
+  ): readonly DecisionSummary[] {
+    const limit = options.limit ?? 20
+    const sql =
+      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, outcome_id FROM decisions'
+    const rows = (
+      options.symbol === undefined
+        ? this.#statements.get(`${sql} ORDER BY decided_at DESC LIMIT ?`).all(limit)
+        : this.#statements
+            .get(`${sql} WHERE symbol = ? ORDER BY decided_at DESC LIMIT ?`)
+            .all(options.symbol, limit)
+    ) as DecisionRow[]
+    return rows.map((row) => ({
+      decisionId: row.decision_id,
+      symbol: row.symbol,
+      decidedAt: row.decided_at,
+      action: row.action,
+      sizeQty: row.size_qty,
+      stopPrice: row.stop_price,
+      confidence: row.confidence,
+      rationale: row.rationale,
+      outcomeId: row.outcome_id,
+    }))
+  }
+
+  /** 已结算决策的反思（"教训"），连同证据指针。 */
+  recentLessons(
+    options: { readonly symbol?: string; readonly limit?: number } = {},
+  ): readonly LessonSummary[] {
+    const limit = options.limit ?? 20
+    const base =
+      'SELECT l.lesson_id, l.decision_id, l.text, l.evidence_refs_json, l.regime_bucket, l.created_at, d.symbol FROM lessons l LEFT JOIN decisions d ON d.decision_id = l.decision_id'
+    const rows = (
+      options.symbol === undefined
+        ? this.#statements.get(`${base} ORDER BY l.created_at DESC LIMIT ?`).all(limit)
+        : this.#statements
+            .get(`${base} WHERE d.symbol = ? ORDER BY l.created_at DESC LIMIT ?`)
+            .all(options.symbol, limit)
+    ) as LessonRow[]
+    return rows.map((row) => ({
+      lessonId: row.lesson_id,
+      decisionId: row.decision_id,
+      symbol: row.symbol,
+      text: row.text,
+      evidenceRefs: row.evidence_refs_json,
+      regimeBucket: row.regime_bucket,
+      createdAt: row.created_at,
+    }))
   }
 }

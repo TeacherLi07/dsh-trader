@@ -19,13 +19,14 @@ import { BarArchive } from '../market/archive.js'
 import { createFeatureContext } from '../market/context.js'
 import { FeatureEngine } from '../market/features.js'
 import { matchPlan, planDedupKey } from '../plan/match.js'
-import type {
-  LevelAction,
-  OpenAction,
-  PlanAction,
-  PlanCard,
-  ReduceAction,
-  TrailingAction,
+import {
+  toDecisionAction,
+  type LevelAction,
+  type OpenAction,
+  type PlanAction,
+  type PlanCard,
+  type ReduceAction,
+  type TrailingAction,
 } from '../plan/schema.js'
 import { PlanStore } from '../plan/store.js'
 import { RuleWatch, TriggerGovernor, type RuleSpec } from '../trigger/engine.js'
@@ -135,7 +136,7 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
       planId: args.plan.planId,
       decidedAt: now,
       contextHash,
-      action: action.action,
+      action: toDecisionAction(action.action),
       executed,
       ...extra,
     })
@@ -289,7 +290,7 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     planId: args.plan.planId,
     decidedAt: now,
     contextHash,
-    action: action.action,
+    action: toDecisionAction(action.action),
     executed: ack.state === 'filled',
     ...(sizeQty === undefined ? {} : { sizeQty }),
     ...(stopPrice === undefined ? {} : { stopPrice }),

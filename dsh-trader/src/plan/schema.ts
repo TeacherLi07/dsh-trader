@@ -24,6 +24,31 @@ export const ACTION_KINDS = [
 ] as const
 export type ActionKind = (typeof ACTION_KINDS)[number]
 
+/**
+ * **决策日志**的动作词汇（plan §11.4）。
+ * 它与计划卡的 `then.action` **不是同一套**：日志里 `NO_TRADE`（看过、不动）与 `REVIEW`（拿不准、升级）
+ * 是一等公民，而卡片上的 `escalate` 落到日志时记作 `review`。两者混用会导致 CHECK 约束与类型不一致。
+ */
+export const DECISION_ACTIONS = [
+  'noop',
+  'open',
+  'reduce',
+  'close',
+  'set_stop',
+  'set_target',
+  'set_trailing',
+  'cancel_all',
+  'halt',
+  'no_trade',
+  'review',
+] as const
+export type DecisionAction = (typeof DECISION_ACTIONS)[number]
+
+/** 计划卡动作 → 决策日志动作。 */
+export function toDecisionAction(action: ActionKind): DecisionAction {
+  return action === 'escalate' ? 'review' : action
+}
+
 /** v0 支持的时间框架。承诺/失效条件**声明自己的 tf**，因此表达式里不需要（也不允许）比较 `bar.tf`。 */
 export const TIMEFRAMES = ['1m', '15m', '1h', '4h', '1d'] as const
 export type Timeframe = (typeof TIMEFRAMES)[number]
