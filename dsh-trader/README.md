@@ -18,7 +18,7 @@
 | T0.3 | `clock.ts` + Config + 启动参数校验 | ✅ 已完成（含"禁止直接读墙钟"的 grep 测试） |
 | T0.4 | 行情：`market/{normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime}` + 插件接线 | ✅ 已完成（101 单测；HTX 实测 30 天 1h 回补 **719 根全部为已收盘 bar**；代理感知 fetch 见 `applyProxyAwareFetch`） |
 | T0.5 | 特征层：`market/{indicators,features,feature-archive}` + 重启回灌 | ✅ 已完成（增量实现与全量重算**逐点严格相等**；130 单测；HTX 实测 719 根真实 bar 跑出完整快照） |
-| T0.6 | 计划卡 schema + `when` DSL + 求值器 | 🟡 v0 已实现并有单测；`match/store` 待接 |
+| T0.6 | 计划卡 schema + `when` DSL + 求值器 + `match` + `store` | ✅ 已完成（DSL 每算子/每错误分支有单测；计划卡不可事后改写、每标的一张 active、UNCOVERED 可达） |
 | §4.4 | 预测市场事件源（Polymarket，**只读**） | 🟡 DDL（4 张表）+ PIT 三道闸门已落地并有单测；client/store/poller/watch/tools 属 T1.8–T1.11 |
 | T0.7/T0.8/T0.9 | 触发 / 执行 / 回放 | ⬜ 未开始 |
 | P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
