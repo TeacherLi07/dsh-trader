@@ -410,13 +410,15 @@ CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT N
 | # | 类别 | 载体 | form | 生命周期 | 压缩 |
 |---|---|---|---|---|---|
 | C1 | 宪法（纪律/禁则/动作词汇表） | `systemPrompt.section`，逐字 | 系统提示槽位 | 永久 | 不压缩 |
-| C2 | 配置（标的池/时间框/限额/基准） | `AGENTS.md` + 插件 Config | `instructions` | 天~周 | 不压缩 |
+| C2 | 配置（标的池/时间框/限额/基准） | 插件 Config（`cordis.patch.yml`）+ `config_versions` 表 | `instructions` | 天~周 | 不压缩 |
 | C3 | 状态（持仓/权益/挂单/activePlanId） | **每步从交易所+DB 重取** | `snapshot`（取代语义） | 单步 | 不适用 |
 | C4 | 承诺（`when`/`then`/失效条件） | DB，序列化注入 | `snapshot` | 窗口期 | **绝不压缩** |
 | C5 | 情节（已结算决策/反思/子 agent 报告） | 工具检索 + 固定预算 | `recall` | 单轮 | 可摘要，数值须精确 |
 | C6 | 原始（K 线/盘口/新闻全文） | **永不入 context**，落库按需取 | 不进入 | — | 不适用 |
 
 唤醒消息用 `notice`（`summary` ≤ **120 字符**硬上限）；C3/C4 合并为一条 snapshot；`ctxHash = sha256(canonical(组装结果))` 随决策落库。
+> **C2 不含 `AGENTS.md`**：仓库根的 `AGENTS.md` 面向**编码 agent**（构建/测试/约定，遵循 [agents.md](https://agents.md/)），
+> 里面有构建命令与"坑表"，对交易模型纯属噪声。交易配置只从插件 Config 与 `config_versions` 来，这样它才是**可审计、可热改**的（§6.5）。
 **遮蔽而非删除**：工具返回体在进入上下文时用带指路的占位符替换（"已省略 15m K 线 200 根，可用 `trade_market` 重取"）；决策与成交记录**不可遮蔽**。
 **绝不可丢（逐字/精确）**：`clientOrderId`/`decisionId`/`contentHash`/交易所 `orderId`；金额数量价位；活跃 `when` 与其过期时间；失效条件；未平仓头寸与未成交订单；未解决线程；限额与已用额度；数据指纹；已执行的副作用。
 
@@ -560,7 +562,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
 ```
 /workspace/
 ├── plan.md                     # 本文
-├── AGENTS.md                   # C2 半固定上下文
+├── AGENTS.md                   # 面向**编码 agent**的仓库说明（遵循 agents.md；不进交易上下文，见 §5.1）
 ├── docs/decision.md            # 决策与证据记录
 ├── .dsh/skills/{trading-playbook,funding-basis,liq-cascade}/SKILL.md
 └── dsh-trader/
@@ -620,91 +622,117 @@ patch 引用的子路径必须在 `exports` 里可达：
 ## 10. 路线图与量化验收
 
 原文档的"显著优于 / 曲线平稳 / 连续 N 天"不可自动判定；下面全部改成可计算的判据。
+**状态截至 2026-09-14：P0 ✅、P1 ✅、P1.5 闸门 ✅（可运行判定已产出，判定为"关闭 W2/W3"）。**
 
-| 阶段 | 目标 | 交付物 | 量化验收（可自动验证） |
-|---|---|---|---|
-| **P0 骨架**（1–2 周） | 数据 → 特征 → 规则 → **计划卡匹配** → 纸面执行 → 落库 | `market/plan/rules/exec(Paper)/db/clock` + 回放工具 + 探针 + 压测 | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三个表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次规则命中都打印 `matched:<id>` 或 `UNCOVERED:<reason>`；④ 表达式编译成功率 100%；⑤ 探针：`resume`→`followup` 产生 `assistant/message`，且 `source.form=notice` 渲染正确；⑥ 压测：24h 合成行情后 RSS 增长 < 10%（首小时为预热）、fd 数波动 ≤ 2<br>**⑥ 的口径**：R5 问的是"长跑会不会无限增长"。进程启动时 V8 堆/malloc arena/SQLite 页缓存都在爬坡，而 RSS **不随 GC 归还**，所以"从预热点算总增长"会把启动爬坡误判成泄漏。因此硬指标取**稳态斜率**（25% 处采样为基线比较末次），启动爬坡如实报告但不作闸门；WAL 另有上限检查。<br>**这个判据是有用的**：T0.9 第一次跑就抓到并修掉了一个真实泄漏 —— `db.prepare()` 每次调用都会在 `Database` 上累积 Statement（实测 5 万次调用 **+139.5MB**，缓存复用后 +0.3MB）。修完后 24h 稳态增长 **+2.73%**、fd 波动 **0**、WAL 有界；并由 `tests/db-discipline.test.ts` 守住"热路径不得直接 `prepare()`" |
-| **P1 判断与计划卡**（2–3 周）✅ | 审议窗产出可执行计划卡 + 记忆闭环 | workflow 脚本（含冲突消解）、角色提示词、全部工具、结算/反思、context 组装器、预算账本、**预测市场事件源（§4.4）** | ① 计划卡 schema 通过率 100%；② `when` 求值错误率 = 0（错误一律计 UNCOVERED 并告警）；③ 日输出计划覆盖率、W2/W3 频次、每窗口成本；④ 到期决策结算成功率 ≥ 99%（含重试），**每条决策至多一条反思**（唯一键）；⑤ kill -9 后 `resume` 恢复且无重复决策；⑥ 预测市场专项验收（见下）全部通过 |
-| **P1.5 通道有效性闸门** | 判定 W2/W3 是否值得保留 | A/B 回放报告（预注册指标）| 回放 ≥ 90 天或 ≥ 200 次触发；指标 = 扣费净 PnL（taker+资金费+滑点模型）+ 执行偏离次数。**保留 W2/W3 的条件**：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 的最大回撤 ≤ A × 1.2。否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**pm 驱动的 W3 同样纳入此闸门**：证不出正贡献就降级为只保留 `info` 级通知。<br>**实现**：`src/supervisor/ab.ts`（指标/回撤/配对 bootstrap/判据）+ `scripts/ab-gate.mjs`（可运行判定）；两臂唯一差异是判断通道是否经手。**补充口径**：可配对逐笔 < 20 时 bootstrap 退化 ⇒ 只报"结论无效"，不拿噪声当证据；§10 的"≥90 天或 ≥200 次触发"按**或**处理 |
-| **P2 测试网实盘**（2–3 周） | 真实接口、幂等、对账、硬闸、熔断 | `CcxtBroker`、对账、外部 watchdog、`/halt` | ① 订单在途时 `kill -9` × 50 次：孤儿订单 = 0、重复成交 = 0；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` 主循环 > 3×心跳间隔 → watchdog 撤单，交易所挂单 = 0；④ 停掉模型供应商：已挂保护单仍生效、`StopGuard` 仍执行 |
-| **P3 小额实盘**（持续） | `live_confirm` → `live_auto` | 限额、告警、成本看板 | 连续 **14 天**：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算、W2 ≤ 8/天、W3 ≤ 6/天 |
-| **P4 离线整合**（长期） | sleep-time 复盘与提案 | 周级复盘、playbook 提案、regime 检索、M3 版本化 | 每周产出可读复盘；playbook 变更**必须人工批准**；记忆块有版本与 diff，可回答"为什么改掉" |
+| 阶段 | 状态 | 量化验收（可自动验证） |
+|---|---|---|
+| **P0 骨架** | ✅ `tag: phase-p0` | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次命中都打印 `matched:`/`UNCOVERED:`；④ 表达式编译成功率 100%；⑤ 探针 `resume`→`followup` 产生 `assistant/message` 且 `source.form=notice` 正确落盘；⑥ 压测稳态增长 +2.73%、fd 波动 0、WAL 有界 |
+| **P1 判断与计划卡** | ✅ `tag: phase-p1` | ① 计划卡 schema 100%；② `when` 求值错误率 = 0（错误一律 UNCOVERED）；③ 覆盖率 / W2-W3 频次 / 每窗口成本；④ 结算成功率 ≥ 99%（含重试）+ 每条决策至多一条反思；⑤ `kill -9` 后 resume 且无重复决策；⑥ 预测市场专项 ①–⑧ 全通过 |
+| **P1.5 通道有效性闸门** | ✅ 可运行 | 保留条件：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 回撤 ≤ A × 1.2；否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**首轮判定：关闭**（`docs/p1.5-gate-run-2026-09-14.md`） |
+| **P2 真实接口与故障注入** | 待做 | ① 订单在途时 `kill -9` × 50：孤儿订单 = 0、重复成交 = 0；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` > 3× 心跳 → watchdog 撤单、交易所挂单 = 0；④ 停掉模型供应商：已挂保护单仍生效 |
+| **P3 小额实盘** | 待做 | 连续 **14 天**：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算、W2 ≤ 8/天、W3 ≤ 6/天 |
+| **P4 离线整合** | 待做 | 周级复盘可读；playbook 变更**必须人工批准**；记忆块有版本与 diff |
 
-**P1 ①–④ 可运行判定**：`node scripts/p1-acceptance.mjs 30` → 真实行情（HTX 30 天 1h）→ 真实回放 → 真实结算；
-首轮结果**全部通过**（`docs/p1-acceptance-2026-09-14.md`）。这一轮它抓到两个真问题：
-①**机械执行路径从不登记 `reflection_due_at`** ⇒ 反思闭环在回测里根本不跑、
-"结算成功率 100%"其实是在 **0 个样本**上通过的；②缺数据时会写一条 `entry_price = 0` 的**编造结算**。
-两者都已修（推迟而非编造，`deferred`/`deferredIds` 可观测）。⑤ 由 `scripts/crash-recovery-check.mjs` 单独验证。
+**⑥ 压测口径**（保留，因为它防止误判）：进程启动时 V8 堆 / malloc arena / SQLite 页缓存都在爬坡，而 RSS **不随 GC 归还** ⇒ 硬指标取**稳态斜率**（25% 处采样为基线比末次），启动爬坡如实报告但不作闸门。该判据抓到过真实泄漏：`db.prepare()` 每次调用累积 Statement（5 万次 **+139.5MB**），缓存复用后 +0.3MB；由 `tests/db-discipline.test.ts` 守住"热路径不得直接 `prepare()`"。
 
-**预测市场事件源专项验收（并入 P1，全部可自动判定）**：
-**可运行判定**：`node scripts/pm-pit-check.mjs 30` → 真实数据 + 落库后 SQL 断言；
-首轮结果**全部通过**（`docs/pm-pit-acceptance-2026-09-14.md`）。**非空跑由 `pm_signals_exercised` 守住** ——
-第一版脚本就因为取了远期政治盘（日变化 ≈0.001）而在 0 行上"通过"，被这条检查抓了出来。
-① 回放 30 天：**不存在**"市场未创建即被引用"或"结算结果提前可见"（SQL 断言命中行数 = 0）；② 所有 `pm_series.ts` 为**毫秒整数**且与源秒值可逆（`×1000`，边界单测）；③ 同一 alias 的 `prob` 在工具返回与告警 payload 中**估计量一致**；④ 低于流动性门槛的市场产生的 novelty 告警数 = **0**；⑤ 任意 10s 窗口对 gamma/clob/data-api 的请求数 ≤ 各自官方限额的 **20%**（令牌桶单测）；⑥ 轮询连续失败 N 次 → 降级为 `info` 告警且**交易主循环不受影响**（故障注入）；⑦ 热路径调用 v2 `as_of` 次数 = **0**（`as_of` 仅用于审计重建）；⑧ 未注册 alias 的 `when` 一律 UNCOVERED，**零静默 false**。
+### 10.1 可运行判定（全部一条命令可复现）
+
+| 判据 | 命令 | 结果 |
+|---|---|---|
+| P0 ②③ 回放确定性 | `node scripts/replay-check.mjs htx BTC/USDT 1h 30` | 8/8，PnL `117.5327914103922` |
+| P0 ⑤ 探针 | `node scripts/probe-check.mjs probe /tmp/trade-probe-result.json` | 通过 |
+| P0 ⑥ 压测 | `node --expose-gc scripts/soak.mjs 24 60` | 稳态 +2.73% |
+| P1 ①–④ | `node scripts/p1-acceptance.mjs 30` | 全通过（`docs/p1-acceptance-2026-09-14.md`） |
+| P1 ⑤ 崩溃恢复 | `node scripts/crash-recovery-check.mjs` | 10/10 真实 SIGKILL（`docs/crash-recovery-2026-09-14.md`） |
+| P1 ⑥ 预测市场 | `node scripts/pm-pit-check.mjs 30` | 11/11（`docs/pm-pit-acceptance-2026-09-14.md`） |
+| P1.5 通道闸门 | `node scripts/ab-gate.mjs htx BTC/USDT 1h 92` | 判定：关闭 W2/W3（`docs/p1.5-gate-run-2026-09-14.md`） |
+
+**非空跑纪律**（这三条是被真实踩坑逼出来的，永久保留）：① 结算成功率必须报**分母**（机械执行路径曾不登记 `reflection_due_at` ⇒ "100%" 是在 **0 个样本**上通过的）；② 预测市场 novelty 检查必须有 `pm_signals_exercised`（样本曾全是日变化 ≈0.001 的远期政治盘 ⇒ 规则不触发却"通过"）；③ 验收阈值**从真实数据推导**，不写死（写死 3% 时同一脚本会随行情飘）。
+
+**预测市场专项验收 ①–⑧**：① 不存在"市场未创建即被引用"/"结算结果提前可见"（SQL 命中 = 0）；② `pm_series.ts` 毫秒整数且与源秒可逆；③ 同一 alias 的 `prob` 在工具返回与告警 payload 中估计量一致；④ 低于流动性门槛的市场 novelty 数 = 0（实测 70 个有盘口市场仅 2 个过门槛，novelty 只对这 2 个产生）；⑤ 任意 10s 窗口请求数 ≤ 官方限额 20%；⑥ 轮询连续失败 ⇒ 降级为 `info` 且主循环不受影响；⑦ 热路径 `as_of` 次数 = 0；⑧ 未注册 alias 一律 UNCOVERED、零静默 false。
 
 ---
 
 ## 11. 任务清单（WBS）
 
-顺序即依赖顺序；每项完成 = 代码 + 单测 + 该行验收。
+顺序即依赖顺序；每项完成 = 代码 + 单测 + 该行验收。**P-1 / T0.* / T1.* 全部 ✅**（P0/P1 阶段标签已打）。
 
-| ID | 任务 | 依赖 | 完成判据 |
+| ID | 状态 | 任务 | 完成判据 |
 |---|---|---|---|
-| P-1.* | §9.3 五项前置 | — | 各条判据通过 |
-| T0.1 | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | P-1.2 | `--dump-config` exit 0 且全部 patch 行俱在（T1.10 起 11 行） |
-| T0.2 | SQLite schema + 迁移 + `db` 插件 | T0.1 | §4.1 DDL 落地；唯一索引/CHECK 有测试 |
-| T0.3 | `clock.ts` + Config 体系 + 参数启动校验 | T0.1 | 缺省参数**拒绝启动**；waiver 路径留痕；grep 测试通过 |
-| T0.4 | `market/feed` + `archive` + `backfill` | T0.2 | 30 天回补成功；只落已收盘 bar；断线重连有测试 |
-| T0.5 | `features`（纯函数、增量维护） | T0.4 | 与全量重算逐点一致；含边界与缺失数据测试 |
-| T0.6 | `plan/dsl` + `evaluate` + `match` + `store` | T0.2, T0.5 | 每算子/每错误分支单测；UNCOVERED 路径可达 |
-| T0.7 | `rules` + `trigger`（去重/冷却/限流/分级） | T0.6 | 同一 bar 重复回放零重复触发 |
-| T0.8a | `exec/paper`（纸面撮合）+ `reconcile`，与 `gate` 共用同一 `Broker` 接口 | T0.2, T0.6 | 撮合含滑点/手续费、按 `clientOrderId` 幂等、保护单是挂单而非立即成交；对账是纯函数 |
-| T0.8b | 确定性回放工具：features → plan match → rules → gate → paper | T0.8a, T0.7, T0.5 | §10 P0 验收 ②③：回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0 |
-| T0.9 | 探针（resume/followup/source）+ R5 压测脚本 | T0.1 | `scripts/probe-check.mjs`（`dsh --profile probe` 跑两遍 + 解压 session 日志核验 `form=notice` 落盘）与 `scripts/soak.mjs`（24h 稳态 + WAL 上限）；§10 P0 验收 ⑤⑥ |
-| T1.1 | `workflow` 脚本（冻结 pack、并行分析师、冲突消解、辩论、裁决） | T0.7 | 同一 `contextHash` 传所有分析师；只回结构化字段 + 工件指针 |
-| T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
-| T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
-| T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额；**TTL 在读取侧真的执行**（`memory/recall`） |
-| T1.4b | 每日运营指标（`supervisor/metrics.ts`）：计划覆盖率 + W2/W3 频次 + 每窗口成本 | T1.4, T1.6 | P1 ③ 可自动判定 ✅ |
-| T1.4c | 崩溃恢复（`exec/recovery.ts`）+ `crash-recovery-check.mjs`：在途意图分类、未知即冻结、恢复幂等 | T1.3 | P1 ⑤ 真实 SIGKILL 验收 ✅（`docs/crash-recovery-2026-09-14.md`） |
-| T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库（`context_snapshots`）；`context_hash` 只由代码写入，模型不可伪造 |
-| T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取（§8.1），决策回填 token/耗时/触发来源 |
-| T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据；已可运行（`scripts/ab-gate.mjs`），首轮判定见 `docs/p1.5-gate-run-2026-09-14.md`；**LLM 判断臂仍需凭据**（§12 #20） |
-| T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦；**已实测**（`docs/pm-client-live-2026-09-14.md`），修正了 plan 表格里三处单位/语义错误 |
-| T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ ✅ |
-| T1.10 | `trade_prediction_watch` + watch 治理（TTL/上限/去重/冷却）+ pm 规则族 + W3 接线 | T1.9, T0.7 | §10 专项 ④ ✅；novelty 与行情共享同一份预算（有测试） |
-| T1.11 | `plugins/predictions.ts` 插件 + patch 行 + Config（enabled/pollMs/上限/门槛） | T1.9 | `--dump-config` 列出该行（实测 11 行、exit 0） |
-| T2.* | CcxtBroker / 对账 / watchdog / `/halt` / 故障注入 | T1.* | §10 P2 四条 |
-| T3.* | 限额与告警打磨、`live_auto` 切换 | T2.* | §10 P3 |
-| T4.* | 周级复盘、playbook 提案、regime 检索、M3 版本化 | T3.* | §10 P4 |
+| P-1.* | ✅ | §9.3 五项前置 | 各条判据通过 |
+| T0.1 | ✅ | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | `--dump-config` exit 0 且 11 patch 行俱在 |
+| T0.2 | ✅ | SQLite schema + 迁移 + `db` 插件 | §4.1 DDL 落地；唯一索引/CHECK/append-only 有测试 |
+| T0.3 | ✅ | `clock.ts` + Config 体系 + 参数启动校验 | 缺省参数**拒绝启动**；waiver 留痕；grep 测试通过 |
+| T0.4 | ✅ | `market/feed` + `archive` + `backfill` | 30 天回补成功；只落已收盘 bar；断线重连有测试 |
+| T0.5 | ✅ | `features`（纯函数、增量维护） | 增量与全量重算**逐点严格相等** |
+| T0.6 | ✅ | `plan/dsl` + `evaluate` + `match` + `store` | 每算子/每错误分支单测；UNCOVERED 可达 |
+| T0.7 | ✅ | `rules` + `trigger`（去重/冷却/限流/分级） | 同一 bar 重复回放零重复触发 |
+| T0.8a | ✅ | `exec/paper` + `reconcile`，与 `gate` 共用 `Broker` 接口 | 滑点/手续费、`clientOrderId` 幂等、保护单是挂单 |
+| T0.8b | ✅ | 确定性回放：features → match → rules → gate → paper | P0 ②③：两遍 id 集合相等、重复数 = 0 |
+| T0.9 | ✅ | 探针（resume/followup/source）+ R5 压测 | P0 ⑤⑥ |
+| T1.1 | ✅ | `workflow` 脚本（冻结 pack、并行分析师、冲突消解、辩论、裁决） | 同一 `contextHash` 传所有分析师；只回结构化字段 + 工件指针 |
+| T1.2 | ✅ | 角色提示词 + `roles.ts` 白名单 + 模型路由 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
+| T1.3 | ✅ | 全部交易工具（propose/execute/portfolio/recall/risk/…） | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
+| T1.4 | ✅ | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | 四条反思闸门有测试；**TTL 在读取侧真的执行**；缺数据**推迟**而非编造 |
+| T1.4b | ✅ | 每日运营指标（覆盖率 / W2-W3 频次 / 每窗口成本） | P1 ③ 可自动判定；覆盖率绑定 `asOf` 时点 |
+| T1.4c | ✅ | 崩溃恢复（在途意图分类、未知即冻结、恢复幂等） | P1 ⑤ 真实 SIGKILL 10/10 |
+| T1.5 | ✅ | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | 组装可复现；`changedParts` 落库；`context_hash` 只由代码写入 |
+| T1.6 | ✅ | 预算账本 + 成本看板 | 缺价目 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取 |
+| T1.7 | ✅ | P1.5 A/B 回放 | `scripts/ab-gate.mjs` 可运行；LLM 判断臂待 §12.2 |
+| T1.8 | ✅ | `predictions/client` 三家 API + 令牌桶/退避 + PIT 三闸门 | §10 专项 ①②⑤⑥⑦；实测修正 plan 原文三处单位/语义错误 |
+| T1.9 | ✅ | `predictions/store` + `poller` + `trade_predictions` + alias↔token 映射 | §10 专项 ②③⑧ |
+| T1.10 | ✅ | `trade_prediction_watch` + watch 治理 + pm 规则族 + W3 接线 | §10 专项 ④；novelty 与行情共享同一份预算 |
+| T1.11 | ✅ | `plugins/predictions.ts` + patch 行 + Config | `--dump-config` 列出该行（11 行、exit 0） |
+| T2.1 | ⏳ | `CcxtBroker`（**HTX 优先**，venue-agnostic）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | 同一 `gate.ts`；sandbox 走 OKX（§12 #6） |
+| T2.2 | ⏳ | 对账 + 外部 watchdog + `/halt` / `/resume` | §10 P2 ③④ |
+| T2.3 | ⏳ | 故障注入：`kill -9` × 50、重复提交 × 10 | §10 P2 ①② |
+| T2.4 | ⏳ | 内核指标补全：`adx14` + `funding.rate` + `oi.changePct` + `liq.notional`（§12 #16） | 增量=全量；单位口径有测试 |
+| T2.5 | ⏳ | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | 分位定义可复现 |
+| T2.6 | ⏳ | **§12 已决策待实现的小项**：`SUGGESTED_LIMITS`→`EXAMPLE_LIMITS` + 启动自洽校验（#17）；negRisk 偏差校验（#12）；`PriceTableStore.ageDays` + 90 天告警（#19）；结算视界按 tf 推导 + `Reflector` 绑 quick tier（#18）；`PROMPT_VERSION` 并入 C1 哈希（#5） | 每项一个单测；#17 有"不自洽即拒启动"的断言 |
+| T3.* | ⏳ | 限额与告警打磨、`live_confirm` → `live_auto` | §10 P3 |
+| T4.* | ⏳ | 周级复盘、playbook 提案、regime 检索、M3 版本化 | §10 P4 |
 
 ---
 
-## 12. 未决项 `[开]`（须在标注阶段前关闭）
+## 12. 决策记录 `[定]`
 
-| # | 项 | 关闭时间 | 备注 |
+原「未决项」已逐条决断。原则：**能决的当场决，并写下依据与推翻条件**；只有真正需要外部输入的才留在 §12.2。
+
+### 12.1 已决
+
+| # | 议题 | 决策 | 依据 / 推翻条件 |
 |---|---|---|---|
-| 1 | 链上/宏观/情绪供应商选型 | P2 起 | 各选 1 家写 ADR；P0/P1 不阻塞 |
-| 2 | `regime` 分桶的精确定义（波动率分位/趋势强度/资金费率状态的桶边界） | P1 中 | 影响检索质量 |
-| 3 | `REVIEW` 率阈值（暂定 7 天滚动 30%）与暂停策略 | P1 末 | §6.1 |
-| 4 | DSL 扩展政策（谁能加算子、如何回测、何时"转正"为内核指标） | P1 中 | 对应 decision §8.5 |
-| 5 | 提示词正文（各角色） | P1 | 语料写入 `src/agents/prompts/` 并版本化 |
-| 6 | 凭据机制收敛（`EnvironmentFile` vs `dsh-credentials-local`） | P2 | §6.4 |
-| 7 | Python 数值分析接入范围 | P2+ | 只走共享数据存储，不做每 bar 调用 |
-| 8 | `headless` bundle 替换 `web` 模板以降低常驻开销 | P3 | §9.3 P-1.2 |
-| 9 | 容器化 | P3+ | decision §14.1 #6 |
-| 10 | **Polymarket WSS 走不了代理**：Node `ws` 不自动使用 `HTTP(S)_PROXY`（同一端点的 HTTPS 正常）⇒ 需要 `https-proxy-agent` 之类的 agent，或永久走轮询 | P1 中 | 轮询已是可用的默认路径 |
-| 11 | **pm 是否允许作为"承诺"触发**（vs 仅 novelty/info） | P1.5 | 由 A/B 回放判定，防止把市场情绪当信号 |
-| 12 | 多结果 / negRisk 事件的概率归一化与一致性校验（同一 negRisk 事件下概率和 ≈1） | P1 中 | 影响别名与规则族 |
-| 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | ✅ 已验证 | **v2 `interval=1m` 实测可用且覆盖 30 天（1441 点）**，已入白名单；`max` 行为不一致（plan 记超时，本次实测某 token 返回 248 点/3 个月）⇒ 不入白名单 |
-| 14 | **ccxt 自带 fetch 不读代理环境变量**：本机有 `HTTP(S)_PROXY` 且 `NODE_USE_ENV_PROXY=1`；不注入全局 fetch 时 HTX 报 `ECONNREFUSED`、OKX 超时，注入后正常 | ✅ 已解决 | `applyProxyAwareFetch()` 已实现，且在 `createMarketRuntime` 默认启用；2026-09-14 实测 HTX 30 天 1h 回补：720 根取回、**719 根落库全部为已收盘 bar**（进行中的那根被正确排除） |
-| 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
-| 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |
-| 17 | **建议风控参数不自洽**：`SUGGESTED_LIMITS` 的 200/2000 上限与 BTC 尺度不匹配 —— `notional ≈ equity × riskPct ÷ (stopDistance/price)`，实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），改 0.2% 后 104 次成交 | P1 中 | 需要按"止损距离/价格"标定建议参数，并在启动时校验 `riskPct`/止损/上限三者自洽（§6.5） |
-| 18 | **结算视界未标定**：`DEFAULT_REFLECTION_HORIZON_MS` 暂定 4h，且 `SettlementScheduler` 已实现但**尚未挂到周期循环**（等 P1.5 supervisor 的 heartbeat）；`Reflector` 也还没绑定到具体角色/模型路由 | P1.5 | 结算逻辑与闸门本身已测（T1.4）；缺的是调度位与路由，不是算法 |
-| 19 | **价目表需要定期复核**：§8.1 的价目抓取于 2026-09-14，官方保留调价权利；`price_table` 是唯一事实来源，但**没有任何东西会提醒我们它过期了** | P2 起 | 建议在 heartbeat 里加"价目表年龄 > N 天则告警"；P0/P1 不阻塞（缺行只降级为 token 上限，不会静默免费） |
-| 20 | **P1.5 的 LLM 判断臂缺凭据**：闸门已可运行，但 B 臂目前注入的是**确定性替身** `standInJudge`（两条机械规则），不是 W2/W3 的 LLM 通道 ⇒ 现在得到的是"闸门可运行且默认降级"的结论，**不是对 W2/W3 的最终判决** | P2（需要模型凭据） | 换掉 `ab-gate.mjs` 里注入的判断通道即可复用同一套闸门，其余不动 |
-| 21 | **A/B 的触发密度太低**：92 天 1h（2207 根已收盘 bar）只产生 16 次触发、1 笔配对成交、判断层出手 2 次 ⇒ 即使换上 LLM 通道也算不出有意义的 CI | P1 末 | 需要一套真的会成交的计划卡/规则族（或更长时间框）；判据可先按"≥200 次触发"满足 |
+| 1 | 链上/宏观/情绪供应商选型 | **不接**。`trade_news`/`trade_onchain` 保持未实现并如实报告 | 我方红线是"计划卡 + 机械执行"，这三个源在 P4 之前的边际价值不明；为凑工具数接噪声源是负收益。推翻条件：写出 ADR 说明某个源能改变**已注册计划卡**的触发质量 |
+| 2 | `regime` 分桶定义 | **分位数而非拍阈值**，组合桶 `trend\|vol` 共 9 桶：`vol` = `volRealized20` 在同标的同 tf 近 90 天滚动分位（<33% 低 / 33–67% 中 / >67% 高）；`trend` = `abs(ema20−ema50)/atr14` 分位（<0.5 震荡 / 0.5–1.5 趋势 / >1.5 强趋势） | 分位数天然适配不同标的的量纲，阈值必须从数据来。实现落 `src/market/regime.ts`（纯函数 + 需历史窗口，T2.5）。暂不含资金费率维度（等 #16 落地后再议） |
+| 3 | `REVIEW` 率阈值 | 保留 **7 天滚动 30%**，但补两条：分母 = 该窗口全部决策数；**窗口内决策 < 20 时不触发暂停**（避免冷启动误停）。触发后**只禁 open**，允许 reduce/close | 冷启动期 2 个决策里 1 个 review 就是 50%，按比例停机会误伤。`review` 不阻塞、不等待人类（§6.1） |
+| 4 | DSL 扩展政策 | **两阶段**：① *表达式层*加算子/路径 —— 纯函数 + 单测 + 回放对比即可，无需人审；`§3.2` 红线（禁赋值/循环/字符串/网络/时间）永不动。② *内核指标转正*（组合式 → `features` 一等指标）—— 必须 (a) 增量=全量逐点一致、(b) 90 天回放净 PnL 不降 > 10%、(c) 写入 `decision.md`，**且必须人审** | ②会改变所有计划卡的语义，属于"改宪法"级别。①不改变语义，只需证据 |
+| 5 | 提示词正文 | **主体已完成**（`src/agents/prompts.ts` 覆盖 analyst/reconcile/bull/bear/risk/judge）。补一条：提示词带显式 `PROMPT_VERSION`，并入 C1 宪法哈希 | 版本化必须能回答"这条决策用的是哪版提示词"；C1 的 `partHashes` 已在 `context_snapshots` 里。`trade_review`/`trade_playbook_update` 的提示词随 P4 |
+| 6 | 凭据机制与 venue | **定案**：`EnvironmentFile`（`$DSH_HOME/trading.env`，0600），不做 `dsh-credentials-local`（多一层间接、权限模型更复杂、收益不明）。**HTX = 生产 venue**（用户提供 key；行情/回补已实测）；**OKX = 只读交叉校验 + P2 故障注入的 sandbox venue** | 实测（ccxt 4.5.78）：HTX 的 `createOrder/cancelOrder/fetchOrder/fetchOpenOrders/fetchPositions/fetchBalance/fetchMyTrades` 全 `true`，但 **HTX 在 ccxt 里没有 sandbox 端点**，而 OKX 有（`urls.sandbox`）。P2 的"孤儿订单 = 0"必须在**不亏钱**的环境里做 ⇒ 双 venue。`CcxtBroker` 保持 venue-agnostic（§13 纪律 3）。**权限最小化**：key 只开交易、**禁用提现**、绑 IP；`paper`/`live` 用不同 profile；插件只报"已注入/未注入"布尔，永不打印密钥 |
+| 7 | Python 数值分析 | **不引入 Python 运行时**。只允许**离线批量**通道：Node 导出 → Python 算 → 结果写回静态表；**绝不进热路径、绝不每 bar 调用** | 跨语言会引入第二套时序语义，直接冲突 §7 的确定性要求（回测/实盘同一份代码）。v0 的指标需求 Node 侧已覆盖 |
+| 8 | `headless` bundle | **已落地**：`probe` 与 `trade` profile 均用 `--from-default-profile headless` 创建 | P-1.2 已用该路径创建 probe profile 并跑通探针，无需再议 |
+| 9 | 容器化 | **非目标**。交易进程跑 systemd unit | 我们依赖 `HTTP(S)_PROXY` + `host.docker.internal`，容器会新增网络故障面；§6.3 要求 watchdog 是**进程外独立 unit**，systemd 更直接。例外：一次性回测容器允许，不影响交易进程 |
+| 10 | Polymarket WSS | **永久走轮询**（60s 周期）。不引入 `https-proxy-agent` | 实测 WSS 握手超时（HTTPS 正常）；轮询已满足 W3 需求，且 30 天 PIT 回补与验收全通过。收益（延迟）对本系统无意义：动作来自计划卡，是分钟级 |
+| 11 | pm 能否作为 `commitment` 触发 | **永久禁止**。`allowPmCommitment` 默认 `false`，且要打开必须**同时**满足 §10 P1.5 判据 | decision.md 明确警示"市场情绪当信号"；而 A/B 闸门在触发密度解决前（§12.2 #21）给不出有意义证据。保留开关只为将来留门，不是待办 |
+| 12 | negRisk 概率归一化 | **只校验、绝不改写**：同一 negRisk 事件下 token `mid` 之和与 1 的偏差 > 3% ⇒ (a) 该 alias 置信度按 `confidencePenalty` 打折、(b) 发 `info` 告警、(c) 在 Event Pack 标注 | 归一化会掩盖真实的摩擦/套利空间，而那本身是信息。我们要的是"知道这组数不自洽"，不是替市场"修正"数据。实现落 `store.ts` 按 event 分组（T2.x） |
+| 13 | 历史深度（v2 interval） | **已关闭**：`1m` 实测覆盖 30 天（1441 点）⇒ 入白名单；`max` 行为不一致 ⇒ 不入白名单 | 见 `docs/pm-client-live-2026-09-14.md` |
+| 14 | ccxt 不读代理环境变量 | **已关闭**：`applyProxyAwareFetch()` 已实现并在 `createMarketRuntime` 默认启用 | 实测 HTX 30 天 1h 回补 720 取回 / 719 落库全为已收盘 bar |
+| 15 | WebSocket 行情需 CCXT Pro | **不买 Pro**。v0/v1 只用 REST | 实测免费版 `has.watchOHLCV === undefined`；REST 满足 60s 级需求，且我们的动作是分钟级。推翻条件：出现**必须在秒级**反应的规则 |
+| 16 | 内核指标未覆盖（`UNIMPLEMENTED_PATHS` 共 5 项） | **5 项全部可实现，一个都不移除**：`adx14` 纯计算（Wilder 三重平滑）；`funding.rate` / `oi.changePct` / `liq.notional` / `basis.bps` 走 ccxt/HTX | 实测 HTX 公开端点（**无需 key**）全部真实可用：`fetchFundingRate` → `funding_rate=-0.0000788`；`fetchOpenInterest` → `openInterestValue=2249677981.5`；`fetchLiquidations` → 5 条真实强平（含 `volume`/`trade_turnover`）；`basis.bps` → 同一 ccxt 实例取现货+永续 ticker，实测 `spot=78430.4 / swap=78400 ⇒ **−3.88 bps**`。★ **单位口径**：`funding.rate` 是**小数比例**（非 bp、非百分比）；`basis.bps` 单位是 **bps**（`(swap−spot)/spot×10000`）；`liq.notional` 用 `trade_turnover` 累加窗口值。三者口径写进 §3.2 词汇表且各有单位测试 |
+| 17 | 建议风控参数不自洽 | 删掉 `SUGGESTED_LIMITS` 的"建议"身份，改名 `EXAMPLE_LIMITS` 并标注"示例，非建议"；新增**启动期自洽校验**：`maxNotionalAtMinStop = equity × riskPct ÷ minStopDistancePct`，若 `perOrderCapUsd < 该值` ⇒ **拒绝启动**，并给出两个可选修法（调低 `riskPct` 或调高上限） | 实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），0.2% 才成交。`minStopDistancePct` 默认取 BTC 1h 2×ATR 的实测中位距离，可配置。让每单都在硬闸处被打回是"看起来在跑"的坏状态 |
+| 18 | 结算视界 / 调度位 / Reflector 绑定 | ① 视界**按计划卡 tf 推导**：`horizon = clamp(4 根 bar, 4h, 24h)`（1h→4h、4h→16h、1d→24h）；② 调度挂到 supervisor heartbeat（T2.2）；③ `Reflector` 绑 **quick tier**（`deepseek-flash`）+ 独立预算 | 结算是"这笔交易的结果"，应与持仓周期同尺度，全局 4h 常量对 1d 卡明显过短。反思已由 §5.3 闸门限制为"短、可检索"（≤600 字），用 quick tier 足够 |
+| 19 | 价目表年龄 | `PriceTableStore` 增加 `ageDays(at)`；heartbeat 检查 > **90 天** ⇒ 发 P2 告警（不阻塞），看板显示 `stale` 标记 | 官方保留调价权利；缺行只降级为 token 上限（不会静默免费），所以告警级别 P2 足够 |
+| 20 | 结算与反思的观测口径 | 结算结果必须同时报 `settled` / `deferred` / `deferredIds`；缺数据**推迟**并在下一轮重试，绝不写 `entry_price = 0` | 我们实际踩过：缺数据时写 0 会把"数据缺口"伪装成"零收益交易"，直接污染 alpha 与 lessons |
+| 21 | 机械执行与判断通道的记录一致性 | 机械执行路径**必须**登记 `reflection_due_at`（`{open, reduce, close}` 成交后）；`isTradeTrigger` 对 pm 信号写死 `false` | 实际踩过：机械路径不登记 ⇒ 反思闭环在回测里根本不跑，而"结算成功率 100%"是在 0 个样本上通过的 |
+
+### 12.2 待外部输入（不阻塞 P2 开工）
+
+| # | 事项 | 需要什么 | 现状与替代路径 |
+|---|---|---|---|
+| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto` |
+| B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
+| C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
+| D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |
+| E | `live_auto` 授权 | 人工决定 + 额度 | 必须先满足 §10 P3（连续 14 天：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算） |
 
 ---
 
