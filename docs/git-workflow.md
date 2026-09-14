@@ -43,5 +43,5 @@ cd dsh-trader && pnpm verify     # typecheck + build + test
 | 限制 | 影响 | 处置 |
 |---|---|---|
 | `@deepseek-ai/*` 是**运行时 peer**，本机靠 `tsconfig.paths` + `pnpm link:peers` 解析 | 标准 CI 环境没有 DSH 安装 ⇒ typecheck/build 在 CI 失败 | CI 只跑 `pnpm test`（测试不依赖 peer）；**typecheck/build 必须在装有 DSH 的环境执行**。接入远端后应加"先装 DSH 再 verify"的 job |
-| 本机**无法访问交易所端点**（实测 HTX `ECONNREFUSED`、OKX timeout；npm 与 Polymarket 正常） | 真实回补、测试网、实盘相关验收无法在本机完成 | 数据源一律**可注入**，测试用 fake；真实连通性验收挂到 plan §12 第 14 项 |
-| 本机到 Polymarket 的 **WSS 握手超时**（HTTPS 正常） | 实时流不可验证 | 轮询为默认路径，WSS 作为增强（plan §4.4） |
+| 交易所端点**经代理可达**，但 ccxt 自带 fetch 不读 `HTTP(S)_PROXY` | 不注入时表现成"网络不通"（`ECONNREFUSED`），容易误判为环境封锁 | `applyProxyAwareFetch()` 把 Node 全局 fetch 注入 ccxt，`createMarketRuntime` 默认启用；实测 HTX 30 天 1h 回补成功（plan §12 #14） |
+| Node `ws` 与 ccxt 都不自动走代理 | WSS 实时流不可用（同端点 HTTPS 正常） | 轮询为默认路径；要用 WSS 需显式 proxy agent（plan §12 #10/#15） |

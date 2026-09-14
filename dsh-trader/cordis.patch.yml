@@ -21,6 +21,9 @@
         crossCheckVenue: okx
         symbols: [BTC/USDT:USDT, ETH/USDT:USDT]
         timeframes: [1m, 15m, 1h, 4h, 1d]
+        enabled: true          # 起轮询；--dump-config 不会启动轮询
+        pollMs: 60000
+        recentLimit: 3
 
     - id: trade-rules
       name: dsh-trader/plugins/rules

@@ -298,7 +298,7 @@ CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT N
 
 | 数据 | P0/P1 | P2 |
 |---|---|---|
-| 行情 K 线 | CCXT Pro WS：HTX（主）+ OKX（交叉校验）；回补走 `fetchOHLCV` 分页 | — |
+| 行情 K 线 | **v0 = CCXT REST 轮询**（免费 `ccxt` 没有 WS OHLCV，见 §12 #15）+ `fetchOHLCV` 分页回补；**必须注入代理感知的 fetch**（§12 #14） | CCXT Pro WS（主）+ OKX 交叉校验 |
 | 资金费率 / OI | CCXT REST/WS（HTX、OKX） | — |
 | 清算流 | 启动按 `has`/`features` 探测；**不可用即标记该特征不可用，不伪造** | 换源补齐 |
 | **事件概率（预测市场）** | **Polymarket 只读**：Gamma（发现/元数据）+ CLOB（盘口/价格）+ Data API v2（历史序列）；默认 60s 轮询，WSS 作为可用时的增强 | 鲸鱼集中度/持仓（Data API v2）、结算链上事件 |
@@ -618,11 +618,12 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 7 | Python 数值分析接入范围 | P2+ | 只走共享数据存储，不做每 bar 调用 |
 | 8 | `headless` bundle 替换 `web` 模板以降低常驻开销 | P3 | §9.3 P-1.2 |
 | 9 | 容器化 | P3+ | decision §14.1 #6 |
-| 10 | **Polymarket WSS 可达性**（本机握手超时）：是否需要出站代理，或永久走轮询 | P1 中 | §4.4 实测；轮询已是可用的默认路径 |
+| 10 | **Polymarket WSS 走不了代理**：Node `ws` 不自动使用 `HTTP(S)_PROXY`（同一端点的 HTTPS 正常）⇒ 需要 `https-proxy-agent` 之类的 agent，或永久走轮询 | P1 中 | 轮询已是可用的默认路径 |
 | 11 | **pm 是否允许作为"承诺"触发**（vs 仅 novelty/info） | P1.5 | 由 A/B 回放判定，防止把市场情绪当信号 |
 | 12 | 多结果 / negRisk 事件的概率归一化与一致性校验（同一 negRisk 事件下概率和 ≈1） | P1 中 | 影响别名与规则族 |
 | 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | T1.8 | 影响回放覆盖面；取值走白名单 |
-| 14 | **本机无法访问交易所端点**（实测 HTX `ECONNREFUSED`、OKX connect timeout；npm 与 Polymarket 正常）⇒ 真实回补、P2 测试网、P3 实盘必须在可联网环境验收 | P2 之前 | 数据源一律**可注入**，测试用 fake，故 T0.4 的逻辑不受阻塞 |
+| 14 | **ccxt 自带 fetch 不读代理环境变量**：本机有 `HTTP(S)_PROXY` 且 `NODE_USE_ENV_PROXY=1`；不注入全局 fetch 时 HTX 报 `ECONNREFUSED`、OKX 超时，注入后正常 | ✅ 已解决 | `applyProxyAwareFetch()` 已实现，且在 `createMarketRuntime` 默认启用；2026-09-14 实测 HTX 30 天 1h 回补：720 根取回、**719 根落库全部为已收盘 bar**（进行中的那根被正确排除） |
+| 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
 
 ---
 
