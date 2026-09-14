@@ -578,7 +578,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay}.ts
         ├── agents/{types,pack,prompts,workflow,roles,tools}.ts
         ├── supervisor/{desk,heartbeat}.ts                 # P1.5 之后
-        └── plugins/{db,market,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
+        └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
 
 > 目录是**目标形态**；未建的模块在 WBS 里对应 T1.5–T1.11。已落地的部分与上表一致
@@ -642,7 +642,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | ID | 任务 | 依赖 | 完成判据 |
 |---|---|---|---|
 | P-1.* | §9.3 五项前置 | — | 各条判据通过 |
-| T0.1 | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | P-1.2 | `--dump-config` exit 0 且全部 patch 行俱在（当前 9 行；T1.8 起 +1） |
+| T0.1 | 仓库骨架 + `exports` + `cordis.patch.yml` + 插件空实现 | P-1.2 | `--dump-config` exit 0 且全部 patch 行俱在（T1.10 起 11 行） |
 | T0.2 | SQLite schema + 迁移 + `db` 插件 | T0.1 | §4.1 DDL 落地；唯一索引/CHECK 有测试 |
 | T0.3 | `clock.ts` + Config 体系 + 参数启动校验 | T0.1 | 缺省参数**拒绝启动**；waiver 路径留痕；grep 测试通过 |
 | T0.4 | `market/feed` + `archive` + `backfill` | T0.2 | 30 天回补成功；只落已收盘 bar；断线重连有测试 |

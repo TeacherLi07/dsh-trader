@@ -64,6 +64,23 @@
         dailyBudgetUsd: 5
         heartbeatMs: 15000
 
+    # 预测市场事件源（plan §4.4）：**只读、永不交易**；默认关闭，打开才会打网络
+    - id: trade-predictions
+      name: dsh-trader/plugins/predictions
+      config:
+        enabled: false
+        pollMs: 60000
+        liquidityFloorQuote: 1000       # 薄市场不产生 novelty（低于此值一律不发）
+        spreadCeilBps: 300              # 点差超上限 ⇒ 只发 info + 置信度折扣
+        historyInterval: 1d             # 实测可用；1h 返回 0 行、max 超时（§4.4）
+        marketPageSize: 50
+        newMarketEventWhitelist: []     # 空数组 = 不产生 pm_new_market（宁可不发也不乱发）
+        probJumpAbs: 0.08
+        probJumpVolMultiple: 4
+        probJumpCooldownMs: 900000      # 官方下限 15min，配置自检会强制
+        volumeSpikeMultiple: 5
+        signalTtlMs: 3600000
+
     - id: trade-tools-desk
       name: dsh-trader/plugins/tools-desk
 
