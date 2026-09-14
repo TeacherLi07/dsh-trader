@@ -360,6 +360,13 @@ CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT N
 
 **已实测的取值边界**：v2 `interval=1d`/`1w` 可用；**`1h` 返回 0 行**；**`max` 超时** ⇒ `interval` 走**白名单**，禁止未验证取值；所有请求带超时与重试上限。
 
+**⚠️ 2026-09-14 复测修正（详见 `docs/pm-client-live-2026-09-14.md`）**：
+1. `book.timestamp` 是**毫秒**（非秒）⇒ 用 `normalizeSourceMillis()` 解析，与 history 的秒分开；
+2. **尚无盘口的新市场 `/book` 返回 404** ⇒ 这是正常数据状态（`book()` 返回 `null`），
+   **不计入降级计数**，否则新市场会把客户端打到降级；
+3. v1 `prices-history?market=` 必须是 **CLOB token id**；传 `conditionId` 会返回
+   **200 + 空序列**（静默骗人）⇒ 客户端用 `assertTokenId()` 直接拒。
+
 **PIT 三道闸门**（decision.md §3.2 指出 TradingAgents 对 Polymarket "只有实时没有 as-of"，这里修掉）：
 
 | 闸门 | 规则 |
@@ -652,7 +659,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库（`context_snapshots`）；`context_hash` 只由代码写入，模型不可伪造 |
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取（§8.1），决策回填 token/耗时/触发来源 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据；已可运行（`scripts/ab-gate.mjs`），首轮判定见 `docs/p1.5-gate-run-2026-09-14.md`；**LLM 判断臂仍需凭据**（§12 #20） |
-| T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦ |
+| T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦；**已实测**（`docs/pm-client-live-2026-09-14.md`），修正了 plan 表格里三处单位/语义错误 |
 | T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ |
 | T1.10 | `trade_prediction_watch` + watch 治理（TTL/上限/去重/冷却）+ pm 规则族 + W3 接线 | T1.9, T0.7 | §10 专项 ④；novelty 只走 W3 限流 |
 | T1.11 | `plugins/predictions.ts` 插件 + patch 行 + Config（enabled/pollMs/上限/门槛） | T1.9 | `--dump-config` 列出该行 |

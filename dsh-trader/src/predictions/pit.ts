@@ -57,18 +57,44 @@ export function seriesAsOf<T extends PmSeriesPoint>(points: readonly T[], now: n
 }
 
 /** 疑似毫秒的下界：1e11 秒 ≈ 5138 年，1e11 毫秒 ≈ 1973 年 —— 超过即认为是误传的毫秒。 */
-const MILLISECOND_SUSPECT = 1e11
+/**
+ * 秒/毫秒的分界（约 1973-03-03）：
+ *   · 秒级时间戳不可能达到 1e11；
+ *   · 毫秒级时间戳（现代时间约 1.7e12）必然 ≥ 1e11。
+ * 正好用同一个常数做两个方向的判错，避免两处阈值漂移。
+ */
+const UNIT_BOUNDARY = 1e11
 
 /** 把源的**秒**级时间戳归一为**毫秒整数**；误传毫秒会被判错而不是静默放大 1000 倍。 */
 export function normalizeSourceSeconds(seconds: number): number {
   if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) {
     throw new PmTimeError(`源时间戳必须是有限正数，收到 ${String(seconds)}`)
   }
-  if (seconds >= MILLISECOND_SUSPECT) {
+  if (seconds >= UNIT_BOUNDARY) {
     throw new PmTimeError(`疑似毫秒时间戳被当作秒传入：${seconds}`)
   }
   const ms = seconds * 1000
   if (!Number.isSafeInteger(ms)) throw new PmTimeError(`秒级时间戳溢出：${seconds}`)
+  return ms
+}
+
+/**
+ * 把源的**毫秒**级时间戳原样透传。
+ *
+ * 为什么必须单独一个函数：**同一个源里不同端点的时间单位不同** ——
+ * 实测 `clob.polymarket.com/book` 的 `timestamp` 是**毫秒**（如 `1789399859695`），
+ * 而 `prices-history` 的 `t`/`timestamp` 是**秒**。
+ * 用 `normalizeSourceSeconds` 处理 book 会直接抛错（这是好事），但更危险的是
+ * "把秒当毫秒" —— 那会让时间静默回到 1970 年，PIT 门控就彻底失效。
+ */
+export function normalizeSourceMillis(ms: number): number {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) {
+    throw new PmTimeError(`源时间戳必须是有限正数，收到 ${String(ms)}`)
+  }
+  if (ms < UNIT_BOUNDARY) {
+    throw new PmTimeError(`疑似秒级时间戳被当作毫秒传入：${ms}`)
+  }
+  if (!Number.isSafeInteger(ms)) throw new PmTimeError(`毫秒级时间戳溢出：${ms}`)
   return ms
 }
 

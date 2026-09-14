@@ -1,0 +1,64 @@
+{
+  "ranAt": "2026-09-14T15:32:06.816Z",
+  "gamma": {
+    "markets": 3,
+    "sample": {
+      "slug": "xi-jinping-out-before-2027",
+      "createdAt": 1751574356889,
+      "createdAtIso": "2025-07-03T20:25:56.889Z",
+      "clobTokenIds": 2,
+      "outcomePrices": [
+        0.0355,
+        0.9645
+      ],
+      "spread": 0.001,
+      "liquidity": null
+    }
+  },
+  "clobBook": {
+    "bids": 34,
+    "asks": 130,
+    "tickSize": 0.001,
+    "minOrderSize": 5,
+    "observedAt": 1789399923000,
+    "observedAtIso": "2026-09-14T15:32:03.000Z",
+    "negRisk": false
+  },
+  "clobPricesHistoryV1": {
+    "points": 169,
+    "first": {
+      "ts": 1788796816000,
+      "price": 0.0405
+    },
+    "last": {
+      "ts": 1789399873000,
+      "price": 0.0355
+    }
+  },
+  "dataApiPricesHistoryV2": {
+    "points": 1442,
+    "first": {
+      "ts": 1789313460000,
+      "price": 0.0375
+    },
+    "last": {
+      "ts": 1789399912000,
+      "price": 0.0355
+    }
+  },
+  "stats": {
+    "requests": 4,
+    "retries": 0,
+    "failures": 0,
+    "consecutiveFailures": 0,
+    "degraded": false,
+    "asOfCalls": 0,
+    "tokens": {
+      "gamma:markets": 59,
+      "clob:book": 299,
+      "clob:prices-history": 199,
+      "dataApi:prices-history": 39
+    }
+  },
+  "note": "book.timestamp 实测为毫秒；history 的 t/timestamp 实测为秒 ⇒ 两条归一化路径不同（见 normalizeSourceMillis/normalizeSourceSeconds）"
+}
