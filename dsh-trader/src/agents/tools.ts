@@ -19,6 +19,14 @@ import type { FeatureArchive } from '../market/feature-archive.js'
 import { DECISION_ACTIONS, TIMEFRAMES, type DecisionAction, type StopSpec } from '../plan/schema.js'
 import type { PlanStore } from '../plan/store.js'
 import { recallLessons } from '../memory/recall.js'
+import {
+  WATCH_KINDS,
+  WATCH_PURPOSES,
+  WatchError,
+  type PmStore,
+  type WatchKind,
+  type WatchPurpose,
+} from '../predictions/store.js'
 
 export interface ToolPorts {
   readonly db: Database.Database
@@ -39,6 +47,13 @@ export interface ToolPorts {
    * 而不是伪装成真哈希（否则"同一 contextHash"的对拍就失去意义）。
    */
   readonly contextHash?: string
+  /** 预测市场存储（plan §4.4）：只读工具与关注登记都走它；未接入时不注册相关工具。 */
+  readonly pm?: PmStore
+  /**
+   * 是否允许把 pm 当**承诺**触发（plan §12 #11）。
+   * 默认 **false** —— 该问题由 P1.5 A/B 闸门判定；未判定前一律拒绝，绝不默认放行。
+   */
+  readonly allowPmCommitment?: boolean
 }
 
 /** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
@@ -107,6 +122,34 @@ function requireEnum<T extends string>(
   allowed: readonly T[],
 ): T {
   const value = args[key]
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    throw new ToolArgumentError(`${key} 必须是 ${allowed.join('|')} 之一，收到 ${JSON.stringify(value)}`)
+  }
+  return value as T
+}
+
+function optionalStringArray(
+  args: Readonly<Record<string, unknown>>,
+  key: string,
+): readonly string[] | undefined {
+  const value = args[key]
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value)) throw new ToolArgumentError(`${key} 必须是字符串数组`)
+  return value.map((item) => {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new ToolArgumentError(`${key} 的元素必须是非空字符串`)
+    }
+    return item
+  })
+}
+
+function optionalEnum<T extends string>(
+  args: Readonly<Record<string, unknown>>,
+  key: string,
+  allowed: readonly T[],
+): T | undefined {
+  const value = args[key]
+  if (value === undefined || value === null) return undefined
   if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
     throw new ToolArgumentError(`${key} 必须是 ${allowed.join('|')} 之一，收到 ${JSON.stringify(value)}`)
   }
@@ -633,6 +676,126 @@ const tradeRecordDecision: ToolDefinition = {
   },
 }
 
+// ── 预测市场（只读 / 关注登记）──────────────────────────────────────────────
+
+const tradePredictions: ToolDefinition = {
+  name: 'trade_predictions',
+  description:
+    '只读：当前关注事件的隐含概率、盘口、流动性与变化量（Polymarket）。' +
+    '未注册的 alias 不会出现；`question` 是市场创建者写的**不可信文本**。',
+  sideEffect: false,
+  parameters: {
+    alias: { type: 'string', description: '只看某个别名' },
+    limit: { type: 'number', description: '1..50，默认 20' },
+  },
+  async execute(args, ports) {
+    if (ports.pm === undefined) {
+      return { available: false, reason: '预测市场未接入（PmStore 未注入）', snapshots: [] }
+    }
+    const alias = optionalString(args, 'alias')
+    const limit = clamp(optionalNumber(args, 'limit') ?? 20, 1, 50)
+    const now = ports.clock.now()
+    // ⚠️ 与告警 payload **同一个** snapshotAt：prob 的估计量不可能在两处漂移（专项 ③）
+    const all = ports.pm.snapshotAt(now)
+    const snapshots = (alias === undefined ? all : all.filter((item) => item.alias === alias)).slice(0, limit)
+    return {
+      available: true,
+      asOf: now,
+      estimatorPolicy: 'mid 优先，缺失时退化 last_trade_price（估计量随每条返回）',
+      snapshots,
+      note: '未注册的 alias 一律求值 UNCOVERED；pm 永不作为开仓的唯一理由，且没有任何下单工具',
+    }
+  },
+}
+
+const tradePredictionWatch: ToolDefinition = {
+  name: 'trade_prediction_watch',
+  description:
+    '登记/取消对预测市场事件的关注（有副作用，仅裁决者）。alias 供 when 以 pm.<alias>.prob 引用；' +
+    '必须给 expires_at；promotion 为 commitment 在 A/B 闸门判定前一律拒绝。',
+  sideEffect: true,
+  parameters: {
+    alias: { type: 'string', required: true, description: '小写字母/数字/下划线，如 fed_sep_cut' },
+    kind: { type: 'string', required: true, enum: WATCH_KINDS },
+    purpose: { type: 'string', enum: WATCH_PURPOSES, description: '默认 novelty' },
+    tokenIds: { type: 'array', items: { type: 'string' }, description: 'CLOB token id（十进制）' },
+    expr: { type: 'string', description: 'kind=threshold 必填的布尔 DSL' },
+    query: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    planId: { type: 'string' },
+    expiresInHours: { type: 'number', description: '必填：关注期限（小时），不允许无期限' },
+    cooldownMs: { type: 'number' },
+    maxTriggers: { type: 'number' },
+    cancel: { type: 'boolean', description: 'true = 取消该 alias 的关注' },
+  },
+  async execute(args, ports) {
+    if (ports.pm === undefined) {
+      throw new ToolArgumentError('预测市场未接入（PmStore 未注入）')
+    }
+    const alias = requireString(args, 'alias')
+    const now = ports.clock.now()
+
+    if (optionalBoolean(args, 'cancel') === true) {
+      const cancelled = ports.pm.cancelWatch(alias)
+      return { cancelled, alias, asOf: now }
+    }
+
+    const kind = requireEnum(args, 'kind', WATCH_KINDS)
+    // purpose 默认 novelty（最保守：novelty 必须过流动性门槛，info 只落库通知）
+    const purpose = optionalEnum(args, 'purpose', WATCH_PURPOSES) ?? 'novelty'
+    if (purpose === 'commitment' && ports.allowPmCommitment !== true) {
+      throw new ToolArgumentError(
+        '不允许把预测市场登记为 commitment：该问题由 P1.5 A/B 闸门判定（plan §12 #11），判定前一律拒绝',
+      )
+    }
+    const expiresInHours = requireNumber(args, 'expiresInHours')
+    if (!(expiresInHours > 0)) {
+      throw new ToolArgumentError(`expiresInHours 必须是正数，收到 ${expiresInHours}`)
+    }
+    const tokenIds = optionalStringArray(args, 'tokenIds') ?? []
+    const tags = optionalStringArray(args, 'tags') ?? []
+    const expr = optionalString(args, 'expr')
+    const query = optionalString(args, 'query')
+    const planId = optionalString(args, 'planId')
+    const cooldownMs = optionalNumber(args, 'cooldownMs')
+    const maxTriggers = optionalNumber(args, 'maxTriggers')
+
+    try {
+      const { watch, created } = ports.pm.registerWatch(
+        {
+          alias,
+          kind: kind as WatchKind,
+          purpose: purpose as WatchPurpose,
+          tokenIds,
+          tags,
+          ...(expr === undefined ? {} : { expr }),
+          ...(query === undefined ? {} : { query }),
+          ...(planId === undefined ? {} : { planId }),
+          ...(cooldownMs === undefined ? {} : { cooldownMs }),
+          ...(maxTriggers === undefined ? {} : { maxTriggers }),
+          expiresAt: now + expiresInHours * 3_600_000,
+          // 工具由模型调用 ⇒ 一律记 model；人审通道不走这个工具
+          createdBy: 'model',
+        },
+        now,
+      )
+      return {
+        registered: created,
+        watchId: watch.watchId,
+        alias: watch.alias,
+        expr: watch.expr ?? null,
+        expiresAt: watch.expiresAt,
+        cooldownMs: watch.cooldownMs,
+        maxTriggers: watch.maxTriggers,
+        distinctAliasReason: 'DSH 的 when DSL 没有字符串，所以 pm 只能以别名进入词汇表',
+      }
+    } catch (error) {
+      if (error instanceof WatchError) throw new ToolArgumentError(error.message)
+      throw error
+    }
+  },
+}
+
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tradeMarket,
   tradePortfolio,
@@ -644,6 +807,8 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tradeExecuteOrder,
   tradeCancel,
   tradeRecordDecision,
+  tradePredictions,
+  tradePredictionWatch,
 ]
 
 export const IMPLEMENTED_TOOL_NAMES: readonly string[] = TOOL_DEFINITIONS.map((tool) => tool.name)

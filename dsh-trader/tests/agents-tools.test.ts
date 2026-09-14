@@ -93,7 +93,12 @@ describe('tool registry', () => {
 
   it('marks exactly the execution tools as side-effecting', () => {
     const sideEffects = TOOL_DEFINITIONS.filter((tool) => tool.sideEffect).map((tool) => tool.name).sort()
-    expect(sideEffects).toEqual(['trade_cancel', 'trade_execute_order', 'trade_record_decision'])
+    expect(sideEffects).toEqual([
+      'trade_cancel',
+      'trade_execute_order',
+      'trade_prediction_watch',
+      'trade_record_decision',
+    ])
     expect(SIDE_EFFECT_TOOLS).toContain('trade_execute_order')
   })
 })

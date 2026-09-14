@@ -252,6 +252,9 @@ export interface PmGammaMarket {
   readonly endDate: number | null
   readonly closed: boolean
   readonly negRisk: boolean
+  /** 所属事件（tags 挂在事件上，`/markets` 不返回顶层 tags）。 */
+  readonly events: readonly { readonly id: string; readonly slug: string; readonly title: string }[]
+  readonly lastTradePrice: number | null
   /** 市场创建者书写的文本 ⇒ **不可信输入**，只当数据、绝不参与工具授权。 */
   readonly untrustedText: { readonly question: string; readonly description: string | null }
   readonly lifecycle: { readonly resolved: boolean; readonly winningOutcome: string | null }
@@ -271,17 +274,40 @@ interface RawGammaMarket {
   outcomes?: unknown
   clobTokenIds?: unknown
   outcomePrices?: unknown
-  bestBid?: number
-  bestAsk?: number
-  spread?: number
-  volume24hr?: number
-  liquidity?: number
+  // ⚠️ 实测：Gamma 把数值型字段以**字符串**返回（`liquidity: "904179.3825"`），
+  // 因此这里必须按 unknown 收再做数值归一；只认 number 会让流动性永远是 null。
+  bestBid?: unknown
+  bestAsk?: unknown
+  spread?: unknown
+  lastTradePrice?: unknown
+  volume24hr?: unknown
+  volume24hrClob?: unknown
+  volumeNum?: unknown
+  liquidity?: unknown
+  liquidityNum?: unknown
   createdAt?: string
   endDate?: string
   closed?: boolean
   negRisk?: boolean
   umaResolutionStatus?: string
   winner?: string
+  events?: unknown
+}
+
+/**
+ * 数值归一：接受 number 与**数字字符串**（Gamma 实测混用）。
+ * 不可解析返回 `null` —— 绝不返回 0：0 会让流动性门槛"通过得莫名其妙"。
+ * 优先取厂商提供的 `*Num` 数值字段。
+ */
+function numeric(...candidates: readonly unknown[]): number | null {
+  for (const candidate of candidates) {
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return candidate
+    if (typeof candidate === 'string' && candidate.trim() !== '') {
+      const parsed = Number(candidate)
+      if (Number.isFinite(parsed)) return parsed
+    }
+  }
+  return null
 }
 
 function parseStringArray(value: unknown): readonly string[] {
@@ -321,16 +347,30 @@ export function normalizeGammaMarket(raw: RawGammaMarket): PmGammaMarket {
     outcomes,
     clobTokenIds: parseStringArray(raw.clobTokenIds),
     outcomePrices: parseNumberArray(raw.outcomePrices),
-    bestBid: typeof raw.bestBid === 'number' ? raw.bestBid : null,
-    bestAsk: typeof raw.bestAsk === 'number' ? raw.bestAsk : null,
-    spread: typeof raw.spread === 'number' ? raw.spread : null,
-    volume24hr: typeof raw.volume24hr === 'number' ? raw.volume24hr : null,
-    liquidity: typeof raw.liquidity === 'number' ? raw.liquidity : null,
+    bestBid: numeric(raw.bestBid),
+    bestAsk: numeric(raw.bestAsk),
+    spread: numeric(raw.spread),
+    lastTradePrice: numeric(raw.lastTradePrice),
+    volume24hr: numeric(raw.volumeNum, raw.volume24hrClob, raw.volume24hr),
+    liquidity: numeric(raw.liquidityNum, raw.liquidity),
     // 缺失的时间戳退化到 0（= 远古）而不是 now：宁可不引用，也不要"看起来刚创建"
     createdAt: parseTime(raw.createdAt) ?? 0,
     endDate: parseTime(raw.endDate),
     closed: raw.closed === true,
     negRisk: raw.negRisk === true,
+    events: Array.isArray(raw.events)
+      ? raw.events.flatMap((item) => {
+          if (typeof item !== 'object' || item === null) return []
+          const event = item as Record<string, unknown>
+          return [
+            {
+              id: String(event.id ?? ''),
+              slug: String(event.slug ?? ''),
+              title: String(event.title ?? ''),
+            },
+          ]
+        })
+      : [],
     untrustedText: {
       question: String(raw.question ?? ''),
       description: typeof raw.description === 'string' ? raw.description : null,
