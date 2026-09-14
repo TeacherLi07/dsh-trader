@@ -14,10 +14,12 @@ import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
 import { getDatabase } from '../db/runtime.js'
 import { BarArchive } from '../market/archive.js'
+import { createFeatureContext } from '../market/context.js'
 import type { CcxtExchangeLike } from '../market/ccxt-source.js'
 import { FeatureArchive } from '../market/feature-archive.js'
 import { FEATURE_WARMUP_BARS, FeaturePipeline } from '../market/features.js'
 import { createMarketRuntime, type MarketRuntime } from '../market/runtime.js'
+import { getTriggerRuntime } from '../trigger/runtime.js'
 
 export const name = 'trade-market'
 
@@ -91,7 +93,14 @@ export function apply(ctx: Context, config: MarketConfig): void {
         clock: systemClock(),
         createExchange: () => new Exchange({ enableRateLimit: true }),
         onClosedCandle: (candle) => {
-          pipeline.onClosedCandle(candle)
+          const snapshot = pipeline.onClosedCandle(candle)
+          // 行情 → 特征 → 规则 → 触发；rules 插件未启用时静默跳过（不是错误）
+          getTriggerRuntime()?.onBar({
+            symbol: candle.symbol,
+            timeframe: candle.timeframe,
+            barTs: candle.openTime,
+            context: createFeatureContext(snapshot),
+          })
         },
         onError: () => {
           // TODO(OBS/T1.6): 写 audit_events + 接告警通道（plan §10.3）。

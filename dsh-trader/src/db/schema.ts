@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS triggers (
   purpose TEXT NOT NULL CHECK (purpose IN ('invalidation', 'commitment', 'novelty', 'info')),
   bar_ts INTEGER,
   payload_json TEXT NOT NULL,
+  -- 最终去向：只有 novelty/judgment 消耗唤醒预算（被冷却/限流压掉的不算，但仍落库可审计）
+  disposition TEXT NOT NULL CHECK (disposition IN ('info', 'novelty', 'judgment', 'cooldown', 'rate_limited')),
   state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'done', 'expired')),
   created_at INTEGER NOT NULL,
   expires_at INTEGER

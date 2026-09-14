@@ -28,7 +28,8 @@
     - id: trade-rules
       name: dsh-trader/plugins/rules
       config:
-        rulePacks: [mean_reversion_v1, funding_extreme_v1]
+        # 只列**已实现**的规则包；写错包名会让插件启动即报错（不静默跳过）
+        rulePacks: [mean_reversion_v1, breakout_v1]
         cooldownMs: 900000
         windows:
           - { id: pre_session, at: '00:30Z' }

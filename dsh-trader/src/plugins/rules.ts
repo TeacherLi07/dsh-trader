@@ -1,12 +1,26 @@
 /**
- * `trade-rules` —— 规则引擎与唤醒治理（W1/W2/W3）。
+ * `trade-rules` —— 规则引擎与触发治理（plan §2 / T0.7）。
  *
- * 状态：骨架（T0.1）。规则实现为**纯函数** `(features, plan, position, config) => Hit[]`，
- * 不调用模型、不读时钟、不写状态（plan §6.6）。
+ * 规则是**纯函数**（不调模型、不读时钟、不写状态）；治理是有状态闸门（去重/冷却/限流/分级），
+ * 全部经 `TriggerQueue` 幂等落库，因此"同一根 bar 重复回放零重复触发"是数据库层面的性质。
+ *
+ * 规则包名写错必须**立刻报错**：静默跳过等于让用户以为在盯盘、实际什么都没盯。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+import { systemClock } from '../clock.js'
+import { getDatabase } from '../db/runtime.js'
+import {
+  DEFAULT_TRIGGER_LIMITS,
+  RULE_PACKS,
+  RuleWatch,
+  TriggerGovernor,
+  buildRules,
+  type TriggerLimits,
+} from '../trigger/engine.js'
+import { TriggerQueue } from '../trigger/queue.js'
+import { setTriggerRuntime } from '../trigger/runtime.js'
 
 export const name = 'trade-rules'
 
@@ -38,12 +52,32 @@ export interface RulesConfig {
 }
 
 export function apply(ctx: Context, config: RulesConfig): void {
-  // TODO(T0.6/T0.7): 计划卡匹配（承诺优先，未覆盖才入 W2）、去重/冷却/限流/分级、TriggerQueue。
+  const built = buildRules(config.rulePacks, { cooldownMs: config.cooldownMs })
+  if (built.unknownPacks.length > 0) {
+    throw new Error(
+      `未知规则包：${built.unknownPacks.join(', ')}；可用规则包：${Object.keys(RULE_PACKS).join(', ')}`,
+    )
+  }
+
+  const limits: TriggerLimits = {
+    noveltyPerHour: config.escape?.maxPerHour ?? DEFAULT_TRIGGER_LIMITS.noveltyPerHour,
+    noveltyPerDay: config.escape?.maxPerDay ?? DEFAULT_TRIGGER_LIMITS.noveltyPerDay,
+    judgmentPerHour: config.judgment?.maxPerHour ?? DEFAULT_TRIGGER_LIMITS.judgmentPerHour,
+    judgmentPerDay: config.judgment?.maxPerDay ?? DEFAULT_TRIGGER_LIMITS.judgmentPerDay,
+  }
+
+  const queue = new TriggerQueue(getDatabase())
+  const watch = new RuleWatch(built.rules, new TriggerGovernor(queue, systemClock(), limits))
+  setTriggerRuntime(watch)
+
   ctx.effect(
     () => () => {
-      /* T0.7: 释放定时器 */
+      setTriggerRuntime(undefined)
     },
     'trade.rules.close',
   )
-  void config
+
+  // TODO(T1.x): `config.windows`（W1 审议窗）由 supervisor 调度；`judgment.provider/model` 是唤醒时的模型路由。
+  void config.windows
+  void config.judgment
 }

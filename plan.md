@@ -85,9 +85,8 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 值   := 数字
       | position.qty | position.avgPrice | position.unrealizedPnl | equity.quote
       | price.last | bar.open|high|low|close|volume
-      | atr(tf,n) | ema(tf,n) | rsi(tf,n) | adx(tf,n) | vwap(tf) | zscore(tf,n)
-      | vol.realized(tf,n) | oi.changePct(n) | liq.notional(windowMs)
-      | funding.rate | basis.bps | plan.ageMs | window.sinceMs
+      | ema20 | ema50 | rsi14 | atr14 | vwap20 | zscore20 | volRealized20
+      | plan.ageMs | window.sinceMs
       | pm.<alias>.prob | pm.<alias>.mid | pm.<alias>.spread | pm.<alias>.volume24h
       | pm.<alias>.change1h | pm.<alias>.change24h | pm.<alias>.ageMs
 运算 := 值 ( + | - | * | / ) 值 | 值 ( < | <= | > | >= | == | != ) 值
@@ -97,7 +96,7 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 
 规则：**取值与运算都是数值/布尔，DSL 没有字符串**；时间框架由承诺自带的 `tf` 字段声明（`tf ∈ {1m,15m,1h,4h,1d}`，在该 tf 的每根已收盘 bar 上求值一次），因此表达式里**不允许**出现 `bar.tf`。`pm.<alias>.*` 只在 alias 已由 `trade_prediction_watch` 注册后合法（§4.4）——DSL 没有字符串，所以预测市场**只能通过别名**进入表达式；未注册的 alias 视为未知取值 → `ok:false` → UNCOVERED，**不静默 false**。`n ≤ 500`；**禁止**赋值/循环/字符串/任意属性访问/网络/时间函数；**只用已收盘 bar**。`crossAbove`/`crossBelow` 需要前一根 bar，由特征层提供。
 
-**内核指标层的当前覆盖（T0.5 交付）**：已实现 `ema`(20/50)、`atr`(14)、`rsi`(14)、`vwap`(20)、`zscore`(20)、`vol.realized`(20)，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。**尚未实现**：`adx`，以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`。未实现的取值路径会让表达式 `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
+**内核指标层的当前覆盖（T0.5 交付）**：已实现 `ema20`/`ema50`/`atr14`/`rsi14`/`vwap20`/`zscore20`/`volRealized20`，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。指标以**扁平取值**暴露（求值本身已绑定到某个 `tf` 的那根 bar），因此**不使用 `atr(tf,n)` 这类函数形式** —— DSL 词法器没有 `tf` 记号，那种写法根本无法解析。**尚未实现**：`adx`，以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`、`basis.bps`。未实现的取值路径会让表达式 `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
 
 **求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**。默认 **edge 触发**（false→true 各触发一次）；需要电平语义的用 `between`/显式条件表达。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
 
@@ -224,6 +223,8 @@ CREATE TABLE lessons(                                  -- 一条决策至多一�
 CREATE TABLE triggers(
   trigger_id TEXT PRIMARY KEY, dedup_key TEXT NOT NULL UNIQUE, symbol TEXT,
   rule_id TEXT, purpose TEXT NOT NULL, bar_ts INTEGER, payload_json TEXT NOT NULL,
+  -- 最终去向。只有 novelty/judgment 消耗唤醒预算；被冷却/限流压掉的仍然落库但不算预算
+  disposition TEXT NOT NULL CHECK(disposition IN('info','novelty','judgment','cooldown','rate_limited')),
   state TEXT NOT NULL CHECK(state IN('queued','claimed','done','expired')),
   created_at INTEGER NOT NULL, expires_at INTEGER);
 

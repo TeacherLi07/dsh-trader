@@ -20,7 +20,8 @@
 | T0.5 | 特征层：`market/{indicators,features,feature-archive}` + 重启回灌 | ✅ 已完成（增量实现与全量重算**逐点严格相等**；130 单测；HTX 实测 719 根真实 bar 跑出完整快照） |
 | T0.6 | 计划卡 schema + `when` DSL + 求值器 + `match` + `store` | ✅ 已完成（DSL 每算子/每错误分支有单测；计划卡不可事后改写、每标的一张 active、UNCOVERED 可达） |
 | §4.4 | 预测市场事件源（Polymarket，**只读**） | 🟡 DDL（4 张表）+ PIT 三道闸门已落地并有单测；client/store/poller/watch/tools 属 T1.8–T1.11 |
-| T0.7/T0.8/T0.9 | 触发 / 执行 / 回放 | ⬜ 未开始 |
+| T0.7 | 规则引擎 + 触发治理（去重/冷却/限流/分级 + `TriggerQueue`） | ✅ 已完成（同一 bar 回放两遍**零重复触发**由 `dedup_key` 唯一键保证；内置 2 个只使用已实现指标的规则包） |
+| T0.8/T0.9 | 执行 / 回放 | ⬜ 未开始 |
 | P1（含 T1.8–T1.11）/ P1.5–P4 | 判断、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
 
 ## 开发

@@ -27,6 +27,9 @@ export const FEATURE_WINDOWS = {
 export const FEATURE_WARMUP_BARS = FEATURE_WINDOWS.emaSlow
 
 export interface FeatureValues {
+  readonly open: number
+  readonly high: number
+  readonly low: number
   readonly close: number
   readonly volume: number
   readonly ema20: number | null
@@ -193,6 +196,9 @@ export class FeatureEngine {
     this.#closes.push(candle.close)
 
     const values: FeatureValues = {
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
       close: candle.close,
       volume: candle.volume,
       ema20,

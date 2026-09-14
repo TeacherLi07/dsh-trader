@@ -49,7 +49,9 @@ describe('when DSL v0', () => {
   it('reports referenced paths for vocabulary admission', () => {
     expect(referencedPaths('bar.close < 1 and position.qty > 0')).toEqual(['bar.close', 'position.qty'])
     expect(unknownPaths(['bar.close < 1 and news.headline == 2'], V0_ALLOWED_PATHS)).toEqual(['news.headline'])
-    expect(unknownPaths(['bar.close < funding.rate'], V0_ALLOWED_PATHS)).toEqual([])
+    // 已实现的指标在词汇表内；未实现的（funding.rate 等）必须判为未知 ⇒ UNCOVERED
+    expect(unknownPaths(['bar.close < ema20 and rsi14 > 70'], V0_ALLOWED_PATHS)).toEqual([])
+    expect(unknownPaths(['bar.close < funding.rate'], V0_ALLOWED_PATHS)).toEqual(['funding.rate'])
   })
 
   it('leaves crossAbove/crossBelow to the feature layer (they need the previous bar)', () => {
