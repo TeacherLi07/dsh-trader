@@ -28,6 +28,8 @@ export interface DecisionRecord {
   readonly rationale?: string
   readonly modelRoute?: string
   readonly executed: boolean
+  /** 结算到期时刻（plan §7.9）：到期后由独立结算任务处理，与"何时重跑该标的"无关。 */
+  readonly reflectionDueAt?: number
 }
 
 export interface OrderIntentRecord {
@@ -70,6 +72,16 @@ export interface FillRecord {
   readonly ts: number
 }
 
+/** 结算视角的成交（`fillsForDecision` 的返回形状）。 */
+export interface FillView {
+  readonly fillId: string
+  readonly qty: number
+  readonly price: number
+  readonly fee: number
+  readonly side: string
+  readonly ts: number
+}
+
 export interface DecisionSummary {
   readonly decisionId: string
   readonly symbol: string
@@ -85,11 +97,14 @@ export interface DecisionSummary {
 export interface LessonSummary {
   readonly lessonId: string
   readonly decisionId: string
+  /** 解析后的证据指针（写入时是 JSON）。 */
+  readonly evidenceRefs: readonly string[]
   readonly symbol: string | null
   readonly text: string
-  readonly evidenceRefs: string
   readonly regimeBucket: string | null
   readonly createdAt: number
+  /** 反思 TTL；`null` 表示未设过期（不推荐）。 */
+  readonly expiresAt: number | null
 }
 
 interface DecisionRow {
@@ -112,6 +127,102 @@ interface LessonRow {
   evidence_refs_json: string
   regime_bucket: string | null
   created_at: number
+  expires_at: number | null
+}
+
+export interface PendingSettlement {
+  readonly decisionId: string
+  readonly symbol: string
+  readonly action: string
+  readonly decidedAt: number
+  readonly sizeQty: number | null
+  readonly stopPrice: number | null
+  readonly takeProfit: number | null
+  readonly confidence: number | null
+  readonly rationale: string | null
+}
+
+/** 交易级结算结果（plan §7.9）：净额含手续费/滑点，基准用 BTC/ETH，**不是 SPY**。 */
+export interface OutcomeRecord {
+  readonly outcomeId: string
+  readonly decisionId: string
+  readonly symbol: string
+  readonly settledAt: number
+  readonly horizonMs: number
+  readonly entryPrice: number
+  readonly exitPrice: number
+  readonly realizedGrossPct: number
+  readonly realizedNetPct: number
+  readonly benchmarkPct: number
+  readonly alphaPct: number
+  readonly mfePct: number
+  readonly maePct: number
+  readonly stopHit: boolean
+  readonly feesQuote: number
+  /** 证据指针：结算用到的订单/成交/行情指纹 —— 让反思**可以被推翻**。 */
+  readonly evidenceRefs: readonly string[]
+}
+
+interface PendingRow {
+  decision_id: string
+  symbol: string
+  action: string
+  decided_at: number
+  size_qty: number | null
+  stop_price: number | null
+  take_profit: number | null
+  confidence: number | null
+  rationale: string | null
+}
+
+interface OutcomeRow {
+  outcome_id: string
+  decision_id: string
+  symbol: string
+  settled_at: number
+  horizon_ms: number
+  entry_price: number
+  exit_price: number
+  realized_gross_pct: number
+  realized_net_pct: number
+  benchmark_pct: number
+  alpha_pct: number
+  mfe_pct: number
+  mae_pct: number
+  stop_hit: number
+  fees_quote: number
+  evidence_refs_json: string
+}
+
+function toOutcome(row: OutcomeRow): OutcomeRecord {
+  return {
+    outcomeId: row.outcome_id,
+    decisionId: row.decision_id,
+    symbol: row.symbol,
+    settledAt: row.settled_at,
+    horizonMs: row.horizon_ms,
+    entryPrice: row.entry_price,
+    exitPrice: row.exit_price,
+    realizedGrossPct: row.realized_gross_pct,
+    realizedNetPct: row.realized_net_pct,
+    benchmarkPct: row.benchmark_pct,
+    alphaPct: row.alpha_pct,
+    mfePct: row.mfe_pct,
+    maePct: row.mae_pct,
+    stopHit: row.stop_hit === 1,
+    feesQuote: row.fees_quote,
+    evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
+  }
+}
+
+/** 证据指针是写入时序列化的 JSON 数组；坏数据不应当让读取方崩溃，退化为空数组。 */
+function parseJsonArray(json: string): readonly string[] {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
 }
 
 export class DecisionJournal {
@@ -140,10 +251,10 @@ export class DecisionJournal {
     const result = this.#statements.get(
         `INSERT INTO decisions
            (decision_id, content_hash, symbol, plan_id, decided_at, context_hash, action,
-            size_qty, stop_price, take_profit, rationale, model_route, executed)
+            size_qty, stop_price, take_profit, rationale, model_route, executed, reflection_due_at)
          VALUES
            (@decisionId, @contentHash, @symbol, @planId, @decidedAt, @contextHash, @action,
-            @sizeQty, @stopPrice, @takeProfit, @rationale, @modelRoute, @executed)
+            @sizeQty, @stopPrice, @takeProfit, @rationale, @modelRoute, @executed, @reflectionDueAt)
          ON CONFLICT (content_hash) DO NOTHING`,
       )
       .run({
@@ -160,6 +271,111 @@ export class DecisionJournal {
         rationale: record.rationale ?? null,
         modelRoute: record.modelRoute ?? null,
         executed: record.executed ? 1 : 0,
+        reflectionDueAt: record.reflectionDueAt ?? null,
+      })
+    return Number(result.changes) > 0
+  }
+
+  // ── 结算（plan §7.9）─────────────────────────────────────────────────────────
+
+  /**
+   * 到期待结算的决策 —— **扫描全部标的**，而不是"只结算当前正在分析的标的"
+   * （TradingAgents 的 `_resolve_pending_entries` 因此让一次性标的的条目永远悬空）。
+   */
+  pendingSettlements(now: number, limit = 20): readonly PendingSettlement[] {
+    const rows = this.#statements
+      .get(
+        `SELECT decision_id, symbol, action, decided_at, size_qty, stop_price, take_profit, confidence, rationale
+         FROM decisions
+         WHERE outcome_id IS NULL AND reflection_due_at IS NOT NULL AND reflection_due_at <= ?
+         ORDER BY reflection_due_at ASC LIMIT ?`,
+      )
+      .all(now, limit) as PendingRow[]
+    return rows.map((row) => ({
+      decisionId: row.decision_id,
+      symbol: row.symbol,
+      action: row.action,
+      decidedAt: row.decided_at,
+      sizeQty: row.size_qty,
+      stopPrice: row.stop_price,
+      takeProfit: row.take_profit,
+      confidence: row.confidence,
+      rationale: row.rationale,
+    }))
+  }
+
+  /** 写入结算结果。`decision_id` 唯一 ⇒ 重跑不会追加第二条（结算幂等根）。 */
+  recordOutcome(outcome: OutcomeRecord): boolean {
+    const result = this.#statements
+      .get(
+        `INSERT INTO outcomes
+           (outcome_id, decision_id, symbol, settled_at, horizon_ms, entry_price, exit_price,
+            realized_gross_pct, realized_net_pct, benchmark_pct, alpha_pct, mfe_pct, mae_pct,
+            stop_hit, fees_quote, evidence_refs_json)
+         VALUES
+           (@outcomeId, @decisionId, @symbol, @settledAt, @horizonMs, @entryPrice, @exitPrice,
+            @realizedGrossPct, @realizedNetPct, @benchmarkPct, @alphaPct, @mfePct, @maePct,
+            @stopHit, @feesQuote, @evidenceRefsJson)
+         ON CONFLICT (decision_id) DO NOTHING`,
+      )
+      .run({
+        outcomeId: outcome.outcomeId,
+        decisionId: outcome.decisionId,
+        symbol: outcome.symbol,
+        settledAt: outcome.settledAt,
+        horizonMs: outcome.horizonMs,
+        entryPrice: outcome.entryPrice,
+        exitPrice: outcome.exitPrice,
+        realizedGrossPct: outcome.realizedGrossPct,
+        realizedNetPct: outcome.realizedNetPct,
+        benchmarkPct: outcome.benchmarkPct,
+        alphaPct: outcome.alphaPct,
+        mfePct: outcome.mfePct,
+        maePct: outcome.maePct,
+        stopHit: outcome.stopHit ? 1 : 0,
+        feesQuote: outcome.feesQuote,
+        evidenceRefsJson: canonicalJson(outcome.evidenceRefs),
+      })
+    return Number(result.changes) > 0
+  }
+
+  markDecisionOutcome(decisionId: string, outcomeId: string): void {
+    this.#statements
+      .get('UPDATE decisions SET outcome_id = ? WHERE decision_id = ?')
+      .run(outcomeId, decisionId)
+  }
+
+  outcomeFor(decisionId: string): OutcomeRecord | undefined {
+    const row = this.#statements
+      .get('SELECT * FROM outcomes WHERE decision_id = ?')
+      .get(decisionId) as OutcomeRow | undefined
+    return row === undefined ? undefined : toOutcome(row)
+  }
+
+  /** 写入反思。`decision_id` 唯一 ⇒ **一条决策至多一条反思**（plan §10 P1 验收）。 */
+  recordLesson(lesson: {
+    readonly lessonId: string
+    readonly decisionId: string
+    readonly text: string
+    readonly evidenceRefs: readonly string[]
+    readonly regimeBucket?: string
+    readonly createdAt: number
+    readonly expiresAt?: number
+  }): boolean {
+    const result = this.#statements
+      .get(
+        `INSERT INTO lessons (lesson_id, decision_id, text, evidence_refs_json, regime_bucket, created_at, expires_at)
+         VALUES (@lessonId, @decisionId, @text, @evidenceRefsJson, @regimeBucket, @createdAt, @expiresAt)
+         ON CONFLICT (decision_id) DO NOTHING`,
+      )
+      .run({
+        lessonId: lesson.lessonId,
+        decisionId: lesson.decisionId,
+        text: lesson.text,
+        evidenceRefsJson: canonicalJson(lesson.evidenceRefs),
+        regimeBucket: lesson.regimeBucket ?? null,
+        createdAt: lesson.createdAt,
+        expiresAt: lesson.expiresAt ?? null,
       })
     return Number(result.changes) > 0
   }
@@ -261,6 +477,38 @@ export class DecisionJournal {
     }[]).map((row) => row.id)
   }
 
+  /**
+   * 某条决策实际产生的成交（按时间升序）。
+   * 走 `fills → orders → order_intents → decisions` —— 结算用**真实成交价**而非 bar 收盘价。
+   */
+  fillsForDecision(decisionId: string): readonly FillView[] {
+    const rows = this.#statements
+      .get(
+        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts, COALESCE(oi.side, 'buy') AS side
+         FROM fills f
+         JOIN orders o ON o.order_id = f.order_id
+         JOIN order_intents oi ON oi.client_order_id = o.client_order_id
+         WHERE oi.decision_id = ?
+         ORDER BY f.ts ASC, f.fill_id ASC`,
+      )
+      .all(decisionId) as {
+      fill_id: string
+      qty: number
+      price: number
+      fee: number | null
+      ts: number
+      side: string
+    }[]
+    return rows.map((row) => ({
+      fillId: row.fill_id,
+      qty: row.qty,
+      price: row.price,
+      fee: row.fee ?? 0,
+      side: row.side,
+      ts: row.ts,
+    }))
+  }
+
   triggerKeys(): readonly string[] {
     return (
       this.#statements.get('SELECT dedup_key AS id FROM triggers ORDER BY dedup_key').all() as {
@@ -338,6 +586,16 @@ export class DecisionJournal {
     this.#statements.get('UPDATE decisions SET executed = 1 WHERE decision_id = ?').run(decisionId)
   }
 
+  /**
+   * 登记结算到期时刻。**只有真正成交**的决策才登记 ——
+   * 被拒/未成交的决策没有仓位，不产生 outcome，也不应堵塞结算队列。
+   */
+  markDecisionReflectionDue(decisionId: string, dueAt: number): void {
+    this.#statements
+      .get('UPDATE decisions SET reflection_due_at = ? WHERE decision_id = ? AND reflection_due_at IS NULL')
+      .run(dueAt, decisionId)
+  }
+
   /** 收到交易所 ack 后推进意图状态；`created` 且无 ack 的记录是崩溃恢复的查询线索。 */
   markIntentAcked(
     clientOrderId: string,
@@ -381,13 +639,16 @@ export class DecisionJournal {
     }))
   }
 
-  /** 已结算决策的反思（"教训"），连同证据指针。 */
+  /**
+   * 已结算决策的反思（"教训"），连同证据指针与 TTL。
+   * **是否过期由调用方（`memory/recall`）判定** —— SQL 层不做政策。
+   */
   recentLessons(
     options: { readonly symbol?: string; readonly limit?: number } = {},
   ): readonly LessonSummary[] {
     const limit = options.limit ?? 20
     const base =
-      'SELECT l.lesson_id, l.decision_id, l.text, l.evidence_refs_json, l.regime_bucket, l.created_at, d.symbol FROM lessons l LEFT JOIN decisions d ON d.decision_id = l.decision_id'
+      'SELECT l.lesson_id, l.decision_id, l.text, l.evidence_refs_json, l.regime_bucket, l.created_at, l.expires_at, d.symbol FROM lessons l LEFT JOIN decisions d ON d.decision_id = l.decision_id'
     const rows = (
       options.symbol === undefined
         ? this.#statements.get(`${base} ORDER BY l.created_at DESC LIMIT ?`).all(limit)
@@ -400,9 +661,10 @@ export class DecisionJournal {
       decisionId: row.decision_id,
       symbol: row.symbol,
       text: row.text,
-      evidenceRefs: row.evidence_refs_json,
+      evidenceRefs: parseJsonArray(row.evidence_refs_json),
       regimeBucket: row.regime_bucket,
       createdAt: row.created_at,
+      expiresAt: row.expires_at,
     }))
   }
 }

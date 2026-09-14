@@ -18,6 +18,7 @@ import type { BarArchive } from '../market/archive.js'
 import type { FeatureArchive } from '../market/feature-archive.js'
 import { DECISION_ACTIONS, TIMEFRAMES, type DecisionAction, type StopSpec } from '../plan/schema.js'
 import type { PlanStore } from '../plan/store.js'
+import { recallLessons } from '../memory/recall.js'
 
 export interface ToolPorts {
   readonly db: Database.Database
@@ -30,7 +31,12 @@ export interface ToolPorts {
   readonly limits: RiskLimits | null
   readonly mode: RunMode
   readonly riskPct: number
+  /** 结算视界（plan §7.9）：决策记录时算出 `reflection_due_at = now + 视界`。 */
+  readonly reflectionHorizonMs?: number
 }
+
+/** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
+export const DEFAULT_REFLECTION_HORIZON_MS = 4 * 3_600_000
 
 export class ToolArgumentError extends Error {
   constructor(message: string) {
@@ -229,7 +235,8 @@ const tradeRiskCheck: ToolDefinition = {
 
 const tradeRecall: ToolDefinition = {
   name: 'trade_recall',
-  description: '只读：检索最近的决策与已结算反思（可按标的过滤），用于判断前按需取回。',
+  description:
+    '只读：检索最近的决策与**未过期**的已结算反思（可按标的过滤），用于判断前按需取回。过期的教训不会返回。',
   sideEffect: false,
   parameters: {
     symbol: { type: 'string' },
@@ -239,9 +246,15 @@ const tradeRecall: ToolDefinition = {
     const symbol = optionalString(args, 'symbol')
     const limit = clamp(optionalNumber(args, 'limit') ?? 20, 1, 100)
     const options = symbol === undefined ? { limit } : { symbol, limit }
+    const recall = recallLessons(ports.journal, {
+      now: ports.clock.now(),
+      limit,
+      ...(symbol === undefined ? {} : { symbol }),
+    })
     return {
       decisions: ports.journal.recentDecisions(options),
-      lessons: ports.journal.recentLessons(options),
+      lessons: recall.lessons,
+      expiredLessonsSkipped: recall.expired,
     }
   },
 }
@@ -527,7 +540,16 @@ const tradeExecuteOrder: ToolDefinition = {
     }
 
     const executed = ack.state === 'filled'
-    if (executed) ports.journal.markDecisionExecuted(effectiveDecisionId)
+    if (executed) {
+      ports.journal.markDecisionExecuted(effectiveDecisionId)
+      // 只有成交的决策才进结算队列（plan §7.9 ④）：到期时刻与"何时重跑该标的"无关
+      if (action === 'open' || action === 'close' || action === 'reduce') {
+        ports.journal.markDecisionReflectionDue(
+          effectiveDecisionId,
+          ports.clock.now() + (ports.reflectionHorizonMs ?? DEFAULT_REFLECTION_HORIZON_MS),
+        )
+      }
+    }
 
     // ⑤ 成交后**立即**挂保护单（HTX 无原子括号单 ⇒ 已知暴露窗口）
     let protectiveAck: unknown = null

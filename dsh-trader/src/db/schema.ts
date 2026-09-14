@@ -79,6 +79,26 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS decisions_pending_settlement
   ON decisions (reflection_due_at) WHERE outcome_id IS NULL;
 
+-- 结算结果（plan §7.9）：**交易级**净额，一条决策至多一次结算
+CREATE TABLE IF NOT EXISTS outcomes (
+  outcome_id TEXT PRIMARY KEY,
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions (decision_id),
+  symbol TEXT NOT NULL,
+  settled_at INTEGER NOT NULL,
+  horizon_ms INTEGER NOT NULL,
+  entry_price REAL NOT NULL,
+  exit_price REAL NOT NULL,
+  realized_gross_pct REAL NOT NULL,
+  realized_net_pct REAL NOT NULL,
+  benchmark_pct REAL NOT NULL,
+  alpha_pct REAL NOT NULL,
+  mfe_pct REAL NOT NULL,
+  mae_pct REAL NOT NULL,
+  stop_hit INTEGER NOT NULL DEFAULT 0 CHECK (stop_hit IN (0, 1)),
+  fees_quote REAL NOT NULL DEFAULT 0,
+  evidence_refs_json TEXT NOT NULL
+);
+
 -- 唯一闸门：只有通过硬闸的意图才会写入这里
 CREATE TABLE IF NOT EXISTS order_intents (
   intent_id TEXT PRIMARY KEY,

@@ -203,6 +203,17 @@ CREATE TABLE decisions(
   rationale TEXT, risk_notes TEXT, authority TEXT NOT NULL DEFAULT 'model',
   executed INTEGER NOT NULL DEFAULT 0, reflection_due_at INTEGER, outcome_id TEXT);
 
+CREATE TABLE outcomes(                                -- 结算结果：**交易级**净额（§7.9）
+  outcome_id TEXT PRIMARY KEY,
+  decision_id TEXT NOT NULL UNIQUE REFERENCES decisions(decision_id),  -- 一条决策至多一次结算
+  symbol TEXT NOT NULL, settled_at INTEGER NOT NULL, horizon_ms INTEGER NOT NULL,
+  entry_price REAL NOT NULL, exit_price REAL NOT NULL,
+  realized_gross_pct REAL NOT NULL, realized_net_pct REAL NOT NULL,
+  benchmark_pct REAL NOT NULL, alpha_pct REAL NOT NULL,
+  mfe_pct REAL NOT NULL, mae_pct REAL NOT NULL,
+  stop_hit INTEGER NOT NULL DEFAULT 0, fees_quote REAL NOT NULL DEFAULT 0,
+  evidence_refs_json TEXT NOT NULL);
+
 CREATE TABLE order_intents(                           -- 唯一闸门：校验通过才写入
   intent_id TEXT PRIMARY KEY, client_order_id TEXT NOT NULL UNIQUE,  -- 幂等键
   decision_id TEXT REFERENCES decisions(decision_id), venue TEXT NOT NULL, symbol TEXT NOT NULL,
@@ -518,18 +529,23 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
 └── dsh-trader/
     ├── package.json  cordis.patch.yml  README.md
     └── src/
-        ├── index.ts  config.ts
-        ├── market/{feed,archive,features,rules}.ts
+        ├── index.ts  config.ts  clock.ts  cost.ts
+        ├── db/{schema,statements}.ts
+        ├── util/canonical.ts                             # ★ 规范化 JSON + 指纹（幂等根）
+        ├── market/{types,normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime,indicators,features,feature-archive,context}.ts
         ├── plan/{schema,dsl,evaluate,match,store}.ts      # ★ 新增：§3 的落点
-        ├── predictions/{client,store,poller,watch,rules,pit}.ts   # ★ §4.4 事件源（只读）
-        ├── trigger/{engine,queue}.ts
-        ├── memory/{schema,journal,recall,settle}.ts
-        ├── exec/{broker,paper,ccxt,gate,reconcile}.ts
-        ├── agents/{prompts/,tools/,roles.ts}
-        ├── supervisor/{desk,heartbeat}.ts
-        ├── clock.ts  cost.ts                              # ★ 新增：§7/§8
-        └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands}.ts
+        ├── predictions/pit.ts                             # ★ §4.4 PIT 三闸门（已建）
+        ├── predictions/{client,store,poller,watch}.ts     # ★ §4.4 事件源（只读，T1.8/T1.9）
+        ├── trigger/{queue,engine,runtime}.ts
+        ├── memory/{recall,settle}.ts                      # ★ 教训检索（TTL 执行）+ 交易级结算
+        ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay}.ts
+        ├── agents/{types,pack,prompts,workflow,roles,tools}.ts
+        ├── supervisor/{desk,heartbeat}.ts                 # P1.5 之后
+        └── plugins/{db,market,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
+
+> 目录是**目标形态**；未建的模块在 WBS 里对应 T1.5–T1.11。已落地的部分与上表一致
+> （`memory/recall` 与 `memory/settle` 已存在，`journal` 落在 `exec/`，因为它是执行链的账本）。
 
 ### 9.2 `package.json` 打包修正（原文档此处会加载失败）
 
@@ -602,7 +618,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.1 | `workflow` 脚本（冻结 pack、并行分析师、冲突消解、辩论、裁决） | T0.7 | 同一 `contextHash` 传所有分析师；只回结构化字段 + 工件指针 |
 | T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
 | T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
-| T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额 |
+| T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额；**TTL 在读取侧真的执行**（`memory/recall`） |
 | T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库 |
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据 |
@@ -637,6 +653,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
 | 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |
 | 17 | **建议风控参数不自洽**：`SUGGESTED_LIMITS` 的 200/2000 上限与 BTC 尺度不匹配 —— `notional ≈ equity × riskPct ÷ (stopDistance/price)`，实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），改 0.2% 后 104 次成交 | P1 中 | 需要按"止损距离/价格"标定建议参数，并在启动时校验 `riskPct`/止损/上限三者自洽（§6.5） |
+| 18 | **结算视界未标定**：`DEFAULT_REFLECTION_HORIZON_MS` 暂定 4h，且 `SettlementScheduler` 已实现但**尚未挂到周期循环**（等 P1.5 supervisor 的 heartbeat）；`Reflector` 也还没绑定到具体角色/模型路由 | P1.5 | 结算逻辑与闸门本身已测（T1.4）；缺的是调度位与路由，不是算法 |
 
 ---
 
