@@ -201,7 +201,10 @@ CREATE TABLE decisions(
         'set_trailing','cancel_all','halt','noop','no_trade','review')),
   size_qty REAL, stop_price REAL, take_profit REAL, confidence REAL,
   rationale TEXT, risk_notes TEXT, authority TEXT NOT NULL DEFAULT 'model',
-  executed INTEGER NOT NULL DEFAULT 0, reflection_due_at INTEGER, outcome_id TEXT);
+  executed INTEGER NOT NULL DEFAULT 0, reflection_due_at INTEGER, outcome_id TEXT,
+  -- 成本是一等指标（§8）：每次决策记 token/耗时/触发来源；缺价目时 cost_known=0
+  tokens_in INTEGER, tokens_out INTEGER, tokens_cached INTEGER,
+  cost_usd REAL, cost_known INTEGER, duration_ms INTEGER, trigger_source TEXT);
 
 CREATE TABLE outcomes(                                -- 结算结果：**交易级**净额（§7.9）
   outcome_id TEXT PRIMARY KEY,
@@ -520,6 +523,27 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
 - 成本是一等指标：每次决策记 `context_hash`/`model_route`/token/耗时/触发来源；看板按日、按标的聚合。
 - W2/W3 的 `provider/model` 与预算写进插件 Config，可热改。
 
+### 8.1 价目表与峰谷 `[定]`
+
+**官方价目分峰谷**，同一模型峰时/谷时单价差 **2×**。只存一行"平均价"会让谷时预算高估一倍、
+峰时低估一倍 —— 所以 `price_table` 带 `tier ∈ {peak, off_peak, any}`，主键 `(model, effective_from, tier)`，
+取价时先选生效版本、再按**注入的时间戳**判档（`priceTier(at)`，不读系统时钟）：
+
+- 峰时 = **UTC 周一至周五** 01:00–04:00 与 06:00–10:00；其余（含整个周末）谷时；
+- 谷时价 = 峰时价 ÷ 2（官方明示）；实现里**显式写两档**，让价目表成为唯一事实来源；
+- 缺行 ⇒ `cost_known = 0` + 告警，退化为 token 上限，**绝不静默计 0**。
+
+种子（抓取于 **2026-09-14**，单位 USD / 1M tokens，源见 `PRICING_SOURCE`）：
+
+| 模型 | 档 | 缓存命中 | 缓存未命中(输入) | 输出 |
+|---|---|---|---|---|
+| `deepseek-flash` | peak | 0.006 | 0.30 | 1.20 |
+| `deepseek-flash` | off_peak | 0.003 | 0.15 | 0.60 |
+| `deepseek-v4-pro` | peak | 0.044 | 1.32 | 3.96 |
+| `deepseek-v4-pro` | off_peak | 0.022 | 0.66 | 1.98 |
+
+价目会变（官方明示"保留调价权利"）⇒ 表里有 `source` 与 `effectiveFrom`，改价只改表、不动代码。
+
 ---
 
 ## 9. 工程结构、打包修正与前置动作
@@ -535,7 +559,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
 └── dsh-trader/
     ├── package.json  cordis.patch.yml  README.md
     └── src/
-        ├── index.ts  config.ts  clock.ts  cost.ts
+        ├── index.ts  config.ts  clock.ts  cost.ts  cost-ledger.ts
         ├── db/{schema,statements}.ts
         ├── util/canonical.ts                             # ★ 规范化 JSON + 指纹（幂等根）
         ├── market/{types,normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime,indicators,features,feature-archive,context}.ts
@@ -582,7 +606,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | P-1.2 | 创建 `trade` profile | `dsh --profile trade --from-default-profile web --dump-config`（创建即退，不阻塞）。★ 本机**没有** `dsh profile` 子命令，只能用 `--from-default-profile`；轻量替代是 `dsh-headless` 包 |
 | P-1.3 | 让项目根可判定 | `git init /workspace`（或显式配 `projectRootMarkers`）。★ **实测 `/workspace` 与 `/` 都没有 `.git`**，当前仅靠"cwd 回退"才使 `.dsh/skills` 被发现 |
 | P-1.4 | 数据目录与密钥 | `$DSH_HOME/trading/`（在仓库外）；`$DSH_HOME/trading.env`（0600） |
-| P-1.5 | 价目表种子 | 写入 `price_table` 当前 DeepSeek 价 |
+| P-1.5 | 价目表种子 | 写入 `price_table` 当前 DeepSeek 价（**已做**：§8.1，2026-09-14 抓取，含峰谷两档） |
 
 ---
 
@@ -626,7 +650,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
 | T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额；**TTL 在读取侧真的执行**（`memory/recall`） |
 | T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库（`context_snapshots`）；`context_hash` 只由代码写入，模型不可伪造 |
-| T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3 |
+| T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取（§8.1），决策回填 token/耗时/触发来源 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据 |
 | T1.8 | `predictions/client` + 三家 API 客户端（Gamma/CLOB/Data-API v2）+ 令牌桶/退避 + PIT 三闸门 | T0.4 | §10 专项 ①②⑤⑥⑦ |
 | T1.9 | `predictions/store` + `poller`（注入 Clock）+ `trade_predictions` 只读工具 + alias↔token 映射接入特征快照 | T1.8, T0.5 | §10 专项 ②③⑧ |
@@ -660,6 +684,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |
 | 17 | **建议风控参数不自洽**：`SUGGESTED_LIMITS` 的 200/2000 上限与 BTC 尺度不匹配 —— `notional ≈ equity × riskPct ÷ (stopDistance/price)`，实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），改 0.2% 后 104 次成交 | P1 中 | 需要按"止损距离/价格"标定建议参数，并在启动时校验 `riskPct`/止损/上限三者自洽（§6.5） |
 | 18 | **结算视界未标定**：`DEFAULT_REFLECTION_HORIZON_MS` 暂定 4h，且 `SettlementScheduler` 已实现但**尚未挂到周期循环**（等 P1.5 supervisor 的 heartbeat）；`Reflector` 也还没绑定到具体角色/模型路由 | P1.5 | 结算逻辑与闸门本身已测（T1.4）；缺的是调度位与路由，不是算法 |
+| 19 | **价目表需要定期复核**：§8.1 的价目抓取于 2026-09-14，官方保留调价权利；`price_table` 是唯一事实来源，但**没有任何东西会提醒我们它过期了** | P2 起 | 建议在 heartbeat 里加"价目表年龄 > N 天则告警"；P0/P1 不阻塞（缺行只降级为 token 上限，不会静默免费） |
 
 ---
 

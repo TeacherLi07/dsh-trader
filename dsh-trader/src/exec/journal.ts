@@ -94,6 +94,26 @@ export interface DecisionSummary {
   /** 决策时的上下文指纹（plan §5.1「绝不可丢」）—— 审计与对拍的锚点。 */
   readonly contextHash: string
   readonly outcomeId: string | null
+  /** 成本（plan §8）：缺价目时 `costKnown = false`，此时 `costUsd` 不可信。 */
+  readonly tokensIn: number | null
+  readonly tokensOut: number | null
+  readonly tokensCached: number | null
+  readonly costUsd: number | null
+  readonly costKnown: boolean | null
+  readonly durationMs: number | null
+  readonly triggerSource: string | null
+}
+
+/** 一次模型调用的实际开销，回填到产生它的决策上（plan §8）。 */
+export interface DecisionCost {
+  readonly tokensIn: number
+  readonly tokensOut: number
+  readonly tokensCached: number
+  readonly costUsd: number
+  /** false = 价目表缺行，`costUsd` 不可信（已记 0，但**不是**零成本）。 */
+  readonly costKnown: boolean
+  readonly durationMs: number
+  readonly triggerSource: string
 }
 
 export interface LessonSummary {
@@ -120,6 +140,13 @@ interface DecisionRow {
   rationale: string | null
   context_hash: string
   outcome_id: string | null
+  tokens_in: number | null
+  tokens_out: number | null
+  tokens_cached: number | null
+  cost_usd: number | null
+  cost_known: number | null
+  duration_ms: number | null
+  trigger_source: string | null
 }
 
 interface LessonRow {
@@ -599,6 +626,32 @@ export class DecisionJournal {
       .run(dueAt, decisionId)
   }
 
+  /**
+   * 回填一次模型调用的开销（plan §8）。
+   * 调用方先记账（`BudgetLedger.record`）再回填；两者都写 —— 看板聚合与单条审计互为依据。
+   */
+  markDecisionCost(decisionId: string, cost: DecisionCost): boolean {
+    const result = this.#statements
+      .get(
+        `UPDATE decisions
+         SET tokens_in = @tokensIn, tokens_out = @tokensOut, tokens_cached = @tokensCached,
+             cost_usd = @costUsd, cost_known = @costKnown,
+             duration_ms = @durationMs, trigger_source = @triggerSource
+         WHERE decision_id = @decisionId`,
+      )
+      .run({
+        decisionId,
+        tokensIn: cost.tokensIn,
+        tokensOut: cost.tokensOut,
+        tokensCached: cost.tokensCached,
+        costUsd: cost.costUsd,
+        costKnown: cost.costKnown ? 1 : 0,
+        durationMs: cost.durationMs,
+        triggerSource: cost.triggerSource,
+      })
+    return Number(result.changes) > 0
+  }
+
   /** 收到交易所 ack 后推进意图状态；`created` 且无 ack 的记录是崩溃恢复的查询线索。 */
   markIntentAcked(
     clientOrderId: string,
@@ -621,7 +674,7 @@ export class DecisionJournal {
   ): readonly DecisionSummary[] {
     const limit = options.limit ?? 20
     const sql =
-      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, context_hash, outcome_id FROM decisions'
+      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, context_hash, outcome_id, tokens_in, tokens_out, tokens_cached, cost_usd, cost_known, duration_ms, trigger_source FROM decisions'
     const rows = (
       options.symbol === undefined
         ? this.#statements.get(`${sql} ORDER BY decided_at DESC LIMIT ?`).all(limit)
@@ -640,6 +693,13 @@ export class DecisionJournal {
       rationale: row.rationale,
       contextHash: row.context_hash,
       outcomeId: row.outcome_id,
+      tokensIn: row.tokens_in,
+      tokensOut: row.tokens_out,
+      tokensCached: row.tokens_cached,
+      costUsd: row.cost_usd,
+      costKnown: row.cost_known === null ? null : row.cost_known === 1,
+      durationMs: row.duration_ms,
+      triggerSource: row.trigger_source,
     }))
   }
 

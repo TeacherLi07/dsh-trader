@@ -73,7 +73,11 @@ CREATE TABLE IF NOT EXISTS decisions (
   authority TEXT NOT NULL DEFAULT 'model' CHECK (authority IN ('model', 'store', 'external')),
   executed INTEGER NOT NULL DEFAULT 0 CHECK (executed IN (0, 1)),
   reflection_due_at INTEGER,
-  outcome_id TEXT
+  outcome_id TEXT,
+  -- 成本是一等指标（plan §8）：每次决策记 token/耗时/触发来源；缺价目时 cost_known=0
+  tokens_in INTEGER, tokens_out INTEGER, tokens_cached INTEGER,
+  cost_usd REAL, cost_known INTEGER CHECK (cost_known IN (0, 1) OR cost_known IS NULL),
+  duration_ms INTEGER, trigger_source TEXT
 );
 
 CREATE INDEX IF NOT EXISTS decisions_pending_settlement
@@ -205,11 +209,13 @@ CREATE TABLE IF NOT EXISTS config_versions (
 CREATE TABLE IF NOT EXISTS price_table (
   model TEXT NOT NULL,
   effective_from INTEGER NOT NULL,
+  -- 峰谷档位：官方价目分峰/谷（谷时=峰时÷2），any 为不分峰谷的兜底行
+  tier TEXT NOT NULL DEFAULT 'any' CHECK (tier IN ('any', 'peak', 'off_peak')),
   in_per_mtok REAL NOT NULL,
   out_per_mtok REAL NOT NULL,
   cached_in_per_mtok REAL,
   source TEXT,
-  PRIMARY KEY (model, effective_from)
+  PRIMARY KEY (model, effective_from, tier)
 );
 
 CREATE TABLE IF NOT EXISTS budget_ledger (
