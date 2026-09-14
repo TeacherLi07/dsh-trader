@@ -576,7 +576,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── memory/{recall,settle}.ts                      # ★ 教训检索（TTL 执行）+ 交易级结算
         ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay}.ts
         ├── agents/{types,pack,prompts,workflow,roles,tools}.ts
-        ├── supervisor/{desk,heartbeat}.ts                 # P1.5 之后
+        ├── supervisor/{metrics,desk,heartbeat}.ts         # metrics 已建；desk/heartbeat P1.5 之后
         └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
 
@@ -659,6 +659,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
 | T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |
 | T1.4 | 结算 + 反思 + `lessons`/`journal` + `trade_recall` | T1.3 | 四条反思闸门有测试；结算按交易级净额；**TTL 在读取侧真的执行**（`memory/recall`） |
+| T1.4b | 每日运营指标（`supervisor/metrics.ts`）：计划覆盖率 + W2/W3 频次 + 每窗口成本 | T1.4, T1.6 | P1 ③ 可自动判定 |
 | T1.5 | context 组装器（C1–C6）+ `ctxHash` + 遮蔽 | T1.3 | 组装可复现；`changedParts` 落库（`context_snapshots`）；`context_hash` 只由代码写入，模型不可伪造 |
 | T1.6 | 预算账本 + 成本看板 | T1.3 | 缺价目表时 `cost_known=0` 并告警；超预算只停 W2/W3；价目按峰谷两档取（§8.1），决策回填 token/耗时/触发来源 |
 | T1.7 | P1.5 A/B 回放 | T1.1–T1.6 | §10 P1.5 判据；已可运行（`scripts/ab-gate.mjs`），首轮判定见 `docs/p1.5-gate-run-2026-09-14.md`；**LLM 判断臂仍需凭据**（§12 #20） |
@@ -696,7 +697,6 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 18 | **结算视界未标定**：`DEFAULT_REFLECTION_HORIZON_MS` 暂定 4h，且 `SettlementScheduler` 已实现但**尚未挂到周期循环**（等 P1.5 supervisor 的 heartbeat）；`Reflector` 也还没绑定到具体角色/模型路由 | P1.5 | 结算逻辑与闸门本身已测（T1.4）；缺的是调度位与路由，不是算法 |
 | 19 | **价目表需要定期复核**：§8.1 的价目抓取于 2026-09-14，官方保留调价权利；`price_table` 是唯一事实来源，但**没有任何东西会提醒我们它过期了** | P2 起 | 建议在 heartbeat 里加"价目表年龄 > N 天则告警"；P0/P1 不阻塞（缺行只降级为 token 上限，不会静默免费） |
 | 20 | **P1.5 的 LLM 判断臂缺凭据**：闸门已可运行，但 B 臂目前注入的是**确定性替身** `standInJudge`（两条机械规则），不是 W2/W3 的 LLM 通道 ⇒ 现在得到的是"闸门可运行且默认降级"的结论，**不是对 W2/W3 的最终判决** | P2（需要模型凭据） | 换掉 `ab-gate.mjs` 里注入的判断通道即可复用同一套闸门，其余不动 |
-| 22 | **P1 ③ 没有"计划覆盖率"指标**：成本看板（按日/按 scope）已有，但"日输出计划覆盖率 + W2/W3 频次"里的**覆盖率**还没有可运行判定 —— 现在只能人工看日志 | P1 收尾 | 需要在 supervisor heartbeat 里按日聚合"有 active 计划卡的标的数 / 标的池大小"；W2/W3 频次已可从 `triggers` 表按 purpose 聚合 |
 | 23 | **P1 ④ 的"结算成功率 ≥ 99%"未实测**：唯一键保证"每条决策至多一条反思"有测试，但成功率本身没有可运行判定（需要一个成规模的到期决策样本） | P1 收尾 | 可以先跑一段合成/回放产生 ≥200 条到期决策，再统计 `outcomes` 与 `decisions` 的比例 |
 | 24 | **P1 ⑤ `kill -9` 后 resume 未实现也未验证**：`order_intents` 里 `created` 且无 ack 的记录是**查询线索**（schema 与注释都留好了），但按 `client_order_id` 回查交易所、以及"无重复决策"的验证都还没写 | P1 收尾 / P2 ① | P2 的 ①（50 次 kill -9、孤儿订单 = 0）本来就覆盖这条；P1 只要求"resume 恢复且无重复决策"，可以先做不触达交易所的部分 |
 | 21 | **A/B 的触发密度太低**：92 天 1h（2207 根已收盘 bar）只产生 16 次触发、1 笔配对成交、判断层出手 2 次 ⇒ 即使换上 LLM 通道也算不出有意义的 CI | P1 末 | 需要一套真的会成交的计划卡/规则族（或更长时间框）；判据可先按"≥200 次触发"满足 |
