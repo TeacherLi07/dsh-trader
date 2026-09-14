@@ -1,0 +1,27 @@
+# 只跑 test：`@deepseek-ai/*` 是运行时 peer，标准 CI 环境没有 DSH 安装，
+# 因此 typecheck / build 无法在这里通过。完整门禁与理由见 docs/git-workflow.md。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dsh-trader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: dsh-trader/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test

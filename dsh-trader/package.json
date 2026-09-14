@@ -28,6 +28,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify": "pnpm typecheck && pnpm build && pnpm test",
     "link:peers": "node scripts/link-peers.mjs",
     "clean": "rm -rf lib coverage"
   },
