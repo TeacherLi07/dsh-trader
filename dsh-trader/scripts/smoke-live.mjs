@@ -23,6 +23,7 @@ import { migrate } from '../lib/db/schema.js'
 import { BarArchive } from '../lib/market/archive.js'
 import { backfill } from '../lib/market/backfill.js'
 import { applyProxyAwareFetch, createCcxtSource } from '../lib/market/ccxt-source.js'
+import { FeatureEngine } from '../lib/market/features.js'
 
 const [venue = 'htx', symbol = 'BTC/USDT', timeframe = '1h', days = '30'] = process.argv.slice(2)
 const dayCount = Number(days)
@@ -65,6 +66,12 @@ const summary = {
   lastClose: bars[bars.length - 1]?.close,
   allClosed: bars.every((bar) => bar.closed),
 }
+
+// 特征层（T0.5）：把归档的已收盘 bar 顺序喂给增量引擎，打印最后一根的完整快照
+const engine = new FeatureEngine()
+let lastSnapshot
+for (const bar of bars) lastSnapshot = engine.onClosedCandle(bar)
+summary.lastFeatures = lastSnapshot?.values ?? null
 
 console.log(JSON.stringify(summary, null, 2))
 

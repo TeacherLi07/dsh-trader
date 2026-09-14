@@ -133,6 +133,20 @@ export class BarArchive {
     return rows.map(toCandle)
   }
 
+  /** **最近** `limit` 根已收盘 bar（按 `open_time` 升序返回）—— 用于进程重启后回灌特征。 */
+  recentClosedBars(symbol: string, timeframe: string, limit: number): readonly Candle[] {
+    const rows = this.db
+      .prepare(
+        `SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume, closed
+         FROM bars
+         WHERE symbol = ? AND timeframe = ? AND closed = 1
+         ORDER BY open_time DESC
+         LIMIT ?`,
+      )
+      .all(symbol, timeframe, limit) as BarRow[]
+    return rows.map(toCandle).reverse()
+  }
+
   count(symbol?: string, timeframe?: string): number {
     const clauses: string[] = []
     const params: unknown[] = []

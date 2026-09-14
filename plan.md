@@ -97,6 +97,8 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 
 规则：**取值与运算都是数值/布尔，DSL 没有字符串**；时间框架由承诺自带的 `tf` 字段声明（`tf ∈ {1m,15m,1h,4h,1d}`，在该 tf 的每根已收盘 bar 上求值一次），因此表达式里**不允许**出现 `bar.tf`。`pm.<alias>.*` 只在 alias 已由 `trade_prediction_watch` 注册后合法（§4.4）——DSL 没有字符串，所以预测市场**只能通过别名**进入表达式；未注册的 alias 视为未知取值 → `ok:false` → UNCOVERED，**不静默 false**。`n ≤ 500`；**禁止**赋值/循环/字符串/任意属性访问/网络/时间函数；**只用已收盘 bar**。`crossAbove`/`crossBelow` 需要前一根 bar，由特征层提供。
 
+**内核指标层的当前覆盖（T0.5 交付）**：已实现 `ema`(20/50)、`atr`(14)、`rsi`(14)、`vwap`(20)、`zscore`(20)、`vol.realized`(20)，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。**尚未实现**：`adx`，以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`。未实现的取值路径会让表达式 `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
+
 **求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**。默认 **edge 触发**（false→true 各触发一次）；需要电平语义的用 `between`/显式条件表达。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
 
 ### 3.3 动作词汇表（封闭枚举，`then.action`）
@@ -624,6 +626,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 13 | 历史深度：v2 `interval=max` 超时、`1h` 返回空 —— 可用的最长区间与分页策略 | T1.8 | 影响回放覆盖面；取值走白名单 |
 | 14 | **ccxt 自带 fetch 不读代理环境变量**：本机有 `HTTP(S)_PROXY` 且 `NODE_USE_ENV_PROXY=1`；不注入全局 fetch 时 HTX 报 `ECONNREFUSED`、OKX 超时，注入后正常 | ✅ 已解决 | `applyProxyAwareFetch()` 已实现，且在 `createMarketRuntime` 默认启用；2026-09-14 实测 HTX 30 天 1h 回补：720 根取回、**719 根落库全部为已收盘 bar**（进行中的那根被正确排除） |
 | 15 | **WebSocket 行情需要 CCXT Pro**：免费 `ccxt@4.5.78` 的 `has.watchOHLCV` 实测为 `undefined` ⇒ v0 只能 REST 轮询 | P1 中 | 轮询已满足 60s 级需求；Pro 是独立付费包，接入前先确认成本与必要性 |
+| 16 | **内核指标层未覆盖**：`adx`（需 Wilder 三重平滑）与依赖外部源的 `oi.changePct`/`liq.notional`/`funding.rate` | T0.6 前 | 未覆盖路径一律 UNCOVERED（fail-closed，不会静默 false）；实现顺序见 §3.2 |
 
 ---
 

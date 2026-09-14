@@ -15,6 +15,8 @@ import { systemClock } from '../clock.js'
 import { getDatabase } from '../db/runtime.js'
 import { BarArchive } from '../market/archive.js'
 import type { CcxtExchangeLike } from '../market/ccxt-source.js'
+import { FeatureArchive } from '../market/feature-archive.js'
+import { FEATURE_WARMUP_BARS, FeaturePipeline } from '../market/features.js'
 import { createMarketRuntime, type MarketRuntime } from '../market/runtime.js'
 
 export const name = 'trade-market'
@@ -68,15 +70,29 @@ export function apply(ctx: Context, config: MarketConfig): void {
       const Exchange = ccxt[config.venue]
       if (Exchange === undefined) throw new Error(`未知交易所：${config.venue}`)
 
+      const database = getDatabase()
+      const bars = new BarArchive(database)
+      const pipeline = new FeaturePipeline(new FeatureArchive(database))
+
+      // 重启后回灌最近 N 根已收盘 bar，重建增量指标状态，避免特征长时间空窗
+      for (const symbol of config.symbols) {
+        for (const timeframe of config.timeframes) {
+          pipeline.warmUp(bars.recentClosedBars(symbol, timeframe, FEATURE_WARMUP_BARS))
+        }
+      }
+
       runtime = await createMarketRuntime({
         venue: config.venue,
         symbols: config.symbols,
         timeframes: config.timeframes,
         pollMs: config.pollMs ?? 60_000,
         recentLimit: config.recentLimit ?? 3,
-        archive: new BarArchive(getDatabase()),
+        archive: bars,
         clock: systemClock(),
         createExchange: () => new Exchange({ enableRateLimit: true }),
+        onClosedCandle: (candle) => {
+          pipeline.onClosedCandle(candle)
+        },
         onError: () => {
           // TODO(OBS/T1.6): 写 audit_events + 接告警通道（plan §10.3）。
           // 数据源失败只跳过本轮，绝不让主循环崩溃（plan §4.3）。

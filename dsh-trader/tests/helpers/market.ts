@@ -54,3 +54,39 @@ export function raw(openTime: number, close = 100, over: Partial<RawCandle> = {}
 export function series(startOpenTime: number, count: number, stepMs = 3_600_000): RawCandle[] {
   return Array.from({ length: count }, (_, i) => raw(startOpenTime + i * stepMs, 100 + i))
 }
+
+/**
+ * 确定性伪随机 K 线（LCG）—— 指标对拍必须可复现，不能用 Math.random。
+ * 保证 high ≥ max(open,close)、low ≤ min(open,close)、volume > 0。
+ */
+export function randomSeries(
+  startOpenTime: number,
+  count: number,
+  seed = 42,
+  stepMs = 3_600_000,
+): RawCandle[] {
+  let state = seed >>> 0
+  const next = (): number => {
+    state = (state * 1664525 + 1013904223) >>> 0
+    return state / 0x1_0000_0000
+  }
+
+  const out: RawCandle[] = []
+  let price = 100
+  for (let i = 0; i < count; i += 1) {
+    const open = price
+    const close = Math.max(1, open + (next() - 0.5) * 4)
+    const high = Math.max(open, close) + next()
+    const low = Math.min(open, close) - next()
+    out.push({
+      openTime: startOpenTime + i * stepMs,
+      open,
+      high,
+      low,
+      close,
+      volume: 10 + next() * 90,
+    })
+    price = close
+  }
+  return out
+}

@@ -69,6 +69,19 @@ describe('BarArchive', () => {
     expect(archive.closedBars('BTC/USDT', TF, { limit: 2 })).toHaveLength(2)
   })
 
+  it('returns the most recent n closed bars in ascending order (restart warm-up)', () => {
+    archive.upsertClosed(
+      candles([raw(NOW - 5 * HOUR), raw(NOW - 4 * HOUR), raw(NOW - 3 * HOUR), raw(NOW - 2 * HOUR)]),
+      META,
+    )
+    expect(archive.recentClosedBars('BTC/USDT', TF, 2).map((c) => c.openTime)).toEqual([
+      NOW - 3 * HOUR,
+      NOW - 2 * HOUR,
+    ])
+    expect(archive.recentClosedBars('BTC/USDT', TF, 10)).toHaveLength(4)
+    expect(archive.recentClosedBars('ETH/USDT', TF, 10)).toHaveLength(0)
+  })
+
   it('scopes queries per symbol and timeframe', () => {
     archive.upsertClosed(candles([raw(NOW - HOUR)]), META)
     const other = normalizeCandles([raw(NOW - HOUR)], 'ETH/USDT', TF, NOW).candles

@@ -6,7 +6,9 @@
  * `stop` + `riskPct` 算出（plan §3.4），模型给不出危险的数量。
  */
 
-import { createHash } from 'node:crypto'
+import { canonicalJson, fingerprint } from '../util/canonical.js'
+
+export { canonicalJson }
 
 export const ACTION_KINDS = [
   'noop',
@@ -285,19 +287,10 @@ export function validatePlanCard(value: unknown): PlanValidation {
   return { ok: true, card: value as unknown as PlanCard }
 }
 
-/** 键排序的确定性序列化 —— 让 `contentHash` 可复现（审计基础）。 */
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
-  const record = value as Record<string, unknown>
-  const keys = Object.keys(record).sort()
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(record[k])}`).join(',')}}`
-}
-
 /** 幂等根：对除 `contentHash` 自身以外的全部内容取哈希。 */
 export function computeContentHash(card: Omit<PlanCard, 'contentHash'> & { contentHash?: string }): string {
   const { contentHash: _ignored, ...rest } = card as Record<string, unknown> & { contentHash?: string }
-  return `sha256:${createHash('sha256').update(canonicalJson(rest)).digest('hex')}`
+  return fingerprint(rest)
 }
 
 /** 计划卡是否已过期。过期后不得用三小时前的判断处理三小时后的市场。 */
