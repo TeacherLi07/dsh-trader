@@ -9,6 +9,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 import { computeContentHash, validatePlanCard, type PlanCard } from './schema.js'
 
@@ -42,7 +43,11 @@ export interface SaveResult {
 }
 
 export class PlanStore {
-  constructor(private readonly db: Database.Database) {}
+  readonly #statements: Statements
+
+  constructor(private readonly db: Database.Database) {
+    this.#statements = new Statements(db)
+  }
 
   /**
    * 保存一张计划卡。
@@ -81,12 +86,12 @@ export class PlanStore {
     const nextStatus: 'expired' | 'superseded' =
       currentRow !== undefined && now > currentRow.window_ends_at ? 'expired' : 'superseded'
 
-    const insert = this.db.prepare(
+    const insert = this.#statements.get(
       `INSERT INTO plan_cards
          (plan_id, symbol, version, status, window_ends_at, created_at, card_json, content_hash)
        VALUES (@planId, @symbol, @version, 'active', @windowEndsAt, @createdAt, @json, @contentHash)`,
     )
-    const retire = this.db.prepare('UPDATE plan_cards SET status = ? WHERE plan_id = ?')
+    const retire = this.#statements.get('UPDATE plan_cards SET status = ? WHERE plan_id = ?')
 
     const run = this.db.transaction(() => {
       if (replaced !== undefined) retire.run(nextStatus, replaced)
@@ -119,16 +124,14 @@ export class PlanStore {
 
   /** 所有版本（含已失效），便于审计"当时用的是什么计划"。 */
   history(symbol: string, limit = 50): readonly PlanCard[] {
-    const rows = this.db
-      .prepare('SELECT * FROM plan_cards WHERE symbol = ? ORDER BY version DESC LIMIT ?')
+    const rows = this.#statements.get('SELECT * FROM plan_cards WHERE symbol = ? ORDER BY version DESC LIMIT ?')
       .all(symbol, limit) as PlanRow[]
     return rows.map(toCard)
   }
 
   /** 把已过期的 active 卡转为 `expired`（释放"每标的一张 active"的名额）。 */
   expire(now: number): number {
-    const result = this.db
-      .prepare(`UPDATE plan_cards SET status = 'expired' WHERE status = 'active' AND window_ends_at < ?`)
+    const result = this.#statements.get(`UPDATE plan_cards SET status = 'expired' WHERE status = 'active' AND window_ends_at < ?`)
       .run(now)
     return Number(result.changes)
   }
@@ -136,30 +139,28 @@ export class PlanStore {
   count(symbol?: string): number {
     const row =
       symbol === undefined
-        ? (this.db.prepare('SELECT COUNT(*) AS n FROM plan_cards').get() as { n: number })
-        : (this.db.prepare('SELECT COUNT(*) AS n FROM plan_cards WHERE symbol = ?').get(symbol) as {
+        ? (this.#statements.get('SELECT COUNT(*) AS n FROM plan_cards').get() as { n: number })
+        : (this.#statements.get('SELECT COUNT(*) AS n FROM plan_cards WHERE symbol = ?').get(symbol) as {
             n: number
           })
     return row.n
   }
 
   #byId(planId: string): PlanRow | undefined {
-    return this.db.prepare('SELECT * FROM plan_cards WHERE plan_id = ?').get(planId) as
+    return this.#statements.get('SELECT * FROM plan_cards WHERE plan_id = ?').get(planId) as
       | PlanRow
       | undefined
   }
 
   #activeRow(symbol: string): PlanRow | undefined {
-    return this.db
-      .prepare(
+    return this.#statements.get(
         `SELECT * FROM plan_cards WHERE symbol = ? AND status = 'active' ORDER BY version DESC LIMIT 1`,
       )
       .get(symbol) as PlanRow | undefined
   }
 
   #maxVersion(symbol: string): number | undefined {
-    const row = this.db
-      .prepare('SELECT MAX(version) AS v FROM plan_cards WHERE symbol = ?')
+    const row = this.#statements.get('SELECT MAX(version) AS v FROM plan_cards WHERE symbol = ?')
       .get(symbol) as { v: number | null }
     return row.v ?? undefined
   }

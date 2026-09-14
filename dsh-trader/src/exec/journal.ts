@@ -11,6 +11,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { Statements } from '../db/statements.js'
 import { fingerprint } from '../util/canonical.js'
 import type { ActionKind } from '../plan/schema.js'
 
@@ -70,7 +71,11 @@ export interface FillRecord {
 }
 
 export class DecisionJournal {
-  constructor(private readonly db: Database.Database) {}
+  readonly #statements: Statements
+
+  constructor(private readonly db: Database.Database) {
+    this.#statements = new Statements(db)
+  }
 
   /** 决策幂等根：内容哈希（不含"是否已执行"，那是结果而非内容）。 */
   static contentHash(record: DecisionRecord): string {
@@ -88,8 +93,7 @@ export class DecisionJournal {
   }
 
   recordDecision(record: DecisionRecord): boolean {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `INSERT INTO decisions
            (decision_id, content_hash, symbol, plan_id, decided_at, context_hash, action,
             size_qty, stop_price, take_profit, rationale, model_route, executed)
@@ -117,8 +121,7 @@ export class DecisionJournal {
   }
 
   recordIntent(intent: OrderIntentRecord): boolean {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `INSERT INTO order_intents
            (intent_id, client_order_id, decision_id, venue, symbol, state, type, side, qty,
             price, notional_usd, reduce_only, created_at, exchange_order_id)
@@ -147,8 +150,7 @@ export class DecisionJournal {
   }
 
   recordOrder(order: OrderRecord): boolean {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `INSERT INTO orders
            (order_id, venue, exchange_order_id, client_order_id, symbol, status, qty, filled_qty, avg_price, updated_at)
          VALUES
@@ -171,8 +173,7 @@ export class DecisionJournal {
   }
 
   recordFill(fill: FillRecord): boolean {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `INSERT INTO fills (fill_id, order_id, qty, price, fee, fee_ccy, ts)
          VALUES (@fillId, @orderId, @qty, @price, @fee, @feeCurrency, @ts)
          ON CONFLICT (fill_id) DO NOTHING`,
@@ -192,34 +193,33 @@ export class DecisionJournal {
   // ── 审计读取（回放对拍用）─────────────────────────────────────────────────
 
   decisionIds(): readonly string[] {
-    return (this.db.prepare('SELECT decision_id AS id FROM decisions ORDER BY decision_id').all() as {
+    return (this.#statements.get('SELECT decision_id AS id FROM decisions ORDER BY decision_id').all() as {
       id: string
     }[]).map((row) => row.id)
   }
 
   intentIds(): readonly string[] {
-    return (this.db.prepare('SELECT intent_id AS id FROM order_intents ORDER BY intent_id').all() as {
+    return (this.#statements.get('SELECT intent_id AS id FROM order_intents ORDER BY intent_id').all() as {
       id: string
     }[]).map((row) => row.id)
   }
 
   clientOrderIds(): readonly string[] {
     return (
-      this.db
-        .prepare('SELECT client_order_id AS id FROM order_intents ORDER BY client_order_id')
+      this.#statements.get('SELECT client_order_id AS id FROM order_intents ORDER BY client_order_id')
         .all() as { id: string }[]
     ).map((row) => row.id)
   }
 
   fillIds(): readonly string[] {
-    return (this.db.prepare('SELECT fill_id AS id FROM fills ORDER BY fill_id').all() as {
+    return (this.#statements.get('SELECT fill_id AS id FROM fills ORDER BY fill_id').all() as {
       id: string
     }[]).map((row) => row.id)
   }
 
   triggerKeys(): readonly string[] {
     return (
-      this.db.prepare('SELECT dedup_key AS id FROM triggers ORDER BY dedup_key').all() as {
+      this.#statements.get('SELECT dedup_key AS id FROM triggers ORDER BY dedup_key').all() as {
         id: string
       }[]
     ).map((row) => row.id)
@@ -227,8 +227,7 @@ export class DecisionJournal {
 
   /** 重复的 `client_order_id` 数（唯一约束下应恒为 0）—— 回放验收的一条硬指标。 */
   duplicateClientOrderIds(): number {
-    const row = this.db
-      .prepare(
+    const row = this.#statements.get(
         `SELECT COUNT(*) AS n FROM (
            SELECT client_order_id FROM order_intents GROUP BY client_order_id HAVING COUNT(*) > 1
          )`,
@@ -240,7 +239,7 @@ export class DecisionJournal {
   /** 该 `client_order_id` 是否已经下过单 —— 硬闸幂等检查的依据。 */
   hasClientOrderId(clientOrderId: string): boolean {
     return (
-      this.db.prepare('SELECT 1 AS x FROM order_intents WHERE client_order_id = ?').get(clientOrderId) !==
+      this.#statements.get('SELECT 1 AS x FROM order_intents WHERE client_order_id = ?').get(clientOrderId) !==
       undefined
     )
   }

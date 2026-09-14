@@ -6,6 +6,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 
 export type TriggerPurpose = 'invalidation' | 'commitment' | 'novelty' | 'info'
@@ -82,7 +83,11 @@ function toTrigger(row: TriggerRow): StoredTrigger {
 }
 
 export class TriggerQueue {
-  constructor(private readonly db: Database.Database) {}
+  readonly #statements: Statements
+
+  constructor(private readonly db: Database.Database) {
+    this.#statements = new Statements(db)
+  }
 
   /**
    * 幂等入队。返回 true 表示真的插入了；false 表示 `dedup_key` 已存在。
@@ -91,8 +96,7 @@ export class TriggerQueue {
    * 后者会连 CHECK/NOT NULL 违反一起静默吞掉，而"不静默"是本项目的硬要求。
    */
   enqueue(trigger: NewTrigger): boolean {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `INSERT INTO triggers
            (trigger_id, dedup_key, symbol, rule_id, purpose, bar_ts, payload_json, disposition, state, created_at, expires_at)
          VALUES
@@ -116,13 +120,12 @@ export class TriggerQueue {
   }
 
   has(dedupKey: string): boolean {
-    return this.db.prepare('SELECT 1 AS x FROM triggers WHERE dedup_key = ?').get(dedupKey) !== undefined
+    return this.#statements.get('SELECT 1 AS x FROM triggers WHERE dedup_key = ?').get(dedupKey) !== undefined
   }
 
   /** 该 (rule, symbol) 最近一次触发时间 —— 冷却窗口的依据。 */
   latestFireAt(ruleId: string, symbol: string): number | undefined {
-    const row = this.db
-      .prepare('SELECT MAX(created_at) AS t FROM triggers WHERE rule_id = ? AND symbol = ?')
+    const row = this.#statements.get('SELECT MAX(created_at) AS t FROM triggers WHERE rule_id = ? AND symbol = ?')
       .get(ruleId, symbol) as { t: number | null }
     return row.t ?? undefined
   }
@@ -156,16 +159,16 @@ export class TriggerQueue {
       sql += ` AND disposition IN (${dispositionSlots})`
       params.push(...dispositions)
     }
-    const row = this.db.prepare(sql).get(...params) as { n: number }
+    const row = this.#statements.get(sql).get(...params) as { n: number }
     return row.n
   }
 
   /** 原子领取：`queued → claimed`。返回本轮领取到的触发。 */
   claim(limit = 10): readonly StoredTrigger[] {
-    const select = this.db.prepare(
+    const select = this.#statements.get(
       `SELECT * FROM triggers WHERE state = 'queued' ORDER BY created_at ASC, trigger_id ASC LIMIT ?`,
     )
-    const update = this.db.prepare(`UPDATE triggers SET state = 'claimed' WHERE trigger_id = ?`)
+    const update = this.#statements.get(`UPDATE triggers SET state = 'claimed' WHERE trigger_id = ?`)
 
     const claimAll = this.db.transaction((n: number) => {
       const rows = select.all(n) as TriggerRow[]
@@ -177,13 +180,12 @@ export class TriggerQueue {
   }
 
   markDone(triggerId: string): void {
-    this.db.prepare(`UPDATE triggers SET state = 'done' WHERE trigger_id = ?`).run(triggerId)
+    this.#statements.get(`UPDATE triggers SET state = 'done' WHERE trigger_id = ?`).run(triggerId)
   }
 
   /** 过期的 queued/claimed 转为 expired；返回条数。 */
   expire(now: number): number {
-    const result = this.db
-      .prepare(
+    const result = this.#statements.get(
         `UPDATE triggers SET state = 'expired'
          WHERE state IN ('queued', 'claimed') AND expires_at IS NOT NULL AND expires_at < ?`,
       )
@@ -192,7 +194,7 @@ export class TriggerQueue {
   }
 
   get(triggerId: string): StoredTrigger | undefined {
-    const row = this.db.prepare('SELECT * FROM triggers WHERE trigger_id = ?').get(triggerId) as
+    const row = this.#statements.get('SELECT * FROM triggers WHERE trigger_id = ?').get(triggerId) as
       | TriggerRow
       | undefined
     return row === undefined ? undefined : toTrigger(row)
@@ -201,8 +203,8 @@ export class TriggerQueue {
   count(state?: TriggerState): number {
     const row =
       state === undefined
-        ? (this.db.prepare('SELECT COUNT(*) AS n FROM triggers').get() as { n: number })
-        : (this.db.prepare('SELECT COUNT(*) AS n FROM triggers WHERE state = ?').get(state) as {
+        ? (this.#statements.get('SELECT COUNT(*) AS n FROM triggers').get() as { n: number })
+        : (this.#statements.get('SELECT COUNT(*) AS n FROM triggers WHERE state = ?').get(state) as {
             n: number
           })
     return row.n

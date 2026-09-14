@@ -6,6 +6,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 import type { FeatureSnapshot } from './features.js'
 
@@ -22,11 +23,14 @@ function toSnapshot(row: FeatureRow): FeatureSnapshot {
 }
 
 export class FeatureArchive {
-  constructor(private readonly db: Database.Database) {}
+  readonly #statements: Statements
+
+  constructor(private readonly db: Database.Database) {
+    this.#statements = new Statements(db)
+  }
 
   upsert(snapshot: FeatureSnapshot): void {
-    this.db
-      .prepare(
+    this.#statements.get(
         `INSERT INTO features (symbol, timeframe, open_time, snapshot_json, fingerprint)
          VALUES (@symbol, @timeframe, @openTime, @json, @fingerprint)
          ON CONFLICT (symbol, timeframe, open_time) DO UPDATE SET
@@ -43,8 +47,7 @@ export class FeatureArchive {
   }
 
   get(symbol: string, timeframe: string, openTime: number): FeatureSnapshot | undefined {
-    const row = this.db
-      .prepare(
+    const row = this.#statements.get(
         `SELECT symbol, timeframe, open_time, snapshot_json, fingerprint
          FROM features WHERE symbol = ? AND timeframe = ? AND open_time = ?`,
       )
@@ -53,8 +56,7 @@ export class FeatureArchive {
   }
 
   latest(symbol: string, timeframe: string): FeatureSnapshot | undefined {
-    const row = this.db
-      .prepare(
+    const row = this.#statements.get(
         `SELECT symbol, timeframe, open_time, snapshot_json, fingerprint
          FROM features WHERE symbol = ? AND timeframe = ?
          ORDER BY open_time DESC LIMIT 1`,
@@ -75,7 +77,7 @@ export class FeatureArchive {
       params.push(timeframe)
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM features ${where}`).get(...params) as {
+    const row = this.#statements.get(`SELECT COUNT(*) AS n FROM features ${where}`).get(...params) as {
       n: number
     }
     return row.n

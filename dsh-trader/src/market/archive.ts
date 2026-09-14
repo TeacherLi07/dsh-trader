@@ -6,6 +6,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { Statements } from '../db/statements.js'
 import type { Candle } from './types.js'
 
 export interface UpsertMeta {
@@ -55,11 +56,15 @@ function toCandle(row: BarRow): Candle {
 }
 
 export class BarArchive {
-  constructor(private readonly db: Database.Database) {}
+  readonly #statements: Statements
+
+  constructor(private readonly db: Database.Database) {
+    this.#statements = new Statements(db)
+  }
 
   /** 已收盘 bar 写入/更新；未收盘一律拒绝。整个批次一个事务。 */
   upsertClosed(candles: readonly Candle[], meta: UpsertMeta): UpsertResult {
-    const statement = this.db.prepare(`
+    const statement = this.#statements.get(`
       INSERT INTO bars (
         symbol, timeframe, open_time, close_time, open, high, low, close, volume, closed, source, fetched_at
       ) VALUES (
@@ -104,8 +109,7 @@ export class BarArchive {
 
   /** 该 (symbol, timeframe) 已收盘 bar 的最大 `open_time`，用于"只发新增"。 */
   lastOpenTime(symbol: string, timeframe: string): number | undefined {
-    const row = this.db
-      .prepare(
+    const row = this.#statements.get(
         'SELECT MAX(open_time) AS last FROM bars WHERE symbol = ? AND timeframe = ? AND closed = 1',
       )
       .get(symbol, timeframe) as { last: number | null } | undefined
@@ -114,8 +118,7 @@ export class BarArchive {
 
   /** 已收盘 bar，按 `open_time` 升序；`[since, until)` 半开区间。 */
   closedBars(symbol: string, timeframe: string, query: BarQuery = {}): readonly Candle[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.#statements.get(
         `SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume, closed
          FROM bars
          WHERE symbol = ? AND timeframe = ? AND closed = 1
@@ -135,8 +138,7 @@ export class BarArchive {
 
   /** **最近** `limit` 根已收盘 bar（按 `open_time` 升序返回）—— 用于进程重启后回灌特征。 */
   recentClosedBars(symbol: string, timeframe: string, limit: number): readonly Candle[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.#statements.get(
         `SELECT symbol, timeframe, open_time, close_time, open, high, low, close, volume, closed
          FROM bars
          WHERE symbol = ? AND timeframe = ? AND closed = 1
@@ -159,7 +161,7 @@ export class BarArchive {
       params.push(timeframe)
     }
     const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM bars ${where}`).get(...params) as {
+    const row = this.#statements.get(`SELECT COUNT(*) AS n FROM bars ${where}`).get(...params) as {
       n: number
     }
     return row.n

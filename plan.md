@@ -40,6 +40,7 @@ agent 默认 idle，**无新信息不唤醒（零 token）**。只有三类唤�
 - 超限一律**落库 + 告警**，不唤醒。
 - 规则命中后的分流：命中承诺 → 执行（不唤醒）；`invalidation` → 执行降险（不唤醒）；`novelty` → W3；`info` → 只落库；其余 → 仅当 W2 成立才入队。
 - agent 忙时不打断，只入队；仅 P0（持仓风险）允许 `steer()`。
+- **★ attach 时机（实测，见 §4.6 R1）**：**不能在插件 `apply` 期间调用 `ctx.agents.create/resume`** —— agent factory 由 `agent-loop` 注册，而它的 apply 晚于插件 include 条目。在 `apply` 里调用会抛 `no agent factory registered`；若 `await` 等待 factory 出现，会**死锁 plugin loader**（loader 正在等 `apply` 返回）。正确做法：挂 `agent/created` 事件后**即发即忘**地 attach，或在进程启动完成后再驱动（supervisor 的 T1.x 实现必须遵守）。
 
 **可观测指标（P1 起每日输出）**：计划覆盖率 = `matched / (matched + uncovered)`；W2、W3 频次；每窗口 token 与费用。**W2 频繁 ⇒ 计划写得太粗，先改计划，不是加 LLM。**
 
@@ -564,7 +565,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 
 | 阶段 | 目标 | 交付物 | 量化验收（可自动验证） |
 |---|---|---|---|
-| **P0 骨架**（1–2 周） | 数据 → 特征 → 规则 → **计划卡匹配** → 纸面执行 → 落库 | `market/plan/rules/exec(Paper)/db/clock` + 回放工具 + 探针 + 压测 | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三个表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次规则命中都打印 `matched:<id>` 或 `UNCOVERED:<reason>`；④ 表达式编译成功率 100%；⑤ 探针：`resume`→`followup` 产生 `assistant/message`，且 `source.form=notice` 渲染正确；⑥ 压测：24h 合成行情后 RSS 增长 < 10%（首小时为预热）、fd 数波动 ≤ 2 |
+| **P0 骨架**（1–2 周） | 数据 → 特征 → 规则 → **计划卡匹配** → 纸面执行 → 落库 | `market/plan/rules/exec(Paper)/db/clock` + 回放工具 + 探针 + 压测 | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三个表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次规则命中都打印 `matched:<id>` 或 `UNCOVERED:<reason>`；④ 表达式编译成功率 100%；⑤ 探针：`resume`→`followup` 产生 `assistant/message`，且 `source.form=notice` 渲染正确；⑥ 压测：24h 合成行情后 RSS 增长 < 10%（首小时为预热）、fd 数波动 ≤ 2<br>**⑥ 的口径**：R5 问的是"长跑会不会无限增长"。进程启动时 V8 堆/malloc arena/SQLite 页缓存都在爬坡，而 RSS **不随 GC 归还**，所以"从预热点算总增长"会把启动爬坡误判成泄漏。因此硬指标取**稳态斜率**（25% 处采样为基线比较末次），启动爬坡如实报告但不作闸门；WAL 另有上限检查。<br>**这个判据是有用的**：T0.9 第一次跑就抓到并修掉了一个真实泄漏 —— `db.prepare()` 每次调用都会在 `Database` 上累积 Statement（实测 5 万次调用 **+139.5MB**，缓存复用后 +0.3MB）。修完后 24h 稳态增长 **+2.73%**、fd 波动 **0**、WAL 有界；并由 `tests/db-discipline.test.ts` 守住"热路径不得直接 `prepare()`" |
 | **P1 判断与计划卡**（2–3 周） | 审议窗产出可执行计划卡 + 记忆闭环 | workflow 脚本（含冲突消解）、角色提示词、全部工具、结算/反思、context 组装器、预算账本、**预测市场事件源（§4.4）** | ① 计划卡 schema 通过率 100%；② `when` 求值错误率 = 0（错误一律计 UNCOVERED 并告警）；③ 日输出计划覆盖率、W2/W3 频次、每窗口成本；④ 到期决策结算成功率 ≥ 99%（含重试），**每条决策至多一条反思**（唯一键）；⑤ kill -9 后 `resume` 恢复且无重复决策；⑥ 预测市场专项验收（见下）全部通过 |
 | **P1.5 通道有效性闸门** | 判定 W2/W3 是否值得保留 | A/B 回放报告（预注册指标） | 回放 ≥ 90 天或 ≥ 200 次触发；指标 = 扣费净 PnL（taker+资金费+滑点模型）+ 执行偏离次数。**保留 W2/W3 的条件**：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 的最大回撤 ≤ A × 1.2。否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**pm 驱动的 W3 同样纳入此闸门**：证不出正贡献就降级为只保留 `info` 级通知 |
 | **P2 测试网实盘**（2–3 周） | 真实接口、幂等、对账、硬闸、熔断 | `CcxtBroker`、对账、外部 watchdog、`/halt` | ① 订单在途时 `kill -9` × 50 次：孤儿订单 = 0、重复成交 = 0；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` 主循环 > 3×心跳间隔 → watchdog 撤单，交易所挂单 = 0；④ 停掉模型供应商：已挂保护单仍生效、`StopGuard` 仍执行 |
@@ -592,7 +593,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T0.7 | `rules` + `trigger`（去重/冷却/限流/分级） | T0.6 | 同一 bar 重复回放零重复触发 |
 | T0.8a | `exec/paper`（纸面撮合）+ `reconcile`，与 `gate` 共用同一 `Broker` 接口 | T0.2, T0.6 | 撮合含滑点/手续费、按 `clientOrderId` 幂等、保护单是挂单而非立即成交；对账是纯函数 |
 | T0.8b | 确定性回放工具：features → plan match → rules → gate → paper | T0.8a, T0.7, T0.5 | §10 P0 验收 ②③：回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0 |
-| T0.9 | 探针（resume/followup/source）+ R5 压测脚本 | T0.1 | §10 P0 验收 ⑤⑥ |
+| T0.9 | 探针（resume/followup/source）+ R5 压测脚本 | T0.1 | `scripts/probe-check.mjs`（`dsh --profile probe` 跑两遍 + 解压 session 日志核验 `form=notice` 落盘）与 `scripts/soak.mjs`（24h 稳态 + WAL 上限）；§10 P0 验收 ⑤⑥ |
 | T1.1 | `workflow` 脚本（冻结 pack、并行分析师、冲突消解、辩论、裁决） | T0.7 | 同一 `contextHash` 传所有分析师；只回结构化字段 + 工件指针 |
 | T1.2 | 角色提示词 + `roles.ts` 白名单 + 模型路由 | T1.1 | 分析师无副作用工具（断言）；desk 工具 ≤ 20 |
 | T1.3 | 全部交易工具（propose/execute/portfolio/recall/risk/…） | T0.8, T1.2 | 每个 execute 内二次硬闸；`propose` 不触达交易所 |

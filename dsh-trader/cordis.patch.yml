@@ -75,3 +75,11 @@
 
     - id: trade-commands
       name: dsh-trader/plugins/commands
+
+    # 最小闭环探针（T0.9）：默认关闭，只在专门的 probe profile 里打开
+    - id: trade-probe
+      name: dsh-trader/plugins/probe
+      config:
+        enabled: false
+        sessionId: trade-probe-session
+        resultPath: !!js dshHomePath('trading/probe-result.json')
