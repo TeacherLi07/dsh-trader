@@ -119,6 +119,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | pm `interval` 白名单 | `1d`/`1w`/`1m`(30 天) 可用；`1h` 空；`max` 行为不一致 | 未验证取值一律拒绝 |
 | market 文本不可信 | `question`/`description` 由市场创建者书写 | 按数据注入并标注 `untrustedText`，**不参与工具授权** |
 | HTX 无 sandbox | ccxt 里 HTX 没有 sandbox 端点，OKX 有 | P2 破坏性测试走 OKX sandbox 或纯 `paper`（`plan.md` §12.2 B） |
+| HTX 现货与 USDT 永续是**两个账户** | `fetchBalance()` 默认读现货；跑 `BTC/USDT:USDT` 时现货通常为 0 ⇒ 系统"以为没钱"，sizing 推出 qty=0 | 显式 `accountType: swap`（`fetchBalance({type})` + exchange `defaultType`）；实测同一 key 现货 0 / swap 24.914 |
 | 免费 ccxt 无 WS | `has.watchOHLCV === undefined` | v0/v1 只用 REST 轮询（分钟级足够） |
 
 ## 常见改动落点

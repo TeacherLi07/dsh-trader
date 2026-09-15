@@ -40,6 +40,7 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>
   }[] = []
   cancelCalls: string[] = []
+  balanceParams: (Readonly<Record<string, unknown>> | undefined)[] = []
   balance: CcxtBalanceLike = { total: { USDT: '10000' } }
   positions: readonly CcxtPositionLike[] = []
   openOrders: CcxtOrderLike[] = []
@@ -54,7 +55,8 @@ class FakeExchange implements CcxtProExchangeLike {
     return {}
   }
 
-  async fetchBalance(): Promise<CcxtBalanceLike> {
+  async fetchBalance(params?: Readonly<Record<string, unknown>>): Promise<CcxtBalanceLike> {
+    this.balanceParams.push(params)
     return this.balance
   }
 
@@ -355,6 +357,17 @@ describe('CcxtBroker', () => {
     expect(message).toContain('[REDACTED]')
     expect(message).not.toContain(API_SECRET)
     expect(message).not.toContain(API_KEY)
+  })
+
+  it('★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0', async () => {
+    const swap = new FakeExchange()
+    await makeBroker(swap, { accountType: 'swap' }).readOnlyBalance()
+    expect(swap.balanceParams.at(-1)).toEqual({ type: 'swap' })
+
+    const spot = new FakeExchange()
+    await makeBroker(spot).readOnlyBalance()
+    // 未配置 = 沿用 ccxt 默认（现货），显式传空参数而不是猜一个类型
+    expect(spot.balanceParams.at(-1)).toEqual({})
   })
 })
 

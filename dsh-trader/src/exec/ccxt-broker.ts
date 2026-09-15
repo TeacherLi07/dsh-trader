@@ -121,7 +121,7 @@ export interface CcxtProExchangeLike {
   apiKey?: string
   secret?: string
   loadMarkets(): Promise<unknown>
-  fetchBalance(): Promise<CcxtBalanceLike>
+  fetchBalance(params?: CcxtParams): Promise<CcxtBalanceLike>
   fetchPositions(symbols?: readonly string[], params?: CcxtParams): Promise<readonly CcxtPositionLike[]>
   fetchOpenOrders(
     symbol?: string,
@@ -179,6 +179,15 @@ export interface CcxtBrokerOptions {
   readonly protectiveOrderType?: string
   /** OKX sandbox 可用；HTX 没有 sandbox 时该选项不应打开。 */
   readonly sandbox?: boolean
+  /**
+   * 读余额/持仓的账户类型（ccxt 的 `fetchBalance({ type })`），如 `'spot'` | `'swap'`。
+   *
+   * ★ 为什么必须显式：HTX 的**现货账户与 USDT 永续账户是分开的**。策略跑 `BTC/USDT:USDT`
+   * 永续时，现货账户通常是 0；不指定类型就会读到 0，进而让 sizing 推出 qty=0、
+   * `projectedLeverage` 失去意义 —— 系统会"以为没钱"。实测：现货 0，`type:'swap'` 才是真实可用余额。
+   * 省略 = 沿用 ccxt 默认（现货）。
+   */
+  readonly accountType?: string
 }
 
 interface PositionReading {
@@ -392,6 +401,7 @@ export class CcxtBroker implements Broker {
   readonly #quoteCurrency: string
   readonly #spreadSymbol: string | undefined
   readonly #protectiveOrderType: string
+  readonly #accountType: string | undefined
   #marketsLoaded = false
   #marketsLoading: Promise<void> | undefined
   readonly #inFlight = new Map<string, Promise<OrderAck>>()
@@ -406,6 +416,7 @@ export class CcxtBroker implements Broker {
     this.#quoteCurrency = options.quoteCurrency ?? 'USDT'
     this.#spreadSymbol = options.spreadSymbol ?? options.symbol
     this.#protectiveOrderType = options.protectiveOrderType ?? 'stop'
+    this.#accountType = options.accountType
 
     // ★ ccxt 的私有端点（fetchBalance/fetchPositions/createOrder…）要求凭据挂在 **exchange 实例**上，
     // 只传给本 broker 是不够的；而且字段名必须是 ccxt 的 `apiKey`/`secret`（不是 `apiSecret`）。
@@ -427,7 +438,7 @@ export class CcxtBroker implements Broker {
   async getAccount(): Promise<AccountSnapshot> {
     const risk = this.#riskState()
     await this.#ensureMarketsLoaded()
-    const balance = await this.#call(() => this.#exchange.fetchBalance())
+    const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
     const positions = await this.#call(() => this.#exchange.fetchPositions())
     const openOrders = await this.#call(() => this.#exchange.fetchOpenOrders())
     const equity = quoteAmount(balance, this.#quoteCurrency)
@@ -464,7 +475,7 @@ export class CcxtBroker implements Broker {
    */
   async readOnlyBalance(): Promise<number> {
     await this.#ensureMarketsLoaded()
-    const balance = await this.#call(() => this.#exchange.fetchBalance())
+    const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
     const equity = quoteAmount(balance, this.#quoteCurrency)
     if (equity === undefined) {
       throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
@@ -665,6 +676,14 @@ export class CcxtBroker implements Broker {
       throw this.#safeError(new Error('交易所返回了无法确认的订单状态'))
     }
     return ack
+  }
+
+  /**
+   * `fetchBalance` 的账户类型参数。HTX 现货/永续账户分离，不指定就会读到另一个账户的 0。
+   * 只影响**读取**；下单走 symbol 对应的市场，不受这个参数影响。
+   */
+  #balanceParams(): CcxtParams {
+    return this.#accountType === undefined ? {} : { type: this.#accountType }
   }
 
   #riskState(): RiskState {

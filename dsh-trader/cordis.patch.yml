@@ -60,6 +60,7 @@
         preflightVenue: htx
         preflightSymbol: BTC/USDT:USDT
         sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
+        accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑 BTC/USDT:USDT 必须读 swap 账户
 
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor

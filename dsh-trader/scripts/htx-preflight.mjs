@@ -33,6 +33,8 @@ const positional = argv.filter((arg) => !arg.startsWith('--'))
 const venue = positional[0] ?? 'htx'
 const symbol = positional[1] ?? 'BTC/USDT:USDT'
 const outPath = positional[2]
+/** HTX 现货与 USDT 永续账户分离；本策略跑永续，默认读 swap 账户。 */
+const accountType = process.env.TRADER_ACCOUNT_TYPE ?? 'swap'
 
 if (venue !== 'htx' && venue !== 'okx') {
   console.error(`不支持的 venue：${venue}（只允许 htx | okx）`)
@@ -68,7 +70,12 @@ if (Exchange === undefined) {
   console.error(`未知交易所：${venue}`)
   process.exit(1)
 }
-const exchange = new Exchange({ enableRateLimit: true })
+const exchange = new Exchange({
+  enableRateLimit: true,
+  // ★ HTX 现货与 USDT 永续是**两个账户**：不指定 defaultType 会读写到现货账户（通常为 0），
+  // 让 sizing 以为"没钱"。我们的标的是永续，因此默认 swap（可用 TRADER_ACCOUNT_TYPE 覆盖）。
+  defaultType: accountType,
+})
 applyProxyAwareFetch(exchange)
 
 const clock = systemClock()
@@ -79,6 +86,7 @@ const broker = new CcxtBroker({
   apiKey,
   apiSecret,
   symbol,
+  accountType,
   sandbox: process.env.TRADER_PREFLIGHT_SANDBOX === '1',
 })
 
@@ -100,6 +108,7 @@ const payload = {
   ranAt: new Date().toISOString(),
   venue,
   symbol,
+  accountType,
   dbPath,
   dbExisted,
   credentials: { keyInjected: true, secretInjected: true },

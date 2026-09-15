@@ -1,38 +1,41 @@
 # HTX 只读预检实测（plan §12.2 A 第①步，2026-09-15）
 
-> 命令（凭据放在 `$DSH_HOME/.env`，0600；用 Node 自带的 env-file 解析器加载，与 DSH 同源）：
+> 命令（凭据在 `$DSH_HOME/.env`，0600；用 Node 自带 env-file 解析器，与 DSH 同源）：
 >
 > ```bash
 > cd dsh-trader && pnpm build
 > node --env-file="$HOME/.dsh/.env" scripts/htx-preflight.mjs htx BTC/USDT:USDT /tmp/htx-preflight.json
 > ```
 >
-> 原始 JSON（含账户权益）留在 `/tmp/htx-preflight.json`，**未入库** —— 避免把账户数据写进 git。
+> 原始 JSON（含账户余额）留在 `/tmp`，**未入库** —— 不把账户数据写进 git。
 
-## 结果：exit 0，第①步通过
+## 三轮实测：①错误子账户 → ②正确子账户但读到现货 0 → ③修正后读到永续余额
 
-| 项 | 值 |
-|---|---|
-| 私有端点认证 | ✅ 成功（`fetchBalance`/`fetchPositions`/`fetchOpenOrders` 均返回） |
-| 账户权益 | ✅ 读到（余额不足 1 USDT，远低于 `perOrderCapUsd=200`） |
-| 交易所持仓 / 挂单 | 0 / 0 |
-| 本地挂单 / 持仓 | 0 / 0 |
-| `consistent` | true（**平凡一致**，见下） |
-| `freezeTrading` | false |
-| `executedActions` | `[]`（只读保证成立：脚本不调用 place/cancel） |
+| 轮 | 现象 | 结论 |
+|---|---|---|
+| ① 错误子账户 | 认证成功，equity ≈ 0.68 USDT | key 不是要用的子账户 |
+| ② 正确子账户 | 认证成功，`EquityQuote = 0` | ★ **误报**：默认读到的是**现货账户** |
+| ③ 修正 `accountType=swap` | 认证成功，**equity = 24.914 USDT**（`free`，无持仓无挂单） | 真实可用余额在 **USDT 永续账户** |
 
-## ⚠️ 诚实说明：这次"对账一致"是**平凡**的
+### ★ 抓到的真 bug（已修）：HTX 现货与永续是两个账户
 
-交易所与本地**两边都是 0**，所以 `consistent: true` 并不构成"对账逻辑正确"的证据 ——
-它只说明没有不一致可报。这一步**非空验证到的是"认证与私有读链路可用"**（余额确实来自 HTX），
-不是对账判定本身。等账户有持仓/挂单（第②/③步产生）之后再跑，`consistent` 才有非平凡含义。
+`fetchBalance()` 不指定 `type` 时读到的是现货账户；策略跑 `BTC/USDT:USDT` 永续，现货通常是 0。
+后果不是"显示错误"而是**决策错误**：`equity=0` 会让 sizing 推出 `qty=0`、`projectedLeverage` 失去意义，
+系统会**以为没钱**（或反过来在别的口径上失真）。
 
-这与项目一贯的反空跑纪律一致：分母为 0 时不下"通过"的结论。
+修法（commit 见下）：
 
-## 对下一步的影响
+- `CcxtBrokerOptions.accountType`（如 `'swap'`），`getAccount()`/`readOnlyBalance()` 都带上 `fetchBalance({type})`；
+- 组合根/脚本构造 exchange 时同时设 `defaultType`，让行情与持仓解析也落在永续账户；
+- `cordis.patch.yml` 增 `accountType: swap`；脚本可用 `TRADER_ACCOUNT_TYPE` 覆盖；
+- 回归测试断言 `fetchBalance` 收到 `{type:'swap'}`（未配置时收到 `{}`，不猜）。
 
-- 第①步（只读）✅，可以进入第②步（`paper` 全链路，用真实公开行情，不需要入金）。
-- 第③步（`live_confirm`）之前需要**入金**：当前余额连一笔最小名义额都撑不起
-  （`qty = equity × riskPct ÷ 止损距离`，且 `perOrderCapUsd=200`）。不入金只会得到一堆
-  sizing/硬闸拒绝，属于"看起来在跑"的坏状态。
-- `live_auto`（§12.2 E）还要 `plan.md` §10 P3 连续 14 天的判据。
+实测旁证：同一把 key，`fetchBalance({type:'swap'})` 与 `{type:'future'}` 均返回 24.914，
+默认/`spot` 为 0。
+
+## 判定
+
+- 第①步（只读）✅：私有端点认证成功、读到真实永续余额、`executedActions=[]`。
+- ⚠️ 该次 `consistent=true` 仍是**平凡一致**（交易所与本地两侧都是 0 持仓/0 挂单），
+  非空验证到的是"把永续账户读对了、只读链路可用"，不是对账判定本身。
+- 余额 24.914 USDT 是后续所有风险限额的**唯一事实来源**（见 `plan.md` §6.5：参数不写死）。

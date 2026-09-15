@@ -42,6 +42,8 @@ export const Config = z.object({
   preflightSymbol: z.string(),
   /** OKX sandbox；HTX 没有该端点，不应打开。 */
   sandbox: z.boolean(),
+  /** 读余额的账户类型（HTX 现货与 USDT 永续分离）；跑永续必须是 `swap`。 */
+  accountType: z.string(),
 })
 
 export interface ExecConfig {
@@ -60,6 +62,7 @@ export interface ExecConfig {
   preflightVenue?: string
   preflightSymbol?: string
   sandbox?: boolean
+  accountType?: string
 }
 
 export type ExecBrokerKind = 'paper' | 'ccxt'
@@ -168,7 +171,9 @@ export function apply(ctx: Context, config: ExecConfig): void {
       const Exchange = ccxt[venue]
       if (Exchange === undefined) throw new Error(`未知交易所：${venue}`)
 
-      const exchange = new Exchange({ enableRateLimit: true })
+      const accountType = config.accountType ?? 'swap'
+      // defaultType 让 ccxt 的行情/持仓解析也落在永续账户上；只读余额再显式带 type。
+      const exchange = new Exchange({ enableRateLimit: true, defaultType: accountType })
       applyProxyAwareFetch(exchange)
       if (disposed) return
 
@@ -180,6 +185,7 @@ export function apply(ctx: Context, config: ExecConfig): void {
         apiKey: config.apiKey ?? '',
         apiSecret: config.apiSecret ?? '',
         sandbox: config.sandbox === true,
+        accountType,
         ...(config.preflightSymbol === undefined ? {} : { symbol: config.preflightSymbol }),
       })
 
