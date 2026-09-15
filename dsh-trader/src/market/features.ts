@@ -9,6 +9,12 @@
 
 import { fingerprint } from '../util/canonical.js'
 import { rsiValue, zscoreOf, type Ohlcv } from './indicators.js'
+import {
+  EMPTY_DERIVATIVES_VALUES,
+  DerivativesTracker,
+  type DerivativesObservation,
+  type DerivativesValues,
+} from './derivatives.js'
 import { MarketSourceError, type Candle } from './types.js'
 import type { FeatureArchive } from './feature-archive.js'
 
@@ -21,10 +27,16 @@ export const FEATURE_WINDOWS = {
   vwap: 20,
   zscore: 20,
   vol: 20,
+  adx: 14,
 } as const
 
-/** 重启回灌长度：覆盖最长的指标窗口（EMA50），保证回灌后所有指标立即有值。 */
-export const FEATURE_WARMUP_BARS = FEATURE_WINDOWS.emaSlow
+/**
+ * 重启回灌长度覆盖 EMA50 与 ADX 的双窗口暖机；ADX 首值在 index=2*period，
+ * 因而需要 2*period+1 根 bar 才能重建该状态。
+ */
+export const FEATURE_WARMUP_BARS = Math.max(FEATURE_WINDOWS.emaSlow, FEATURE_WINDOWS.adx * 2 + 1)
+
+export const DEFAULT_DERIVATIVES_WINDOW_MS = 60 * 60 * 1000
 
 export interface FeatureValues {
   readonly open: number
@@ -36,10 +48,20 @@ export interface FeatureValues {
   readonly ema50: number | null
   readonly rsi14: number | null
   readonly atr14: number | null
+  readonly adx14: number | null
   readonly vwap20: number | null
   readonly zscore20: number | null
   readonly volRealized20: number | null
+  readonly fundingRate: number | null
+  readonly oiChangePct: number | null
+  readonly liqNotional: number | null
+  readonly basisBps: number | null
 }
+
+/** 特征层只接收已归一化的快照字段或原始 observation；时间戳仍由调用方注入。 */
+export type FeatureDerivatives =
+  | DerivativesValues
+  | (Omit<DerivativesObservation, 'timestamp'> & { readonly timestamp?: number })
 
 export interface FeatureSnapshot {
   readonly symbol: string
@@ -137,6 +159,79 @@ class AtrState {
   }
 }
 
+class AdxState {
+  #previousHigh: number | undefined
+  #previousLow: number | undefined
+  #previousClose: number | undefined
+  #count = 0
+  #sumTr = 0
+  #sumPlus = 0
+  #sumMinus = 0
+  #averageTr = 0
+  #averagePlus = 0
+  #averageMinus = 0
+  #dxSum = 0
+  #dxCount = 0
+  #adx: number | null = null
+
+  constructor(private readonly period: number) {}
+
+  push(candle: Ohlcv): number | null {
+    const previousHigh = this.#previousHigh
+    const previousLow = this.#previousLow
+    const previousClose = this.#previousClose
+    this.#previousHigh = candle.high
+    this.#previousLow = candle.low
+    this.#previousClose = candle.close
+    this.#count += 1
+
+    if (previousHigh === undefined || previousLow === undefined || previousClose === undefined) return null
+
+    const trueRange = Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - previousClose),
+      Math.abs(candle.low - previousClose),
+    )
+    const upMove = candle.high - previousHigh
+    const downMove = previousLow - candle.low
+    const plus = upMove > downMove && upMove > 0 ? upMove : 0
+    const minus = downMove > upMove && downMove > 0 ? downMove : 0
+
+    if (this.#count <= this.period + 1) {
+      this.#sumTr += trueRange
+      this.#sumPlus += plus
+      this.#sumMinus += minus
+      if (this.#count < this.period + 1) return null
+      this.#averageTr = this.#sumTr / this.period
+      this.#averagePlus = this.#sumPlus / this.period
+      this.#averageMinus = this.#sumMinus / this.period
+    } else {
+      this.#averageTr = (this.#averageTr * (this.period - 1) + trueRange) / this.period
+      this.#averagePlus = (this.#averagePlus * (this.period - 1) + plus) / this.period
+      this.#averageMinus = (this.#averageMinus * (this.period - 1) + minus) / this.period
+    }
+
+    if (!(this.#averageTr > 0)) return null
+    const plusDi = (100 * this.#averagePlus) / this.#averageTr
+    const minusDi = (100 * this.#averageMinus) / this.#averageTr
+    const denominator = plusDi + minusDi
+    const dx = denominator > 0 ? (100 * Math.abs(plusDi - minusDi)) / denominator : 0
+
+    // 种子 DI 不进入首组 ADX 均值；因此普通数据的首个 ADX 固定在 index=2*period。
+    if (this.#count === this.period + 1) return null
+    if (this.#adx === null) {
+      this.#dxSum += dx
+      this.#dxCount += 1
+      if (this.#dxCount < this.period) return null
+      this.#adx = this.#dxSum / this.period
+      return this.#adx
+    }
+    if (this.#adx === null) return null
+    this.#adx = (this.#adx * (this.period - 1) + dx) / this.period
+    return this.#adx
+  }
+}
+
 class RollingBuffer<T> {
   #items: T[] = []
 
@@ -163,16 +258,22 @@ export class FeatureEngine {
   #emaSlow = new EmaState(FEATURE_WINDOWS.emaSlow)
   #rsi = new RsiState(FEATURE_WINDOWS.rsi)
   #atr = new AtrState(FEATURE_WINDOWS.atr)
+  #adx = new AdxState(FEATURE_WINDOWS.adx)
   #candles = new RollingBuffer<Ohlcv>(FEATURE_WINDOWS.vwap)
   #closes = new RollingBuffer<number>(Math.max(FEATURE_WINDOWS.zscore, VOL_NEEDS))
+  #derivatives: DerivativesTracker
   #bars = 0
+
+  constructor(derivativesWindowMs = DEFAULT_DERIVATIVES_WINDOW_MS) {
+    this.#derivatives = new DerivativesTracker(derivativesWindowMs)
+  }
 
   get bars(): number {
     return this.#bars
   }
 
   /** 消费一根**已收盘** bar，返回该 bar 的特征快照。 */
-  onClosedCandle(candle: Candle): FeatureSnapshot {
+  onClosedCandle(candle: Candle, derivatives?: FeatureDerivatives): FeatureSnapshot {
     if (!candle.closed) {
       throw new MarketSourceError(
         'other',
@@ -192,8 +293,10 @@ export class FeatureEngine {
     const ema50 = this.#emaSlow.push(candle.close)
     const rsi14 = this.#rsi.push(candle.close)
     const atr14 = this.#atr.push(ohlcv)
+    const adx14 = this.#adx.push(ohlcv)
     this.#candles.push(ohlcv)
     this.#closes.push(candle.close)
+    const derivativeValues = this.#derivativeValues(derivatives, candle.closeTime)
 
     const values: FeatureValues = {
       open: candle.open,
@@ -205,9 +308,14 @@ export class FeatureEngine {
       ema50,
       rsi14,
       atr14,
+      adx14,
       vwap20: this.#vwap(),
       zscore20: this.#zscore(),
       volRealized20: this.#realizedVol(),
+      fundingRate: derivativeValues.fundingRate,
+      oiChangePct: derivativeValues.oiChangePct,
+      liqNotional: derivativeValues.liqNotional,
+      basisBps: derivativeValues.basisBps,
     }
 
     return {
@@ -223,6 +331,18 @@ export class FeatureEngine {
         values,
       }),
     }
+  }
+
+  #derivativeValues(
+    derivatives: FeatureDerivatives | undefined,
+    fallbackTimestamp: number,
+  ): DerivativesValues {
+    if (derivatives === undefined) return EMPTY_DERIVATIVES_VALUES
+    if ('oiChangePct' in derivatives) return derivatives
+    return this.#derivatives.push({
+      ...derivatives,
+      timestamp: derivatives.timestamp ?? fallbackTimestamp,
+    })
   }
 
   #vwap(): number | null {
@@ -267,17 +387,20 @@ export class FeatureEngine {
 export class FeaturePipeline {
   #engines = new Map<string, FeatureEngine>()
 
-  constructor(private readonly archive: FeatureArchive) {}
+  constructor(
+    private readonly archive: FeatureArchive,
+    private readonly derivativesWindowMs = DEFAULT_DERIVATIVES_WINDOW_MS,
+  ) {}
 
-  onClosedCandle(candle: Candle): FeatureSnapshot {
-    const snapshot = this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle)
+  onClosedCandle(candle: Candle, derivatives?: FeatureDerivatives): FeatureSnapshot {
+    const snapshot = this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, derivatives)
     this.archive.upsert(snapshot)
     return snapshot
   }
 
   /**
    * 进程重启后回灌：用归档里的已收盘 bar 重建增量状态。
-   * 回灌长度取各窗口的最大需求（50 根足够覆盖全部指标），避免重启后长时间空窗。
+   * 回灌长度取 FEATURE_WARMUP_BARS，覆盖 EMA50 和 ADX 双窗口，避免重启后长时间空窗。
    */
   warmUp(candles: readonly Candle[]): void {
     for (const candle of candles) {
@@ -294,7 +417,7 @@ export class FeaturePipeline {
     const key = `${symbol}|${timeframe}`
     let engine = this.#engines.get(key)
     if (engine === undefined) {
-      engine = new FeatureEngine()
+      engine = new FeatureEngine(this.derivativesWindowMs)
       this.#engines.set(key, engine)
     }
     return engine

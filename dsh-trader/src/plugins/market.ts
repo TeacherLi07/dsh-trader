@@ -17,8 +17,13 @@ import { BarArchive } from '../market/archive.js'
 import { createFeatureContext } from '../market/context.js'
 import type { CcxtExchangeLike } from '../market/ccxt-source.js'
 import { FeatureArchive } from '../market/feature-archive.js'
-import { FEATURE_WARMUP_BARS, FeaturePipeline } from '../market/features.js'
+import {
+  FEATURE_WARMUP_BARS,
+  FeaturePipeline,
+  type FeatureDerivatives,
+} from '../market/features.js'
 import { createMarketRuntime, type MarketRuntime } from '../market/runtime.js'
+import type { Candle } from '../market/types.js'
 import { getTriggerRuntime } from '../trigger/runtime.js'
 
 export const name = 'trade-market'
@@ -41,6 +46,8 @@ export interface MarketConfig {
   enabled?: boolean
   pollMs?: number
   recentLimit?: number
+  /** 可选注入点；插件本身不主动请求衍生品，避免改变既有行情轮询行为。 */
+  derivativesForCandle?: (candle: Candle) => FeatureDerivatives | undefined
 }
 
 type CcxtModule = Record<string, new (options: unknown) => CcxtExchangeLike>
@@ -93,7 +100,8 @@ export function apply(ctx: Context, config: MarketConfig): void {
         clock: systemClock(),
         createExchange: () => new Exchange({ enableRateLimit: true }),
         onClosedCandle: (candle) => {
-          const snapshot = pipeline.onClosedCandle(candle)
+          // T2.4 接线由调用方提供已经取样的 observation；此处不新增网络请求或墙钟读取。
+          const snapshot = pipeline.onClosedCandle(candle, config.derivativesForCandle?.(candle))
           // 行情 → 特征 → 规则 → 触发；rules 插件未启用时静默跳过（不是错误）
           getTriggerRuntime()?.onBar({
             symbol: candle.symbol,

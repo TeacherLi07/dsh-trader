@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  adxSeries,
   atrSeries,
   emaSeries,
   realizedVolSeries,
@@ -78,6 +79,47 @@ describe('atrSeries', () => {
 
   it('returns all nulls when there are not enough candles', () => {
     expect(atrSeries(flat.slice(0, 2), 2)).toEqual([null, null])
+  })
+})
+
+describe('adxSeries', () => {
+  it('uses DI at index=period and ADX at index=2*period', () => {
+    const candles = Array.from({ length: 40 }, (_, index) => {
+      const close = 100 + index * 2
+      return { high: close + 1, low: close - 1, close, volume: 1 }
+    })
+    const out = adxSeries(candles, 5)
+    expect(out[9]).toBeNull()
+    expect(out[10]).not.toBeNull()
+    expect(out.filter((value): value is number => value !== null).length).toBeGreaterThan(0)
+    expect(out[10]).toBe(100)
+  })
+
+  it('distinguishes a persistent trend from alternating movement', () => {
+    const trend = Array.from({ length: 60 }, (_, index) => {
+      const close = 100 + index * 2
+      return { high: close + 1, low: close - 1, close, volume: 1 }
+    })
+    const oscillation = Array.from({ length: 60 }, (_, index) => {
+      const close = index % 2 === 0 ? 100 : 101
+      return { high: close + 1, low: close - 1, close, volume: 1 }
+    })
+    const trendAdx = adxSeries(trend, 14).filter((value): value is number => value !== null)
+    const oscillationAdx = adxSeries(oscillation, 14).filter((value): value is number => value !== null)
+    expect(trendAdx.length).toBeGreaterThan(0)
+    expect(oscillationAdx.length).toBeGreaterThan(0)
+    expect(trendAdx[trendAdx.length - 1] as number).toBeGreaterThan(25)
+    expect(oscillationAdx[oscillationAdx.length - 1] as number).toBeLessThan(25)
+  })
+
+  it('returns all nulls before the double-period warm-up', () => {
+    const candles = Array.from({ length: 28 }, (_, index) => ({
+      high: index + 2,
+      low: index,
+      close: index + 1,
+      volume: 1,
+    }))
+    expect(adxSeries(candles, 14).every((value) => value === null)).toBe(true)
   })
 })
 

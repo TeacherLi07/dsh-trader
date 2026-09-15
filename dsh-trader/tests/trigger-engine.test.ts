@@ -117,9 +117,10 @@ describe('buildRules', () => {
     }
   })
 
-  it('keeps the unimplemented paths out of the allowed vocabulary', () => {
-    for (const path of UNIMPLEMENTED_PATHS) {
-      expect(V0_ALLOWED_PATHS).not.toContain(path)
-    }
+  it('keeps the unimplemented paths explicit and admits all T2.4 indicators', () => {
+    expect(UNIMPLEMENTED_PATHS).toEqual([])
+    const completed = ['adx14', 'funding.rate', 'oi.changePct', 'liq.notional', 'basis.bps']
+    expect(completed.length).toBeGreaterThan(0)
+    for (const path of completed) expect(V0_ALLOWED_PATHS).toContain(path)
   })
 })

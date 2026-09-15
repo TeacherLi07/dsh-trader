@@ -22,6 +22,11 @@ export interface CcxtExchangeLike {
     since?: number,
     limit?: number,
   ): Promise<readonly unknown[]>
+  /** 衍生品能力均为可选：不同 venue 不支持时由特征层返回 null，不伪造数值。 */
+  fetchFundingRate?(symbol: string): Promise<unknown>
+  fetchOpenInterest?(symbol: string): Promise<unknown>
+  fetchLiquidations?(symbol: string, since?: number, limit?: number): Promise<readonly unknown[]>
+  fetchTicker?(symbol: string): Promise<unknown>
   close?(): Promise<void>
 }
 

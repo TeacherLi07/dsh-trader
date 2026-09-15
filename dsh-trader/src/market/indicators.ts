@@ -103,6 +103,113 @@ export function atrSeries(candles: readonly Ohlcv[], period: number): MaybeNumbe
   return out
 }
 
+export interface DmiSeries {
+  readonly plusDi: MaybeNumbers
+  readonly minusDi: MaybeNumbers
+  readonly dx: MaybeNumbers
+  readonly adx: MaybeNumbers
+}
+
+function directionalMovementAt(
+  candles: readonly Ohlcv[],
+  index: number,
+): { readonly plus: number; readonly minus: number } {
+  if (index === 0) return { plus: 0, minus: 0 }
+  const current = candles[index] as Ohlcv
+  const previous = candles[index - 1] as Ohlcv
+  const upMove = current.high - previous.high
+  const downMove = previous.low - current.low
+  return {
+    plus: upMove > downMove && upMove > 0 ? upMove : 0,
+    minus: downMove > upMove && downMove > 0 ? downMove : 0,
+  }
+}
+
+function directionalIndex(
+  averageTrueRange: number,
+  averagePlus: number,
+  averageMinus: number,
+): { readonly plus: number; readonly minus: number; readonly dx: number } | null {
+  if (!(averageTrueRange > 0)) return null
+  const plus = (100 * averagePlus) / averageTrueRange
+  const minus = (100 * averageMinus) / averageTrueRange
+  const denominator = plus + minus
+  if (!(denominator > 0)) return { plus, minus, dx: 0 }
+  return { plus, minus, dx: (100 * Math.abs(plus - minus)) / denominator }
+}
+
+/**
+ * DMI/ADX（Wilder）：DI 在 index=period 首次可用，ADX 在 index=2*period 首次可用。
+ *
+ * 这里把种子 DI（index=period）排除在 ADX 的第一组均值之外，取 index
+ * period+1..2*period 的 period 个 DX；这样首个 ADX 明确需要 2*period 个有效 TR，
+ * 与增量状态的暖机边界一致，也避免把不完整的种子窗口伪装成信号。
+ */
+export function dmiSeries(candles: readonly Ohlcv[], period: number): DmiSeries {
+  assertPeriod(period)
+  const plusDi: (number | null)[] = candles.map(() => null)
+  const minusDi: (number | null)[] = candles.map(() => null)
+  const dx: (number | null)[] = candles.map(() => null)
+  const adx: (number | null)[] = candles.map(() => null)
+  if (candles.length <= period) return { plusDi, minusDi, dx, adx }
+
+  let trueRangeSum = 0
+  let plusSum = 0
+  let minusSum = 0
+  for (let i = 1; i <= period; i += 1) {
+    trueRangeSum += trueRangeAt(candles, i)
+    const movement = directionalMovementAt(candles, i)
+    plusSum += movement.plus
+    minusSum += movement.minus
+  }
+
+  let averageTrueRange = trueRangeSum / period
+  let averagePlus = plusSum / period
+  let averageMinus = minusSum / period
+  const seed = directionalIndex(averageTrueRange, averagePlus, averageMinus)
+  if (seed !== null) {
+    plusDi[period] = seed.plus
+    minusDi[period] = seed.minus
+    dx[period] = seed.dx
+  }
+
+  let dxSum = 0
+  let dxCount = 0
+  let adxValue: number | null = null
+  for (let i = period + 1; i < candles.length; i += 1) {
+    const trueRange = trueRangeAt(candles, i)
+    const movement = directionalMovementAt(candles, i)
+    averageTrueRange = (averageTrueRange * (period - 1) + trueRange) / period
+    averagePlus = (averagePlus * (period - 1) + movement.plus) / period
+    averageMinus = (averageMinus * (period - 1) + movement.minus) / period
+    const current = directionalIndex(averageTrueRange, averagePlus, averageMinus)
+    if (current === null) continue
+    plusDi[i] = current.plus
+    minusDi[i] = current.minus
+    dx[i] = current.dx
+
+    if (adxValue === null) {
+      if (dxCount < period) {
+        dxSum += current.dx
+        dxCount += 1
+      }
+      if (dxCount === period) {
+        adxValue = dxSum / period
+        adx[i] = adxValue
+      }
+    } else {
+      adxValue = (adxValue * (period - 1) + current.dx) / period
+      adx[i] = adxValue
+    }
+  }
+  return { plusDi, minusDi, dx, adx }
+}
+
+/** ADX（Wilder 三重平滑）的全量对拍实现。 */
+export function adxSeries(candles: readonly Ohlcv[], period: number): MaybeNumbers {
+  return dmiSeries(candles, period).adx
+}
+
 /** VWAP：最近 `period` 根的成交量加权均价（典型价 = (h+l+c)/3）；无成交量时为 null。 */
 export function vwapSeries(candles: readonly Ohlcv[], period: number): MaybeNumbers {
   assertPeriod(period)

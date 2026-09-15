@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { migrate } from '../src/db/schema.js'
+import { featureValues } from '../src/market/context.js'
 import { FeatureArchive } from '../src/market/feature-archive.js'
 import {
   FEATURE_WARMUP_BARS,
@@ -9,6 +10,7 @@ import {
   FeaturePipeline,
 } from '../src/market/features.js'
 import {
+  adxSeries,
   atrSeries,
   emaSeries,
   realizedVolSeries,
@@ -45,10 +47,13 @@ describe('FeatureEngine vs full recomputation', () => {
       ema50: emaSeries(closes, FEATURE_WINDOWS.emaSlow),
       rsi14: rsiSeries(closes, FEATURE_WINDOWS.rsi),
       atr14: atrSeries(ohlcvs, FEATURE_WINDOWS.atr),
+      adx14: adxSeries(ohlcvs, FEATURE_WINDOWS.adx),
       vwap20: vwapSeries(ohlcvs, FEATURE_WINDOWS.vwap),
       zscore20: zscoreSeries(closes, FEATURE_WINDOWS.zscore),
       volRealized20: realizedVolSeries(closes, FEATURE_WINDOWS.vol),
     }
+    const adxSamples = expected.adx14.filter((value): value is number => value !== null)
+    expect(adxSamples.length).toBeGreaterThan(0)
 
     const engine = new FeatureEngine()
     bars.forEach((bar, index) => {
@@ -58,6 +63,7 @@ describe('FeatureEngine vs full recomputation', () => {
       expect(values.ema50).toBe(expected.ema50[index])
       expect(values.rsi14).toBe(expected.rsi14[index])
       expect(values.atr14).toBe(expected.atr14[index])
+      expect(values.adx14).toBe(expected.adx14[index])
       expect(values.vwap20).toBe(expected.vwap20[index])
       expect(values.zscore20).toBe(expected.zscore20[index])
       expect(values.volRealized20).toBe(expected.volRealized20[index])
@@ -77,6 +83,8 @@ describe('FeatureEngine vs full recomputation', () => {
     expect(values[14]!.rsi14).not.toBeNull()
     expect(values[13]!.atr14).toBeNull()
     expect(values[14]!.atr14).not.toBeNull()
+    expect(values[27]!.adx14).toBeNull()
+    expect(values[28]!.adx14).not.toBeNull()
     expect(values[18]!.vwap20).toBeNull()
     expect(values[19]!.vwap20).not.toBeNull()
     expect(values[18]!.zscore20).toBeNull()
@@ -107,6 +115,26 @@ describe('FeatureEngine vs full recomputation', () => {
     const fingerprints = bars.map((bar) => engine.onClosedCandle(bar).fingerprint)
     expect(new Set(fingerprints).size).toBe(fingerprints.length)
     expect(fingerprints[0]).toMatch(/^sha256:[0-9a-f]{64}$/)
+  })
+
+  it('exposes completed derivative fields to the DSL context and omits missing ones', () => {
+    const [bar] = candles(1)
+    const engine = new FeatureEngine()
+    const snapshot = engine.onClosedCandle(bar!, {
+      fundingRate: 0.0001,
+      oiChangePct: 2.5,
+      liqNotional: 125,
+      basisBps: -3,
+    })
+    const table = featureValues(snapshot.values)
+    expect(table['funding.rate']).toBe(0.0001)
+    expect(table['oi.changePct']).toBe(2.5)
+    expect(table['liq.notional']).toBe(125)
+    expect(table['basis.bps']).toBe(-3)
+
+    const missing = featureValues(new FeatureEngine().onClosedCandle(bar!).values)
+    expect(missing['funding.rate']).toBeUndefined()
+    expect(missing['adx14']).toBeUndefined()
   })
 })
 

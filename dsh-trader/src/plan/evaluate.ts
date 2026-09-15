@@ -90,18 +90,17 @@ export const V0_ALLOWED_PATHS: readonly string[] = [
   'ema50',
   'rsi14',
   'atr14',
+  'adx14',
   'vwap20',
   'zscore20',
   'volRealized20',
+  'funding.rate',
+  'oi.changePct',
+  'liq.notional',
+  'basis.bps',
   'plan.ageMs',
   'window.sinceMs',
 ]
 
-/** 尚未实现的取值路径 —— 保留清单以便一眼看出缺口，但**不**放进词汇表（fail-closed）。 */
-export const UNIMPLEMENTED_PATHS: readonly string[] = [
-  'adx14',
-  'oi.changePct',
-  'liq.notional',
-  'funding.rate',
-  'basis.bps',
-]
+/** 保留清单以便验收时显式证明当前没有已知缺口。 */
+export const UNIMPLEMENTED_PATHS: readonly string[] = []

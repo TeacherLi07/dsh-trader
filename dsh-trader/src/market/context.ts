@@ -29,9 +29,14 @@ export function featureValues(
   put(out, 'ema50', values.ema50)
   put(out, 'rsi14', values.rsi14)
   put(out, 'atr14', values.atr14)
+  put(out, 'adx14', values.adx14)
   put(out, 'vwap20', values.vwap20)
   put(out, 'zscore20', values.zscore20)
   put(out, 'volRealized20', values.volRealized20)
+  put(out, 'funding.rate', values.fundingRate)
+  put(out, 'oi.changePct', values.oiChangePct)
+  put(out, 'liq.notional', values.liqNotional)
+  put(out, 'basis.bps', values.basisBps)
   return out
 }
 
