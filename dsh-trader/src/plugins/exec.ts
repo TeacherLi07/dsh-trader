@@ -1,8 +1,8 @@
 /**
  * `trade-exec` —— 执行层与硬闸。
  *
- * 状态：骨架（T0.1）。硬闸纯函数已实现（`src/exec/gate.ts`，有单测）；
- * Broker/对账/paper 实现属 T0.8。
+ * 硬闸纯函数在 `src/exec/gate.ts`；CCXT broker 通过组合根注入 exchange，
+ * 因而本插件不在 `apply` 期间构造交易所或触网。
  *
  * 安全：`apiKey`/`apiSecret` 只从环境注入（systemd `EnvironmentFile`，0600），
  * **绝不**写进仓库、配置或 prompt；插件**不打印**密钥。
@@ -42,6 +42,25 @@ export interface ExecConfig {
   apiSecret?: string
 }
 
+export type ExecBrokerKind = 'paper' | 'ccxt'
+
+function hasCredential(value: string | undefined): boolean {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+/**
+ * 纯函数：只有非 paper 模式且两把凭据都存在，才允许组合根选择 CcxtBroker。
+ * 没有凭据时保持 paper 是安全默认；返回值只包含路由，不携带任何密钥。
+ */
+export function shouldUseLiveBroker(config: ExecConfig): boolean {
+  return config.mode !== 'paper' && hasCredential(config.apiKey) && hasCredential(config.apiSecret)
+}
+
+/** 供组合根/测试使用的 broker 路由；缺凭据的 live 配置安全降级为 paper。 */
+export function resolveExecBroker(config: ExecConfig): ExecBrokerKind {
+  return shouldUseLiveBroker(config) ? 'ccxt' : 'paper'
+}
+
 /** 从配置组装硬闸阈值。任一缺失即视为"未提供"——由启动参数流程决定是否 waiver。 */
 export function limitsFromConfig(config: ExecConfig): RiskLimits | null {
   const values = [
@@ -68,12 +87,14 @@ export function limitsFromConfig(config: ExecConfig): RiskLimits | null {
 }
 
 export function apply(ctx: Context, config: ExecConfig): void {
-  // TODO(T0.8): Broker 接口 + PaperBroker + CcxtBroker(htx) + 对账 + 滑点/深度校验 + 降级。
+  // apply 只登记生命周期；真实 exchange factory 尚由组合根接线，避免插件加载时打网络。
+  // 即使 mode 写成 live，没有凭据也只能沿用 paper，不能因为配置缺项而意外实盘。
+  const route = resolveExecBroker(config)
   ctx.effect(
     () => () => {
-      /* T0.8: 撤单/断开用户数据流 */
+      /* 由组合根持有 broker 时在这里解除用户数据流；本插件本身不拥有网络资源。 */
     },
     'trade.exec.close',
   )
-  void config
+  void route
 }
