@@ -1,0 +1,21 @@
+[Unit]
+Description=DSH Trader main process
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# 当前文件是非模板 unit，默认使用 ubuntu；若改成 dsh-trader@.service，可改用 User=%i。
+User=ubuntu
+EnvironmentFile=%h/.dsh/trading.env
+# 按本机 checkout 位置修改；不要把凭据写入本 unit。
+WorkingDirectory=/workspace/dsh-trader
+# 按本机 dsh 安装路径修改。交易 profile 的完整参数应由本机部署决定。
+ExecStart=/usr/local/bin/dsh --profile trade
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

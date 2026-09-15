@@ -1,0 +1,21 @@
+[Unit]
+Description=DSH Trader external order-cancel watchdog
+Wants=network-online.target
+After=network-online.target dsh-trader.service
+# 不设置 Requires/PartOf：交易进程挂掉时 watchdog 仍必须继续活着并撤单。
+
+[Service]
+Type=simple
+# 需与 dsh-trader.service 使用相同账户，%h 才能指向同一个 .dsh 数据目录。
+User=ubuntu
+EnvironmentFile=%h/.dsh/trading.env
+# 按本机 Node、checkout 和数据库路径修改；脚本从 lib/加载，部署前先 pnpm build。
+WorkingDirectory=/workspace/dsh-trader
+ExecStart=/usr/bin/node /workspace/dsh-trader/scripts/watchdog-daemon.mjs --interval-ms=5000 --multiple=3 --db=%h/.dsh/trading/desk.db
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
