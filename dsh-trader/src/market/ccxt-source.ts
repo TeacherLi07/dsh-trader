@@ -31,6 +31,17 @@ export interface CcxtExchangeLike {
 }
 
 /**
+ * `applyProxyAwareFetch` 需要的最小形状。
+ *
+ * 它只写 `fetchImplementation`，因此**不需要** `fetchOHLCV` —— 交易 broker 用的
+ * `CcxtProExchangeLike` 没有行情方法，但同样需要一个代理感知的 fetch（plan §12 #14）。
+ * 参数取结构子集，避免为了复用一行注入而伪造行情方法。
+ */
+export interface CcxtFetchHost {
+  fetchImplementation?: unknown
+}
+
+/**
  * 把 **Node 的全局 fetch** 注入给 ccxt。
  *
  * 为什么必须做：ccxt 内部的 fetch **不读** `HTTP_PROXY`/`HTTPS_PROXY`，而 Node ≥24 的全局 fetch
@@ -39,7 +50,7 @@ export interface CcxtExchangeLike {
  * `fetchOHLCV` 正常返回。这是"本机访问不了交易所"的真正原因，不是网络封锁。
  */
 export function applyProxyAwareFetch(
-  exchange: CcxtExchangeLike,
+  exchange: CcxtFetchHost,
   fetchImplementation: unknown = globalThis.fetch,
 ): void {
   if (typeof fetchImplementation !== 'function') {

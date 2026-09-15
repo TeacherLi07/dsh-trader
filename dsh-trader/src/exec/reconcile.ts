@@ -21,7 +21,12 @@ export interface LocalOrderSnapshot {
 
 export interface RemoteOrderSnapshot {
   readonly clientOrderId: string
-  readonly symbol: string
+  /**
+   * 远端单的标的。`Broker.getOpenOrders()` 返回的 `OrderAck` 目前不带 symbol
+   * （ccxt 的挂单条目里有，但没有进入统一 ack），而 `reconcile()` 只按 `clientOrderId`
+   * 比对、并不使用 symbol，所以这里设为可选 —— 宁可不填，也不编一个假 symbol。
+   */
+  readonly symbol?: string
 }
 
 export interface LocalPositionSnapshot {

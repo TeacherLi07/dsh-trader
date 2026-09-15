@@ -51,8 +51,15 @@
         maxSpreadBps: 25
         maxOpenOrders: 10
         # 密钥只从环境注入，绝不写进仓库/prompt；systemd 用 EnvironmentFile=%h/.dsh/trading.env (0600)
+        # 交互式运行：把这两行变量写进 $DSH_HOME/.env（chmod 600），DSH 启动时自动加载
         apiKey: !!js process.env.TRADER_API_KEY
         apiSecret: !!js process.env.TRADER_API_SECRET
+        # 第①步只读预检（plan §12.2 A）：默认关闭 ⇒ 完全不触网。
+        # 打开后只读账户/持仓/挂单并与本地库对账，**只报告不执行**；mode 保持 paper 时硬闸结构性拒绝下单。
+        preflightEnabled: false
+        preflightVenue: htx
+        preflightSymbol: BTC/USDT:USDT
+        sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
 
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor

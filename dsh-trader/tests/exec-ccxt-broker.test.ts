@@ -334,6 +334,28 @@ describe('CcxtBroker', () => {
       'RiskStateProvider',
     )
   })
+
+  it('★ 把凭据回填到 exchange 实例（否则 ccxt 私有端点一律 unauthorized），且错误信息脱敏', async () => {
+    const exchange = new FakeExchange()
+    // 交易所把密钥回显进错误消息，也必须被 #safeError 脱敏
+    exchange.createError = new Error(`bad signature for secret=${API_SECRET} key=${API_KEY}`)
+    const broker = makeBroker(exchange)
+
+    // 实测：不把凭据挂到 exchange 上，HTX 私有端点直接报 `htx requires "apiKey" credential`；
+    // 只设 `apiSecret` 而不是 ccxt 的 `secret`，则报 `htx requires "secret" credential`。
+    expect((exchange as { apiKey?: string }).apiKey).toBe(API_KEY)
+    expect((exchange as { secret?: string }).secret).toBe(API_SECRET)
+
+    let message = ''
+    try {
+      await broker.placeOrder(orderRequest())
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toContain('[REDACTED]')
+    expect(message).not.toContain(API_SECRET)
+    expect(message).not.toContain(API_KEY)
+  })
 })
 
 describe('exec plugin broker routing', () => {

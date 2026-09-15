@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 50 文件 / 560 测试
+pnpm test                        # vitest run，当前 51 文件 / 572 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -54,6 +54,7 @@ node scripts/pm-pit-check.mjs 30                     # P1 ⑥ 预测市场专项
 node scripts/ab-gate.mjs htx BTC/USDT 1h 92          # P1.5 通道有效性闸门
 node scripts/watchdog-check.mjs /tmp/p2-watchdog.json # P2 ③ 真实 SIGSTOP → 外部 watchdog 撤单
 node scripts/fault-injection.mjs /tmp/p2-fault.json  # P2 ①②④ kill -9×50 / 幂等×10 / 保护单停摆仍生效
+node scripts/htx-preflight.mjs htx BTC/USDT:USDT      # HTX 只读对账（需 TRADER_API_KEY/SECRET；不下单）
 node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等）
 ```
 
@@ -111,6 +112,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | 坑 | 事实 | 处理 |
 |---|---|---|
 | ccxt 不读代理环境变量 | 有 `HTTP(S)_PROXY` + `NODE_USE_ENV_PROXY=1` 时，ccxt 自带 fetch 仍 `ECONNREFUSED` | 必须 `applyProxyAwareFetch(exchange)`（`createMarketRuntime` 已默认启用） |
+| ccxt 私有端点要**实例级凭据**，字段名是 `secret` | 只把 key 传给自己的 broker 类没用；写成 `apiSecret` 也不是 ccxt 的字段。实测 HTX 先后报 `requires "apiKey" credential`、`requires "secret" credential` | `CcxtBroker` 构造时回填 `exchange.apiKey` / `exchange.secret`；哑值真打一次确认拿到 `api-signature-not-valid`（见 `docs/htx-credentials.md`） |
 | Gamma 数值字段是**字符串** | `liquidity: "904179.3825"` | 归一化要接受数字字符串，优先 `liquidityNum`/`volumeNum`；不可解析返回 `null` |
 | 时间戳单位**因端点而异** | `clob/book` 的 `timestamp` 是**毫秒**；`prices-history` 的 `t`/`timestamp` 是**秒** | 用 `normalizeSourceMillis` / `normalizeSourceSeconds`，两个方向都判错 |
 | `prices-history` 的 `market=` | 必须是 **CLOB token id**；传 `conditionId` 返回 **200 + 空序列**（静默骗人） | `assertTokenId()` 直接拒非十进制 token id |

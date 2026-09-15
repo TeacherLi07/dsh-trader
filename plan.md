@@ -733,7 +733,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 
 | # | 事项 | 需要什么 | 现状与替代路径 |
 |---|---|---|---|
-| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；三步只欠 key |
+| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已接线并可一条命令跑**：`node scripts/htx-preflight.mjs`（只读对账，`executedActions` 恒为空；操作手册与实测坑见 `docs/htx-credentials.md`）。三步只欠 key |
 | B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |

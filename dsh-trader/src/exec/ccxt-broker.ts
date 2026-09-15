@@ -111,6 +111,15 @@ export interface CcxtTickerLike {
 export interface CcxtProExchangeLike {
   readonly id: string
   readonly has: Readonly<Record<string, unknown>>
+  /** ccxt 允许覆盖 fetch 实现；`applyProxyAwareFetch` 需要它（plan §12 #14）。 */
+  fetchImplementation?: unknown
+  /**
+   * ccxt 的私有端点要求凭据挂在实例上，且字段名是 **`apiKey`/`secret`**
+   * （ccxt 的 `requiredCredentials` 里写的就是 `secret`；写成 `apiSecret` 会被判为缺失，
+   * 实测报错 `htx requires "secret" credential`）。由 `CcxtBroker` 构造时写入，绝不打印。
+   */
+  apiKey?: string
+  secret?: string
   loadMarkets(): Promise<unknown>
   fetchBalance(): Promise<CcxtBalanceLike>
   fetchPositions(symbols?: readonly string[], params?: CcxtParams): Promise<readonly CcxtPositionLike[]>
@@ -398,6 +407,13 @@ export class CcxtBroker implements Broker {
     this.#spreadSymbol = options.spreadSymbol ?? options.symbol
     this.#protectiveOrderType = options.protectiveOrderType ?? 'stop'
 
+    // ★ ccxt 的私有端点（fetchBalance/fetchPositions/createOrder…）要求凭据挂在 **exchange 实例**上，
+    // 只传给本 broker 是不够的；而且字段名必须是 ccxt 的 `apiKey`/`secret`（不是 `apiSecret`）。
+    // 实测两种错法：不设置 ⇒ `htx requires "apiKey" credential`；只设 apiSecret ⇒ `htx requires "secret" credential`。
+    // 值只写入 exchange，不打印、不落库、不进 prompt；错误消息经 #safeError 脱敏。
+    options.exchange.apiKey = options.apiKey
+    options.exchange.secret = options.apiSecret
+
     if (options.sandbox === true) {
       try {
         // setSandboxMode 是同步配置，不触网；HTX 没有该能力时 optional 调用自然跳过。
@@ -436,6 +452,24 @@ export class CcxtBroker implements Broker {
       spreadBps,
       observedAt,
     }
+  }
+
+  /**
+   * 只读余额（plan §12.2 A 第①步的预检入口）。
+   *
+   * 与 `getAccount()` 的区别：**不读 `RiskStateProvider`**。只读预检只需要"账户能不能读到、
+   * 权益是多少"，而 dailyLoss/drawdown/连亏在只读阶段本来就没有可靠来源。若走 `getAccount()`
+   * 就必须为它编一个 RiskState，那正是 T2.1 明令禁止的"填 0 伪装成没有亏损"。
+   * 本方法只调 `fetchBalance`，绝不用于下单。
+   */
+  async readOnlyBalance(): Promise<number> {
+    await this.#ensureMarketsLoaded()
+    const balance = await this.#call(() => this.#exchange.fetchBalance())
+    const equity = quoteAmount(balance, this.#quoteCurrency)
+    if (equity === undefined) {
+      throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
+    }
+    return equity
   }
 
   async getPositions(): Promise<readonly PositionSnapshot[]> {
