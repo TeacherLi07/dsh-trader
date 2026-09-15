@@ -10,19 +10,31 @@
  *   · 每个 execute 内部**强制**再验一遍硬闸（双保险）；
  *   · desk agent 的工具白名单目标 ≤ 20（工具过多会显著降低选择准确率）。
  *
- * 状态：骨架（T0.1）。实现属 T1.3。
+ * 注册适配已实现；诚实清单中的未实现工具不注册，避免诱导模型调用占位能力。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { IMPLEMENTED_TOOL_NAMES } from '../agents/tools.js'
+import { getExecPorts } from './exec.js'
+import { implementedToolNames, registerToolSet } from './tools-adapter.js'
 
 export const name = 'trade-tools-desk'
 
+const RESEARCH_TOOL_NAMES = new Set(['trade_market', 'trade_predictions', 'trade_recall'])
+const RISK_TOOL_NAMES = new Set(['trade_risk_check', 'trade_limits'])
+
+/** 其余已实现工具归 desk；这样新增实现不会因忘记更新白名单而漏注册。 */
+export const DESK_TOOL_NAMES: readonly string[] = IMPLEMENTED_TOOL_NAMES.filter(
+  (tool) => !RESEARCH_TOOL_NAMES.has(tool) && !RISK_TOOL_NAMES.has(tool),
+)
+
 export function apply(ctx: Context): void {
-  // TODO(T1.3): defineTool 注册；每个执行类工具先重取交易所状态，再过 validateIntent。
-  ctx.effect(
-    () => () => {
-      /* T1.3: 注销工具 */
-    },
+  registerToolSet(
+    ctx,
+    implementedToolNames(DESK_TOOL_NAMES),
+    { portsProvider: getExecPorts },
     'trade.tools-desk.close',
   )
 }
+
+export const inject = ['tools']
