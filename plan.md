@@ -97,7 +97,7 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 
 规则：**取值与运算都是数值/布尔，DSL 没有字符串**；时间框架由承诺自带的 `tf` 字段声明（`tf ∈ {1m,15m,1h,4h,1d}`，在该 tf 的每根已收盘 bar 上求值一次），因此表达式里**不允许**出现 `bar.tf`。`pm.<alias>.*` 只在 alias 已由 `trade_prediction_watch` 注册后合法（§4.4）——DSL 没有字符串，所以预测市场**只能通过别名**进入表达式；未注册的 alias 视为未知取值 → `ok:false` → UNCOVERED，**不静默 false**。`n ≤ 500`；**禁止**赋值/循环/字符串/任意属性访问/网络/时间函数；**只用已收盘 bar**。`crossAbove`/`crossBelow` 需要前一根 bar，由特征层提供。
 
-**内核指标层的当前覆盖（T0.5 交付）**：已实现 `ema20`/`ema50`/`atr14`/`rsi14`/`vwap20`/`zscore20`/`volRealized20`，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。指标以**扁平取值**暴露（求值本身已绑定到某个 `tf` 的那根 bar），因此**不使用 `atr(tf,n)` 这类函数形式** —— DSL 词法器没有 `tf` 记号，那种写法根本无法解析。**尚未实现**：`adx`，以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`、`basis.bps`。未实现的取值路径会让表达式 `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
+**内核指标层的当前覆盖（T0.5 交付，T2.4 补齐）**：已实现 `ema20`/`ema50`/`atr14`/`rsi14`/`vwap20`/`zscore20`/`volRealized20`，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。**T2.4 已补齐**：`adx14`（Wilder 三重平滑，增量=全量逐点相等），以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`、`basis.bps`（`derivatives.ts`；单位口径：`funding.rate` 为**小数比例**、`basis.bps` 为 **bps**、`liq.notional` 为窗口 `trade_turnover` **累加**、`oi.changePct` 为相对上一观测的**百分比**，各有单位测试）。指标以**扁平取值**暴露（求值本身已绑定到某个 `tf` 的那根 bar），因此**不使用 `atr(tf,n)` 这类函数形式** —— DSL 词法器没有 `tf` 记号，那种写法根本无法解析。衍生品数据未注入时相应路径**缺失** ⇒ `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
 
 **求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**。默认 **edge 触发**（false→true 各触发一次）；需要电平语义的用 `between`/显式条件表达。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
 
@@ -571,18 +571,21 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── index.ts  config.ts  clock.ts  cost.ts  cost-ledger.ts
         ├── db/{schema,statements}.ts
         ├── util/canonical.ts                             # ★ 规范化 JSON + 指纹（幂等根）
-        ├── market/{types,normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime,indicators,features,feature-archive,context}.ts
+        ├── market/{types,normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime,indicators,features,feature-archive,context,derivatives,regime}.ts
         ├── plan/{schema,dsl,evaluate,match,store}.ts      # ★ 新增：§3 的落点
         ├── predictions/{pit,client,store,poller,rules,wiring,runtime}.ts   # ★ §4.4 事件源（只读）
         ├── trigger/{queue,engine,runtime}.ts
         ├── memory/{recall,settle}.ts                      # ★ 教训检索（TTL 执行）+ 交易级结算
-        ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay,recovery}.ts
+        ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay,recovery,ccxt-broker,sim-exchange}.ts
         ├── agents/{types,pack,prompts,workflow,roles,tools}.ts
-        ├── supervisor/{metrics,desk,heartbeat}.ts         # metrics 已建；desk/heartbeat P1.5 之后
+        ├── supervisor/{metrics,desk,heartbeat,watchdog}.ts  # desk 属 P4；heartbeat/外部 watchdog 见 T2.2
         └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
 
 > T1.1–T1.11 均已落地，目录与上表一致（`journal` 落在 `exec/`，因为它是执行链的账本）。
+> T2.1–T2.6 新增 `exec/ccxt-broker.ts`（注入 exchange 的真实 Broker）、`exec/sim-exchange.ts`
+> （**仅为验收/单测**的跨进程持久化模拟 venue，不是生产 venue）、`market/derivatives.ts`、
+> `market/regime.ts`、`supervisor/{heartbeat,watchdog}.ts`。
 > `predictions/watch.ts` 未单独成文件：watch 治理落在 `store.ts`（写入侧强制），
 > pm 规则族落在 `rules.ts`，接线落在 `wiring.ts` —— 三处都比"一个 watch.ts"更靠近各自的职责。
 
@@ -622,14 +625,14 @@ patch 引用的子路径必须在 `exports` 里可达：
 ## 10. 路线图与量化验收
 
 原文档的"显著优于 / 曲线平稳 / 连续 N 天"不可自动判定；下面全部改成可计算的判据。
-**状态截至 2026-09-14：P0 ✅、P1 ✅、P1.5 闸门 ✅（可运行判定已产出，判定为"关闭 W2/W3"）。**
+**状态截至 2026-09-15：P0 ✅、P1 ✅、P1.5 闸门 ✅（可运行判定已产出，判定为"关闭 W2/W3"）、P2 ✅（T2.1–T2.6 代码落地，§10 P2 ①–④ 由持久化模拟 venue 验证；真实 HTX 只读对账待 §12.2 A 的凭据）。**
 
 | 阶段 | 状态 | 量化验收（可自动验证） |
 |---|---|---|
 | **P0 骨架** | ✅ `tag: phase-p0` | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次命中都打印 `matched:`/`UNCOVERED:`；④ 表达式编译成功率 100%；⑤ 探针 `resume`→`followup` 产生 `assistant/message` 且 `source.form=notice` 正确落盘；⑥ 压测稳态增长 +2.73%、fd 波动 0、WAL 有界 |
 | **P1 判断与计划卡** | ✅ `tag: phase-p1` | ① 计划卡 schema 100%；② `when` 求值错误率 = 0（错误一律 UNCOVERED）；③ 覆盖率 / W2-W3 频次 / 每窗口成本；④ 结算成功率 ≥ 99%（含重试）+ 每条决策至多一条反思；⑤ `kill -9` 后 resume 且无重复决策；⑥ 预测市场专项 ①–⑧ 全通过 |
 | **P1.5 通道有效性闸门** | ✅ 可运行 | 保留条件：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 回撤 ≤ A × 1.2；否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**首轮判定：关闭**（`docs/p1.5-gate-run-2026-09-14.md`） |
-| **P2 真实接口与故障注入** | 待做 | ① 订单在途时 `kill -9` × 50：孤儿订单 = 0、重复成交 = 0；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` > 3× 心跳 → watchdog 撤单、交易所挂单 = 0；④ 停掉模型供应商：已挂保护单仍生效 |
+| **P2 真实接口与故障注入** | ✅ 可运行判定 | ① 订单在途时 `kill -9` × 50：孤儿订单 = 0、重复成交 = 0（`docs/p2-fault-injection-2026-09-15.md`）；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` > 3× 心跳 → watchdog 撤单、交易所挂单 = 0（`docs/p2-watchdog-2026-09-15.md`）；④ 停掉模型供应商：已挂保护单仍生效。**真 HTX 端点**的只读核对待 §12.2 A |
 | **P3 小额实盘** | 待做 | 连续 **14 天**：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算、W2 ≤ 8/天、W3 ≤ 6/天 |
 | **P4 离线整合** | 待做 | 周级复盘可读；playbook 变更**必须人工批准**；记忆块有版本与 diff |
 
@@ -646,6 +649,8 @@ patch 引用的子路径必须在 `exports` 里可达：
 | P1 ⑤ 崩溃恢复 | `node scripts/crash-recovery-check.mjs` | 10/10 真实 SIGKILL（`docs/crash-recovery-2026-09-14.md`） |
 | P1 ⑥ 预测市场 | `node scripts/pm-pit-check.mjs 30` | 11/11（`docs/pm-pit-acceptance-2026-09-14.md`） |
 | P1.5 通道闸门 | `node scripts/ab-gate.mjs htx BTC/USDT 1h 92` | 判定：关闭 W2/W3（`docs/p1.5-gate-run-2026-09-14.md`） |
+| P2 ①②④ 故障注入 | `node scripts/fault-injection.mjs /tmp/p2-fault.json` | 50 轮中 38 次真 SIGKILL；孤儿挂单 0 / 重复成交 0；同一 `clientOrderId` 提交 10 次→成交 1；保护单在"模型停摆"下仍触发（`docs/p2-fault-injection-2026-09-15.md`） |
+| P2 ③ 外部 watchdog | `node scripts/watchdog-check.mjs /tmp/p2-watchdog.json` | 8/8：真实 `SIGSTOP` → stale → 撤单 → 挂单清空 → halted 落库 → 幂等（`docs/p2-watchdog-2026-09-15.md`） |
 
 **非空跑纪律**（这三条是被真实踩坑逼出来的，永久保留）：① 结算成功率必须报**分母**（机械执行路径曾不登记 `reflection_due_at` ⇒ "100%" 是在 **0 个样本**上通过的）；② 预测市场 novelty 检查必须有 `pm_signals_exercised`（样本曾全是日变化 ≈0.001 的远期政治盘 ⇒ 规则不触发却"通过"）；③ 验收阈值**从真实数据推导**，不写死（写死 3% 时同一脚本会随行情飘）。
 
@@ -683,12 +688,12 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.9 | ✅ | `predictions/store` + `poller` + `trade_predictions` + alias↔token 映射 | §10 专项 ②③⑧ |
 | T1.10 | ✅ | `trade_prediction_watch` + watch 治理 + pm 规则族 + W3 接线 | §10 专项 ④；novelty 与行情共享同一份预算 |
 | T1.11 | ✅ | `plugins/predictions.ts` + patch 行 + Config | `--dump-config` 列出该行（11 行、exit 0） |
-| T2.1 | ⏳ | `CcxtBroker`（**HTX 优先**，venue-agnostic）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | 同一 `gate.ts`；sandbox 走 OKX（§12 #6） |
-| T2.2 | ⏳ | 对账 + 外部 watchdog + `/halt` / `/resume` | §10 P2 ③④ |
-| T2.3 | ⏳ | 故障注入：`kill -9` × 50、重复提交 × 10 | §10 P2 ①② |
-| T2.4 | ⏳ | 内核指标补全：`adx14` + `funding.rate` + `oi.changePct` + `liq.notional`（§12 #16） | 增量=全量；单位口径有测试 |
-| T2.5 | ⏳ | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | 分位定义可复现 |
-| T2.6 | ⏳ | **§12 已决策待实现的小项**：`SUGGESTED_LIMITS`→`EXAMPLE_LIMITS` + 启动自洽校验（#17）；negRisk 偏差校验（#12）；`PriceTableStore.ageDays` + 90 天告警（#19）；结算视界按 tf 推导 + `Reflector` 绑 quick tier（#18）；`PROMPT_VERSION` 并入 C1 哈希（#5） | 每项一个单测；#17 有"不自洽即拒启动"的断言 |
+| T2.1 | ✅ | `CcxtBroker`（**HTX 优先**，venue-agnostic）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | 同一 `gate.ts` 不变；`sandbox` 开关走 OKX（§12 #6）；传输失败必须 throw（意图留在 `created` 交恢复处理）；密钥只进不出。**真 HTX 只读对账待 §12.2 A** |
+| T2.2 | ✅ | 对账 + 外部 watchdog + `/halt` / `/resume` | §10 P2 ③ 8/8（`docs/p2-watchdog-2026-09-15.md`）；撤单成功才置 halted；`inject=['commands']` |
+| T2.3 | ✅ | 故障注入：`kill -9` × 50、重复提交 × 10 | §10 P2 ①②④ 全部通过（`docs/p2-fault-injection-2026-09-15.md`）；持久化 `sim-exchange` 仅为验收/单测，不是生产 venue |
+| T2.4 | ✅ | 内核指标补全：`adx14` + `funding.rate` + `oi.changePct` + `liq.notional` + `basis.bps`（§12 #16） | 增量=全量逐点相等（ADX 对拍 92 个有效样本）；单位口径各有测试；5 路径移入 `V0_ALLOWED_PATHS` |
+| T2.5 | ✅ | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | 分位定义可复现（边界 0.33/0.67 归 mid）；样本 < 30 一律 `ok:false` |
+| T2.6 | ✅ | **§12 已决策待实现的小项**：`SUGGESTED_LIMITS`→`EXAMPLE_LIMITS` + 启动自洽校验（#17）；negRisk 偏差校验（#12）；`PriceTableStore.ageDays` + 90 天告警（#19）；结算视界按 tf 推导 + `Reflector` 绑 quick tier（#18）；`PROMPT_VERSION` 并入 C1 哈希（#5） | 每项一个单测；#17 有"不自洽即拒启动"的断言 |
 | T3.* | ⏳ | 限额与告警打磨、`live_confirm` → `live_auto` | §10 P3 |
 | T4.* | ⏳ | 周级复盘、playbook 提案、regime 检索、M3 版本化 | §10 P4 |
 
@@ -717,7 +722,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 13 | 历史深度（v2 interval） | **已关闭**：`1m` 实测覆盖 30 天（1441 点）⇒ 入白名单；`max` 行为不一致 ⇒ 不入白名单 | 见 `docs/pm-client-live-2026-09-14.md` |
 | 14 | ccxt 不读代理环境变量 | **已关闭**：`applyProxyAwareFetch()` 已实现并在 `createMarketRuntime` 默认启用 | 实测 HTX 30 天 1h 回补 720 取回 / 719 落库全为已收盘 bar |
 | 15 | WebSocket 行情需 CCXT Pro | **不买 Pro**。v0/v1 只用 REST | 实测免费版 `has.watchOHLCV === undefined`；REST 满足 60s 级需求，且我们的动作是分钟级。推翻条件：出现**必须在秒级**反应的规则 |
-| 16 | 内核指标未覆盖（`UNIMPLEMENTED_PATHS` 共 5 项） | **5 项全部可实现，一个都不移除**：`adx14` 纯计算（Wilder 三重平滑）；`funding.rate` / `oi.changePct` / `liq.notional` / `basis.bps` 走 ccxt/HTX | 实测 HTX 公开端点（**无需 key**）全部真实可用：`fetchFundingRate` → `funding_rate=-0.0000788`；`fetchOpenInterest` → `openInterestValue=2249677981.5`；`fetchLiquidations` → 5 条真实强平（含 `volume`/`trade_turnover`）；`basis.bps` → 同一 ccxt 实例取现货+永续 ticker，实测 `spot=78430.4 / swap=78400 ⇒ **−3.88 bps**`。★ **单位口径**：`funding.rate` 是**小数比例**（非 bp、非百分比）；`basis.bps` 单位是 **bps**（`(swap−spot)/spot×10000`）；`liq.notional` 用 `trade_turnover` 累加窗口值。三者口径写进 §3.2 词汇表且各有单位测试 |
+| 16 | 内核指标未覆盖（`UNIMPLEMENTED_PATHS` 共 5 项） | **5 项全部可实现，一个都不移除**：`adx14` 纯计算（Wilder 三重平滑）；`funding.rate` / `oi.changePct` / `liq.notional` / `basis.bps` 走 ccxt/HTX。**T2.4 已全部落地并移入 `V0_ALLOWED_PATHS`**（ADX 增量=全量逐点相等；四个衍生品路径各有单位测试；未注入衍生品数据时仍然 UNCOVERED） | 实测 HTX 公开端点（**无需 key**）全部真实可用：`fetchFundingRate` → `funding_rate=-0.0000788`；`fetchOpenInterest` → `openInterestValue=2249677981.5`；`fetchLiquidations` → 5 条真实强平（含 `volume`/`trade_turnover`）；`basis.bps` → 同一 ccxt 实例取现货+永续 ticker，实测 `spot=78430.4 / swap=78400 ⇒ **−3.88 bps**`。★ **单位口径**：`funding.rate` 是**小数比例**（非 bp、非百分比）；`basis.bps` 单位是 **bps**（`(swap−spot)/spot×10000`）；`liq.notional` 用 `trade_turnover` 累加窗口值；`oi.changePct` 是相对上一观测的**百分比**。口径写进 §3.2 词汇表且各有单位测试 |
 | 17 | 建议风控参数不自洽 | 删掉 `SUGGESTED_LIMITS` 的"建议"身份，改名 `EXAMPLE_LIMITS` 并标注"示例，非建议"；新增**启动期自洽校验**：`maxNotionalAtMinStop = equity × riskPct ÷ minStopDistancePct`，若 `perOrderCapUsd < 该值` ⇒ **拒绝启动**，并给出两个可选修法（调低 `riskPct` 或调高上限） | 实测 riskPct=1% 时 180 次命中**全部被拒**（名义 ≈ 2× 权益），0.2% 才成交。`minStopDistancePct` 默认取 BTC 1h 2×ATR 的实测中位距离，可配置。让每单都在硬闸处被打回是"看起来在跑"的坏状态 |
 | 18 | 结算视界 / 调度位 / Reflector 绑定 | ① 视界**按计划卡 tf 推导**：`horizon = clamp(4 根 bar, 4h, 24h)`（1h→4h、4h→16h、1d→24h）；② 调度挂到 supervisor heartbeat（T2.2）；③ `Reflector` 绑 **quick tier**（`deepseek-flash`）+ 独立预算 | 结算是"这笔交易的结果"，应与持仓周期同尺度，全局 4h 常量对 1d 卡明显过短。反思已由 §5.3 闸门限制为"短、可检索"（≤600 字），用 quick tier 足够 |
 | 19 | 价目表年龄 | `PriceTableStore` 增加 `ageDays(at)`；heartbeat 检查 > **90 天** ⇒ 发 P2 告警（不阻塞），看板显示 `stale` 标记 | 官方保留调价权利；缺行只降级为 token 上限（不会静默免费），所以告警级别 P2 足够 |
@@ -728,7 +733,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 
 | # | 事项 | 需要什么 | 现状与替代路径 |
 |---|---|---|---|
-| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto` |
+| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；三步只欠 key |
 | B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |

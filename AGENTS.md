@@ -19,8 +19,8 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅ 可运行（判定：关闭 W2/W3）。
-**下一步**：P2（HTX 真实接口、对账、watchdog、故障注入）。
+**当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地（T2.1–T2.6；§10 P2 ①–④ 由持久化模拟 venue 验证）。
+**下一步**：P3 小额实盘 —— 阻塞在 §12.2 A（HTX key）与 §12.2 E（`live_auto` 授权）；真 HTX 只读对账是进入 P3 前的第一件事。
 
 **七条红线**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 44 文件 / 495 测试
+pnpm test                        # vitest run，当前 50 文件 / 560 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -52,6 +52,8 @@ node scripts/p1-acceptance.mjs 30                    # P1 ①–④
 node scripts/crash-recovery-check.mjs                # P1 ⑤ 真实 SIGKILL
 node scripts/pm-pit-check.mjs 30                     # P1 ⑥ 预测市场专项
 node scripts/ab-gate.mjs htx BTC/USDT 1h 92          # P1.5 通道有效性闸门
+node scripts/watchdog-check.mjs /tmp/p2-watchdog.json # P2 ③ 真实 SIGSTOP → 外部 watchdog 撤单
+node scripts/fault-injection.mjs /tmp/p2-fault.json  # P2 ①②④ kill -9×50 / 幂等×10 / 保护单停摆仍生效
 node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等）
 ```
 
@@ -135,11 +137,14 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 
 写代码时**不要**注册"调用即抛错"的占位工具或空实现来让表格好看；缺口要如实报告。
 
-- **8 个工具未实现**（`missingTools()` 会打印）：`trade_derivatives`、`trade_news`、`trade_onchain`、
-  `trade_regime`、`trade_stress_test`、`trade_workflow_run`、`trade_review`、`trade_playbook_update`。
-- **5 个指标路径未实现**（`UNIMPLEMENTED_PATHS`）：`adx14`、`oi.changePct`、`liq.notional`、
-  `funding.rate`、`basis.bps` —— 已实测均可实现（`plan.md` §12.1 #16），排在 T2.4。
-- **P2–P4 未做**：真实 `CcxtBroker`、对账/watchdog/`/halt`、故障注入、`live_confirm`/`live_auto`。
+- **7 个工具未实现**（`missingTools()` 会打印）：`trade_derivatives`、`trade_news`、`trade_onchain`、
+  `trade_stress_test`、`trade_workflow_run`、`trade_review`、`trade_playbook_update`。
+  （`trade_regime` 已由 T2.5 实现。）
+- **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
+  `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
+- **P3–P4 未做**：`live_confirm`/`live_auto`、周级复盘/playbook/M3 版本化。
+- **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
+  §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
 - **待外部输入**（`plan.md` §12.2）：HTX key 已确认可提供；OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
   A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。
 

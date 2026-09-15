@@ -1,0 +1,30 @@
+{
+  "ranAt": "2026-09-15T15:24:14.556Z",
+  "dbPath": "/tmp/dsh-watchdog-63JD04/watchdog.db",
+  "child": {
+    "pid": 39945,
+    "ready": true,
+    "stopped": true
+  },
+  "heartbeat": {
+    "beatAt": 1789485854492,
+    "halted": false
+  },
+  "stale": {
+    "action": "halt_cancel",
+    "reason": "stale_heartbeat"
+  },
+  "cancelCalls": 1,
+  "openOrders": [],
+  "checks": {
+    "child_stopped": true,
+    "heartbeat_exists": true,
+    "stale_detected": true,
+    "watchdog_halted": true,
+    "cancel_all_called": true,
+    "open_orders_cleared": true,
+    "halted_persisted": true,
+    "second_check_idempotent": true
+  },
+  "allPassed": true
+}

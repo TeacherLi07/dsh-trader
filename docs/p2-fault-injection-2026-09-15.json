@@ -1,0 +1,505 @@
+{
+  "ranAt": "2026-09-15T15:24:19.087Z",
+  "p2_1": {
+    "rounds": [
+      {
+        "round": 1,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 2,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 3,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 4,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 1,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 5,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 6,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 7,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 8,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 9,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 10,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 11,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 12,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 13,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 14,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 15,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 16,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 17,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 18,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 19,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 20,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 21,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 22,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 23,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 24,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 25,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 26,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 27,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 28,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 29,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 30,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 31,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 32,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 33,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 34,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 35,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 36,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 37,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 38,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 39,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 40,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 41,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 42,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 43,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 44,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 45,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 46,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 47,
+        "crashStep": "after_persist_before_match",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 48,
+        "crashStep": "none",
+        "signal": null,
+        "inFlightBefore": 0,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 49,
+        "crashStep": "after_persist_before_ack",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      },
+      {
+        "round": 50,
+        "crashStep": "before_persist",
+        "signal": "SIGKILL",
+        "inFlightBefore": 1,
+        "openOrdersBefore": 0,
+        "orphanOpenOrders": 0,
+        "duplicateFills": 0
+      }
+    ],
+    "summary": {
+      "rounds": 50,
+      "kill_delivered_rounds": 38,
+      "in_flight_rounds": 38,
+      "open_order_rounds": 1,
+      "orphan_open_orders": 0,
+      "duplicate_fills": 0,
+      "idempotent_recovery_rounds": 50
+    }
+  },
+  "p2_2": {
+    "attempts": 10,
+    "kill_delivered": 0,
+    "fill_count": 1,
+    "journal_intent_count": 1,
+    "journal_fill_count": 1,
+    "same_client_fill_count": 1,
+    "duplicate_fills": 0
+  },
+  "p2_4": {
+    "child_signal": null,
+    "fills_before_stop": 1,
+    "fills_after_stop": 2,
+    "protective_trigger_count": 1,
+    "positions_after_stop": 0,
+    "protective_survives_without_model": true
+  },
+  "checks": {
+    "kill_delivered_rounds_ge_1": true,
+    "in_flight_rounds_gt_0": true,
+    "open_order_sample_gt_0": true,
+    "orphan_open_orders": true,
+    "duplicate_fills": true,
+    "recovery_idempotent": true,
+    "idempotent_fill_count": true,
+    "idempotent_journal_intent_count": true,
+    "idempotent_journal_fill_count": true,
+    "idempotent_same_client_fill_count": true,
+    "idempotent_duplicate_fills": true,
+    "protective_survives_without_model": true
+  },
+  "allPassed": true,
+  "methodology": {
+    "orphan_open_orders": "每轮将 exchange.openOrders() 中 clientOrderId 不存在于 journal.clientOrderIds() 的订单计数；只统计真正孤儿，故本地有记录的挂单不算孤儿。",
+    "duplicate_fills": "按 SimExchange.allFills() 的 clientOrderId 分组，sum(max(0, groupCount - 1))；不同 clientOrderId 的各一笔成交不互相算重复。",
+    "recovery_idempotent": "第一次 CrashRecovery.run() 后与第二次 run() 后的 decisions/intents/clientOrderIds/fills 四组 id 快照完全相等。",
+    "in_flight_before": "子进程退出后、第一次恢复前 journal.inFlightIntents().length；仅在途样本大于 0 时计入非空跑统计。",
+    "open_order_sample": "第 4 轮故意保留一笔本地已有意图的未成交限价单，open_order_rounds > 0 证明孤儿=0 不是因交易所挂单集合为空。"
+  }
+}

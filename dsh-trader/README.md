@@ -19,7 +19,7 @@
 | T0.4 | 行情：`market/{normalize,ratelimit,archive,backfill,feed,ccxt-source,runtime}` + 插件接线 | ✅ 已完成（101 单测；HTX 实测 30 天 1h 回补 **719 根全部为已收盘 bar**；代理感知 fetch 见 `applyProxyAwareFetch`） |
 | T0.5 | 特征层：`market/{indicators,features,feature-archive}` + 重启回灌 | ✅ 已完成（增量实现与全量重算**逐点严格相等**；130 单测；HTX 实测 719 根真实 bar 跑出完整快照） |
 | T0.6 | 计划卡 schema + `when` DSL + 求值器 + `match` + `store` | ✅ 已完成（DSL 每算子/每错误分支有单测；计划卡不可事后改写、每标的一张 active、UNCOVERED 可达） |
-| §4.4 | 预测市场事件源（Polymarket，**只读**） | 🟡 DDL（4 张表）+ PIT 三道闸门已落地并有单测；client/store/poller/watch/tools 属 T1.8–T1.11 |
+| §4.4 | 预测市场事件源（Polymarket，**只读**） | ✅ 已完成（client/store/poller/watch/rules 全部落地；只读工具 + 关注登记；PIT 三闸门与专项 ①–⑧ 见 `../docs/pm-pit-acceptance-2026-09-14.md`） |
 | T0.7 | 规则引擎 + 触发治理（去重/冷却/限流/分级 + `TriggerQueue`） | ✅ 已完成（同一 bar 回放两遍**零重复触发**由 `dedup_key` 唯一键保证；内置 2 个只使用已实现指标的规则包） |
 | T0.8a | 纸面撮合 `exec/paper` + 对账 `exec/reconcile` | ✅ 已完成（滑点/手续费、`clientOrderId` 幂等、保护单为挂单；对账纯函数覆盖孤儿单/未知持仓/无保护单） |
 | T0.8b | 确定性回放 `exec/replay` + `sizing` + `journal` | ✅ 已完成（P0 验收 ②③ 通过：真实 HTX 30 天 719 根回放两遍 id 集合完全相等、`client_order_id` 重复数 = 0、命中全部可归因） |
@@ -28,7 +28,15 @@
 | T1.1 | 判断流程：冻结 pack + workflow 脚本 + 角色提示词 | ✅ 已完成（脚本用 `.toString()` 内嵌 `pack.ts` 的纯函数，杜绝沙箱与库漂移；**真实脚本文本可在进程内用假 agent 执行**，253 单测覆盖 hash 守卫/冲突消解/收敛即停/只回结构化字段） |
 | T1.2 | 角色工具箱与模型路由 `agents/roles.ts` | ✅ 已完成（只读角色**断言无副作用工具**、judge 独占执行权、desk ≤ 20；未实现工具由 `missingTools()` 显式报告） |
 | T1.3 | 交易工具 `agents/tools.ts`（10 个，含 propose/execute） | ✅ 已完成（**propose 绝不触达交易所**、**execute 内二次硬闸**、意图先落库→ack 后置状态、被拒也写审计链） |
-| P1（T1.4–T1.11 含 §4.4 预测市场）/ P1.5–P4 | 结算反思、context 组装、预算、通道闸门、测试网、实盘、离线整合 | ⬜ 未开始 |
+| T1.4–T1.11 | 结算/反思、context 组装、预算账本、P1.5 闸门、预测市场（§4.4） | ✅ 已完成（`tag: phase-p1`；证据见 `../docs/p1-acceptance-2026-09-14.md`、`../docs/pm-pit-acceptance-2026-09-14.md`、`../docs/p1.5-gate-run-2026-09-14.md`） |
+| — | **P1 验收 + P1.5 通道闸门**（§10 P1 ①–⑥；闸门判定"关闭 W2/W3"） | ✅ `tag: phase-p1` |
+| T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 代码 + 单测完成；**缺 §12.2 A 的 key**，真 HTX 只读对账待做；缺凭据时安全降级 `paper` |
+| T2.2 | 对账 runner + 外部 watchdog + `/halt` `/resume` | ✅ P2 ③ 8/8（真实 `SIGSTOP`）：`../docs/p2-watchdog-2026-09-15.md` |
+| T2.3 | 故障注入：`kill -9`×50 / 幂等提交×10 / 保护单停摆仍生效 | ✅ P2 ①②④ 全通过：`../docs/p2-fault-injection-2026-09-15.md` |
+| T2.4 | 内核指标补全：`adx14` + `funding.rate`/`oi.changePct`/`liq.notional`/`basis.bps` | ✅ 增量=全量（ADX 对拍 92 样本）；单位口径有测试；`UNIMPLEMENTED_PATHS` 清空 |
+| T2.5 | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | ✅ 分位定义可复现；样本 < 30 一律 `ok:false` |
+| T2.6 | §12 已决小项：#5 提示词版本并入 C1、#12 negRisk 只校验、#17 启动自洽、#18 视界按 tf、#19 价目表年龄 | ✅ 每项一个单测 |
+| P3–P4 | 小额实盘、周级复盘/playbook/M3 版本化 | ⬜ 未开始（阻塞：HTX key / OKX demo key / `live_auto` 授权，见 `../plan.md` §12.2） |
 
 ## 开发
 
