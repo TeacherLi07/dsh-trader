@@ -138,6 +138,10 @@ export interface PmStoreOptions {
   readonly liquidity: LiquidityGateConfig
   /** 同时 active 的关注上限（plan §4.4：默认 30）。 */
   readonly maxActiveWatches?: number
+  /** 同一 negRisk 事件的 mid 之和允许偏离 1 的绝对阈值。 */
+  readonly negRiskTolerance?: number
+  /** negRisk 事件不自洽时只折扣置信度，不改写盘口数值。 */
+  readonly negRiskConfidencePenalty?: number
 }
 
 export class PmStore {
@@ -147,6 +151,14 @@ export class PmStore {
     private readonly db: Database.Database,
     private readonly options: PmStoreOptions,
   ) {
+    const penalty = options.negRiskConfidencePenalty ?? 0.9
+    if (!Number.isFinite(penalty) || !(penalty > 0) || penalty > 1) {
+      throw new Error(`negRiskConfidencePenalty 必须在 (0,1] 内：${penalty}`)
+    }
+    const tolerance = options.negRiskTolerance ?? 0.03
+    if (!Number.isFinite(tolerance) || tolerance < 0) {
+      throw new Error(`negRiskTolerance 必须是非负有限数：${tolerance}`)
+    }
     this.#statements = new Statements(db)
   }
 
@@ -554,6 +566,7 @@ export class PmStore {
     const market = this.marketsVisibleAt(now).find((row) => row.tokenIds.includes(tokenId))
     const marketView =
       market === undefined ? undefined : this.marketViewAt(market.conditionId, now)
+    const negRisk = this.#negRiskState(tokenId, now)
 
     /**
      * 流动性来自 **盘口快照或 Gamma 元数据**，两者取其一。
@@ -600,7 +613,85 @@ export class PmStore {
       winningOutcome: marketView?.visible === true ? marketView.winningOutcome ?? null : null,
       /** 市场文本是**不可信输入**（§4.4 红线 3）。 */
       untrustedText: market?.question ?? null,
+      negRiskDeviation: negRisk?.deviation ?? null,
+      negRiskDiscounted: negRisk?.discounted ?? false,
+      confidenceMultiplier: negRisk?.discounted === true ? this.#negRiskPenalty() : 1,
     }
+  }
+
+  /**
+   * 暴露每个可见 negRisk 事件至多一条 info 告警；盘口快照本身只携带折扣标记，避免按 token 重复告警。
+   * 这里故意不归一化 mid：偏差是市场摩擦/不自洽的观测证据，不能被修正后抹掉（plan §12 #12）。
+   */
+  negRiskAlerts(now: number): readonly PmNegRiskAlert[] {
+    const alerts: PmNegRiskAlert[] = []
+    for (const [eventId, tokenIds] of this.#negRiskGroups(now)) {
+      const deviation = this.#negRiskDeviationForTokens(tokenIds, now)
+      if (deviation === null || !(deviation.deviation > this.#negRiskTolerance())) continue
+      alerts.push({
+        level: 'info',
+        payload: {
+          kind: 'pm_negrisk_deviation',
+          eventId,
+          actual: deviation.actual,
+          deviation: deviation.deviation,
+          tolerance: this.#negRiskTolerance(),
+          tokenIds,
+        },
+      })
+    }
+    return alerts
+  }
+
+  #negRiskTolerance(): number {
+    return this.options.negRiskTolerance ?? 0.03
+  }
+
+  #negRiskPenalty(): number {
+    return this.options.negRiskConfidencePenalty ?? 0.9
+  }
+
+  #negRiskState(
+    tokenId: string,
+    now: number,
+  ): { readonly deviation: number | null; readonly discounted: boolean } | undefined {
+    for (const tokenIds of this.#negRiskGroups(now).values()) {
+      if (!tokenIds.includes(tokenId)) continue
+      const deviation = this.#negRiskDeviationForTokens(tokenIds, now)
+      if (deviation === null) return { deviation: null, discounted: false }
+      return {
+        deviation: deviation.deviation,
+        discounted: deviation.deviation > this.#negRiskTolerance(),
+      }
+    }
+    return undefined
+  }
+
+  #negRiskDeviationForTokens(tokenIds: readonly string[], now: number): NegRiskDeviation | null {
+    const mids: number[] = []
+    for (const tokenId of tokenIds) {
+      const mid = this.latestQuoteAsOf(tokenId, now)?.mid
+      if (mid !== undefined) mids.push(mid)
+    }
+    return negRiskDeviation(mids)
+  }
+
+  #negRiskGroups(now: number): ReadonlyMap<string, readonly string[]> {
+    const rows = this.#statements
+      .get(
+        `SELECT event_id, token_ids_json FROM pm_markets
+         WHERE event_id IS NOT NULL AND neg_risk = 1 AND created_at > 0 AND created_at <= ?`,
+      )
+      .all(now) as { event_id: string; token_ids_json: string }[]
+    const groups = new Map<string, Set<string>>()
+    for (const row of rows) {
+      const eventId = String(row.event_id)
+      const tokenIds = JSON.parse(row.token_ids_json) as string[]
+      const group = groups.get(eventId) ?? new Set<string>()
+      for (const tokenId of tokenIds) group.add(tokenId)
+      groups.set(eventId, group)
+    }
+    return new Map([...groups].map(([eventId, tokenIds]) => [eventId, [...tokenIds].sort()]))
   }
 
   /** 近 7 日 volume24h 中位数；样本不足（<3）返回 null 而不是 0。 */
@@ -647,6 +738,36 @@ export interface PmAliasSnapshot {
   readonly resolved: boolean
   readonly winningOutcome: string | null
   readonly untrustedText: string | null
+  readonly negRiskDeviation: number | null
+  readonly negRiskDiscounted: boolean
+  readonly confidenceMultiplier: number
+}
+
+export interface PmNegRiskAlert {
+  readonly level: 'info'
+  readonly payload: {
+    readonly kind: 'pm_negrisk_deviation'
+    readonly eventId: string
+    readonly actual: number
+    readonly deviation: number
+    readonly tolerance: number
+    readonly tokenIds: readonly string[]
+  }
+}
+
+export type NegRiskDeviation = {
+  readonly expected: number
+  readonly actual: number
+  readonly deviation: number
+}
+
+/** negRisk 只做一致性校验；样本不足或包含非有限 mid 时返回 null，绝不伪造零偏差。 */
+export function negRiskDeviation(mids: readonly number[]): NegRiskDeviation | null {
+  if (mids.length < 2 || mids.some((mid) => !Number.isFinite(mid))) return null
+  const expected = 1
+  const actual = mids.reduce((sum, mid) => sum + mid, 0)
+  if (!Number.isFinite(actual)) return null
+  return { expected, actual, deviation: Math.abs(actual - expected) }
 }
 
 /**

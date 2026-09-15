@@ -6,11 +6,15 @@ import { normalizeCandles } from '../src/market/normalize.js'
 import { DecisionJournal, type DecisionRecord } from '../src/exec/journal.js'
 import {
   DEFAULT_REFLECTION_GATES,
+  REFLECTOR_TIER,
   SettlementScheduler,
   acceptReflection,
   computeSettlement,
+  horizonMsForTimeframe,
+  reflectorRoute,
   type ReflectionInput,
 } from '../src/memory/settle.js'
+import { TIMEFRAMES } from '../src/plan/schema.js'
 import { raw } from './helpers/market.js'
 
 const TF = '1h'
@@ -118,18 +122,46 @@ function executedDecision(
   journal.markDecisionReflectionDue(over.decisionId, over.reflectionDueAt ?? T0 + HORIZON)
 }
 
-function scheduler(reflector?: (input: ReflectionInput) => Promise<{ text: string; evidenceRefs: readonly string[] }>) {
+function scheduler(
+  reflector?: (input: ReflectionInput) => Promise<{ text: string; evidenceRefs: readonly string[] }>,
+  horizonMs: number | undefined = HORIZON,
+) {
   return new SettlementScheduler({
     journal,
     bars: archive,
     clock: { now: () => NOW, setInterval: () => () => {} },
     timeframe: TF,
-    horizonMs: HORIZON,
+    ...(horizonMs === undefined ? {} : { horizonMs }),
     benchmarkSymbol: BENCH,
     slippageBps: 10,
     ...(reflector === undefined ? {} : { reflector }),
   })
 }
+
+describe('结算视界与 Reflector 路由（plan §12 #18）', () => {
+  it('按全部 TIMEFRAMES 推导四根 bar 并夹在 4h–24h', () => {
+    const expected: Record<string, number> = {
+      '1m': 4 * HOUR,
+      '15m': 4 * HOUR,
+      '1h': 4 * HOUR,
+      '4h': 16 * HOUR,
+      '1d': 24 * HOUR,
+    }
+    expect(TIMEFRAMES.length).toBeGreaterThan(0)
+    for (const timeframe of TIMEFRAMES) {
+      expect(horizonMsForTimeframe(timeframe)).toBe(expected[timeframe])
+    }
+  })
+
+  it('未知 tf fail-loud，避免静默使用错误视界', () => {
+    expect(() => horizonMsForTimeframe('2h')).toThrow(/未知结算时间框架/)
+  })
+
+  it('Reflector 固定走 quick tier', () => {
+    expect(REFLECTOR_TIER).toBe('quick')
+    expect(reflectorRoute({ deep: 'deep-route', quick: 'quick-route' })).toBe('quick-route')
+  })
+})
 
 describe('computeSettlement', () => {
   const decision = {
@@ -244,6 +276,16 @@ describe('acceptReflection', () => {
 })
 
 describe('SettlementScheduler', () => {
+  it('未显式传 horizonMs 时按计划卡 tf 推导并写入 outcome', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecision({ decisionId: 'd-derived-horizon' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+
+    const result = await scheduler(undefined, undefined).runOnce(NOW)
+    expect(result.settled).toBe(1)
+    expect(journal.outcomeFor('d-derived-horizon')?.horizonMs).toBe(horizonMsForTimeframe(TF))
+  })
+
   it('从实际成交结算：净额、基准、alpha、MFE/MAE、止损', async () => {
     flatBars('BTC/USDT', [100, 101, 104, 105, 105])
     flatBars(BENCH, [100, 100, 101, 101, 101])

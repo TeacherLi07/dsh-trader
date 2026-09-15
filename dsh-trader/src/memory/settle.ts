@@ -16,6 +16,32 @@ import type { BarArchive } from '../market/archive.js'
 import { fingerprint } from '../util/canonical.js'
 import type { DecisionJournal, FillView, OutcomeRecord, PendingSettlement } from '../exec/journal.js'
 
+const MIN_HORIZON_MS = 4 * 3_600_000
+const MAX_HORIZON_MS = 24 * 3_600_000
+const BAR_MS_BY_TIMEFRAME: Readonly<Record<string, number>> = {
+  '1m': 60_000,
+  '15m': 15 * 60_000,
+  '1h': 3_600_000,
+  '4h': 4 * 3_600_000,
+  '1d': 24 * 3_600_000,
+}
+
+/**
+ * 按四根 bar 推导结算视界并夹在 4h–24h；未知 tf 直接报错，避免静默污染结算样本。
+ */
+export function horizonMsForTimeframe(tf: string): number {
+  const barMs = BAR_MS_BY_TIMEFRAME[tf]
+  if (barMs === undefined) throw new Error(`未知结算时间框架：${tf}`)
+  return Math.min(Math.max(4 * barMs, MIN_HORIZON_MS), MAX_HORIZON_MS)
+}
+
+/** 反思已由 §5.3 闸门限制为短、可检索，用 quick tier 足够（§12 #18）。 */
+export const REFLECTOR_TIER = 'quick' as const
+
+export function reflectorRoute(routing: { readonly deep: unknown; readonly quick: unknown }): unknown {
+  return routing.quick
+}
+
 // ── 结算 ─────────────────────────────────────────────────────────────────────
 
 export type { FillView }
@@ -223,7 +249,7 @@ export interface SettlementDeps {
   readonly clock: Clock
   readonly timeframe: string
   /** 结算视界：决策后多久结算。 */
-  readonly horizonMs: number
+  readonly horizonMs?: number
   readonly benchmarkSymbol: string
   readonly slippageBps: number
   readonly reflector?: Reflector
@@ -254,6 +280,7 @@ export class SettlementScheduler {
   /** 扫描**全部**到期的 pending 并结算。可重复调用（幂等）。 */
   async runOnce(now: number, limit = 20): Promise<SettlementRunResult> {
     const gates = this.deps.gates ?? DEFAULT_REFLECTION_GATES
+    const horizonMs = this.deps.horizonMs ?? horizonMsForTimeframe(this.deps.timeframe)
     const pending = this.deps.journal.pendingSettlements(now, limit)
 
     let settled = 0
@@ -268,7 +295,7 @@ export class SettlementScheduler {
         const fills = this.deps.journal.fillsForDecision(decision.decisionId)
         const entry = fills.length > 0 ? (fills[0] as FillView) : undefined
 
-        const horizonEnd = decision.decidedAt + this.deps.horizonMs
+        const horizonEnd = decision.decidedAt + horizonMs
         // `until` 是**开区间**：`open_time < horizonEnd` ⇒ 只取在 horizon 内收盘的 bar。
         // 旧实现写 `horizonEnd + timeframeMs`，会多算一根"在结算时点之后才收盘"的 bar，
         // 把未来价格算进 exitPrice / MFE / MAE（实测 exitPrice 取自未来 bar）。
@@ -326,7 +353,7 @@ export class SettlementScheduler {
           decisionId: decision.decisionId,
           symbol: decision.symbol,
           settledAt: now,
-          horizonMs: this.deps.horizonMs,
+          horizonMs,
           entryPrice,
           ...computation,
         }

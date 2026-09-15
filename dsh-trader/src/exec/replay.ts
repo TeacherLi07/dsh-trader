@@ -19,6 +19,7 @@ import { BarArchive } from '../market/archive.js'
 import { createFeatureContext } from '../market/context.js'
 import { FeatureEngine } from '../market/features.js'
 import { matchPlan, planDedupKey } from '../plan/match.js'
+import { horizonMsForTimeframe } from '../memory/settle.js'
 import {
   toDecisionAction,
   type LevelAction,
@@ -54,7 +55,7 @@ export interface ReplayDeps {
   readonly riskPct: number
   readonly mode: RunMode
   readonly limits: RiskLimits | null
-  /** 结算视界（plan §7.9）；默认 4h，与 `DEFAULT_REFLECTION_HORIZON_MS` 同值。 */
+  /** 结算视界（plan §7.9 / §12 #18）；省略时按 `timeframe` 推导（4 根 bar 夹在 4h–24h）。 */
   readonly reflectionHorizonMs?: number
   /** 判断通道（W2/W3）。不注入 = A 臂（纯机械执行）。 */
   readonly judgment?: JudgmentChannel
@@ -633,7 +634,8 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
               riskPct: deps.riskPct,
               mode: deps.mode,
               limits: deps.limits,
-              reflectionHorizonMs: deps.reflectionHorizonMs ?? 4 * 3_600_000,
+              reflectionHorizonMs:
+                deps.reflectionHorizonMs ?? horizonMsForTimeframe(request.timeframe),
               alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
             })
         // 计划条件命中也要落库：这样 `alreadyFired` 才能跨重启工作，审计里也能看到"执行了什么"

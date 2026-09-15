@@ -110,6 +110,41 @@ export class PriceTableStore {
   count(): number {
     return (this.#statements.get('SELECT COUNT(*) AS n FROM price_table').get() as { n: number }).n
   }
+
+  /** 所有模型中最近一版价目的生效时刻；没有价目时返回 null，不能伪装成刚更新。 */
+  newestEffectiveFrom(): number | null {
+    const row = this.#statements
+      .get('SELECT MAX(effective_from) AS effective_from FROM price_table')
+      .get() as { effective_from: number | null }
+    return row.effective_from === null || !Number.isFinite(row.effective_from) ? null : row.effective_from
+  }
+
+  /** 年龄由调用方提供的时刻计算，避免账本偷偷读取系统时钟而破坏回放一致性。 */
+  ageDays(at: number): number | null {
+    const newest = this.newestEffectiveFrom()
+    if (newest === null || !Number.isFinite(at)) return null
+    const age = (at - newest) / 86_400_000
+    return Number.isFinite(age) ? age : null
+  }
+
+  /** 没有可用价目也视为过期，调用方必须显式处理而不能把未知当成新鲜。 */
+  isStale(at: number, maxAgeDays = 90): boolean {
+    const age = this.ageDays(at)
+    return age === null || age > maxAgeDays
+  }
+}
+
+/** 价目表过期是 P2 提醒，不阻塞交易；空表/无效年龄仍按 fail-closed 发出告警。 */
+export function priceTableStaleAlert(
+  ageDaysOrNull: number | null,
+  at: number,
+  maxAgeDays = 90,
+): string | null {
+  if (ageDaysOrNull === null || !Number.isFinite(ageDaysOrNull)) {
+    return `P2：价目表年龄未知（${at} 时没有有效生效时间，阈值 ${maxAgeDays} 天）`
+  }
+  if (!(ageDaysOrNull > maxAgeDays)) return null
+  return `P2：价目表已过期 ${ageDaysOrNull.toFixed(2)} 天（实际 ${ageDaysOrNull.toFixed(2)} 天，阈值 ${maxAgeDays} 天；at=${at}）`
 }
 
 // ── 账本 ─────────────────────────────────────────────────────────────────────
@@ -147,13 +182,16 @@ export interface DashboardRow {
   readonly tokensCached: number
   readonly estUsd: number
   readonly costKnown: boolean
+  readonly stale: boolean
 }
 
 export class BudgetLedger {
   readonly #statements: Statements
+  readonly #prices: PriceTableStore
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
+    this.#prices = new PriceTableStore(db)
   }
 
   /**
@@ -243,9 +281,17 @@ export class BudgetLedger {
     return budgetAllows(state, options.dailyBudgetUsd, { wake: options.wake })
   }
 
-  /** 成本看板：按日、按 scope（`symbol:*` 即"按标的"）聚合。 */
-  dashboard(options: { readonly day?: string; readonly limit?: number } = {}): readonly DashboardRow[] {
+  /**
+   * 成本看板：按日、按 scope（`symbol:*` 即"按标的"）聚合。
+   * `at` 必须由调用方传入；省略时取最新价目版本，避免看板读取系统时钟导致回放漂移。
+   */
+  dashboard(
+    options: { readonly day?: string; readonly limit?: number; readonly at?: number } = {},
+  ): readonly DashboardRow[] {
     const limit = Math.max(1, options.limit ?? 100)
+    const newest = this.#priceTableAtForDashboard()
+    const at = options.at ?? newest
+    const stale = at === null ? true : this.#prices.isStale(at)
     const rows = (
       options.day === undefined
         ? this.#statements
@@ -271,6 +317,11 @@ export class BudgetLedger {
       tokensCached: row.tokens_cached,
       estUsd: row.est_usd,
       costKnown: row.cost_known === 1,
+      stale,
     }))
+  }
+
+  #priceTableAtForDashboard(): number | null {
+    return this.#prices.newestEffectiveFrom()
   }
 }

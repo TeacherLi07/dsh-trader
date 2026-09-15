@@ -10,7 +10,13 @@ import {
   selectPrice,
   type ModelPrice,
 } from '../src/cost.js'
-import { BudgetLedger, PriceTableStore, dayKey, symbolScope } from '../src/cost-ledger.js'
+import {
+  BudgetLedger,
+  PriceTableStore,
+  dayKey,
+  priceTableStaleAlert,
+  symbolScope,
+} from '../src/cost-ledger.js'
 
 const HOUR = 3_600_000
 /** 2026-09-14 是周一。UTC 12:00 = 谷时；UTC 02:00 = 峰时。 */
@@ -89,6 +95,52 @@ describe('selectPrice', () => {
     const before = prices.version()
     prices.add({ model: 'x', effectiveFrom: 1, inPerMtok: 1, outPerMtok: 1 })
     expect(prices.version()).not.toBe(before)
+  })
+})
+
+describe('PriceTableStore：年龄与过期告警（plan §12 #19）', () => {
+  it('空表 ageDays=null 且 isStale=true', () => {
+    const freshDb = new Database(':memory:')
+    migrate(freshDb)
+    const empty = new PriceTableStore(freshDb)
+    const at = Date.UTC(2026, 8, 14)
+    expect(empty.count()).toBe(0)
+    expect(empty.newestEffectiveFrom()).toBeNull()
+    expect(empty.ageDays(at)).toBeNull()
+    expect(empty.isStale(at)).toBe(true)
+    expect(priceTableStaleAlert(empty.ageDays(at), at)).not.toBeNull()
+    freshDb.close()
+  })
+
+  it('100 天前价目被标记过期并产生含实际年龄与阈值的 P2 告警', () => {
+    const freshDb = new Database(':memory:')
+    migrate(freshDb)
+    const old = new PriceTableStore(freshDb)
+    const at = Date.UTC(2026, 8, 14) + 100 * 86_400_000
+    const written = old.add({ model: 'old', effectiveFrom: at - 100 * 86_400_000, inPerMtok: 1, outPerMtok: 1 })
+    expect(written).toBe(true)
+    expect(old.count()).toBeGreaterThan(0)
+    expect(old.ageDays(at)).toBeCloseTo(100, 10)
+    expect(old.isStale(at)).toBe(true)
+    const alert = priceTableStaleAlert(old.ageDays(at), at)
+    expect(alert).toContain('P2')
+    expect(alert).toContain('100.00')
+    expect(alert).toContain('90')
+    freshDb.close()
+  })
+
+  it('今天生效的价目年龄为 0，不过期且不发告警', () => {
+    const freshDb = new Database(':memory:')
+    migrate(freshDb)
+    const today = new PriceTableStore(freshDb)
+    const at = Date.UTC(2026, 8, 14)
+    expect(today.add({ model: 'today', effectiveFrom: at, inPerMtok: 1, outPerMtok: 1 })).toBe(true)
+    expect(today.count()).toBeGreaterThan(0)
+    expect(today.newestEffectiveFrom()).toBe(at)
+    expect(today.ageDays(at)).toBe(0)
+    expect(today.isStale(at)).toBe(false)
+    expect(priceTableStaleAlert(today.ageDays(at), at)).toBeNull()
+    freshDb.close()
   })
 })
 
@@ -215,6 +267,21 @@ describe('BudgetLedger', () => {
     expect(state.tokens).toBe(100)
     expect(state.tokenCap).toBe(50)
     expect(budgetAllows(state, 100, { wake: 'W3' }).allow).toBe(false)
+  })
+
+  it('dashboard 按显式 at 标记价目表 stale；省略 at 则以最新版本为基准', () => {
+    const newest = prices.newestEffectiveFrom()
+    expect(newest).not.toBeNull()
+    if (newest === null) return
+    const staleAt = newest + 91 * 86_400_000
+    ledger.record(call(staleAt), prices.all())
+    const rows = ledger.dashboard({ day: dayKey(staleAt), at: staleAt })
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((row) => row.stale)).toBe(true)
+
+    const freshRows = ledger.dashboard({ day: dayKey(staleAt) })
+    expect(freshRows.length).toBeGreaterThan(0)
+    expect(freshRows.every((row) => !row.stale)).toBe(true)
   })
 
   it('未知 scope 返回零值状态而不是抛错（首次调用前不崩）', () => {

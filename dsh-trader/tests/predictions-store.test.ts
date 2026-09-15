@@ -18,6 +18,7 @@ import { IMPLEMENTED_TOOL_NAMES, toolByName } from '../src/agents/tools.js'
 import {
   PmStore,
   WatchError,
+  negRiskDeviation,
   pmAllowedPaths,
   pmFeatureValues,
   type PmAliasSnapshot,
@@ -123,6 +124,115 @@ describe('PmStore：存在门控与结算门控（plan §10 专项 ①）', () =
     const row = store.marketByConditionId('0xcond1')
     expect(row?.winningOutcome).toBe('Yes')
     expect(row?.resolvedAt).toBe(NOW)
+  })
+})
+
+describe('PmStore：negRisk 只校验不归一化（plan §12 #12）', () => {
+  function seedNegRiskEvent(
+    mids: readonly number[],
+    options: { readonly negRisk?: boolean; readonly quotedIndexes?: readonly number[] } = {},
+  ): void {
+    const tokenIds = mids.map((_, index) => `neg-${index}`)
+    store.registerWatch(watch({ alias: 'neg_risk', tokenIds }), NOW)
+    const quotedIndexes = options.quotedIndexes ?? tokenIds.map((_, index) => index)
+    for (const [index, mid] of mids.entries()) {
+      const tokenId = tokenIds[index] as string
+      store.upsertMarket(
+        market({
+          id: `neg-market-${index}`,
+          conditionId: `0xneg-${index}`,
+          slug: `neg-market-${index}`,
+          outcomes: [`Outcome ${index}`],
+          clobTokenIds: [tokenId],
+          outcomePrices: [mid],
+          negRisk: options.negRisk ?? true,
+          events: [{ id: 'event-neg-risk', slug: 'neg-risk', title: 'Neg risk event' }],
+        }),
+        NOW,
+      )
+      if (quotedIndexes.includes(index)) {
+        store.recordQuote({ tokenId, observedAt: NOW, mid, spread: 0.01, liquidity: 50_000 })
+      }
+    }
+  }
+
+  it('三个互补 outcome 的偏差：不超过 3% 与超过 3%', () => {
+    const within = negRiskDeviation([0.4, 0.3, 0.32])
+    expect(within).toEqual({ expected: 1, actual: 1.02, deviation: 0.020000000000000018 })
+    expect((within?.deviation ?? Number.NaN) > 0.03).toBe(false)
+
+    const over = negRiskDeviation([0.4, 0.3, 0.4])
+    expect(over).toEqual({ expected: 1, actual: 1.1, deviation: 0.10000000000000009 })
+    expect((over?.deviation ?? Number.NaN) > 0.03).toBe(true)
+  })
+
+  it('偏差超过阈值时只折扣置信度，prob/mid 逐字保持原值，并发一条 info 告警', () => {
+    const mids = [0.4, 0.3, 0.4]
+    seedNegRiskEvent(mids)
+    const snapshots = store.snapshotAt(NOW)
+    expect(snapshots.length).toBeGreaterThan(0)
+    expect(snapshots.map((snapshot) => snapshot.mid)).toEqual(mids)
+    expect(
+      snapshots.map((snapshot) => (snapshot.probability.ok ? snapshot.probability.value : null)),
+    ).toEqual(mids)
+    expect(snapshots.every((snapshot) => snapshot.negRiskDeviation === 0.10000000000000009)).toBe(true)
+    expect(snapshots.every((snapshot) => snapshot.negRiskDiscounted)).toBe(true)
+    expect(snapshots.every((snapshot) => snapshot.confidenceMultiplier === 0.9)).toBe(true)
+
+    const alerts = store.negRiskAlerts(NOW)
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0]).toEqual({
+      level: 'info',
+      payload: {
+        kind: 'pm_negrisk_deviation',
+        eventId: 'event-neg-risk',
+        actual: 1.1,
+        deviation: 0.10000000000000009,
+        tolerance: 0.03,
+        tokenIds: ['neg-0', 'neg-1', 'neg-2'],
+      },
+    })
+  })
+
+  it('偏差不超过阈值时不打折，未折扣 multiplier=1 且没有告警', () => {
+    seedNegRiskEvent([0.4, 0.3, 0.32])
+    const snapshots = store.snapshotAt(NOW)
+    expect(snapshots.length).toBeGreaterThan(0)
+    expect(snapshots.every((snapshot) => snapshot.negRiskDeviation === 0.020000000000000018)).toBe(true)
+    expect(snapshots.every((snapshot) => !snapshot.negRiskDiscounted)).toBe(true)
+    expect(snapshots.every((snapshot) => snapshot.confidenceMultiplier === 1)).toBe(true)
+    expect(store.negRiskAlerts(NOW)).toEqual([])
+  })
+
+  it('样本少于两个可见 mid 时返回 null 且不打折', () => {
+    seedNegRiskEvent([0.4, 0.3, 0.4], { quotedIndexes: [0] })
+    const snapshots = store.snapshotAt(NOW)
+    expect(snapshots.length).toBeGreaterThan(0)
+    expect(snapshots.every((snapshot) => snapshot.negRiskDeviation === null)).toBe(true)
+    expect(snapshots.every((snapshot) => !snapshot.negRiskDiscounted)).toBe(true)
+    expect(snapshots.every((snapshot) => snapshot.confidenceMultiplier === 1)).toBe(true)
+    expect(store.negRiskAlerts(NOW)).toEqual([])
+    expect(negRiskDeviation([0.4])).toBeNull()
+    expect(negRiskDeviation([0.4, Number.NaN])).toBeNull()
+  })
+
+  it('非 negRisk 事件不参与分组校验', () => {
+    seedNegRiskEvent([0.4, 0.3, 0.4], { negRisk: false })
+    const snapshots = store.snapshotAt(NOW)
+    expect(snapshots.length).toBeGreaterThan(0)
+    expect(snapshots.every((snapshot) => snapshot.negRiskDeviation === null)).toBe(true)
+    expect(snapshots.every((snapshot) => !snapshot.negRiskDiscounted)).toBe(true)
+    expect(snapshots.every((snapshot) => snapshot.confidenceMultiplier === 1)).toBe(true)
+    expect(store.negRiskAlerts(NOW)).toEqual([])
+  })
+
+  it('置信度折扣系数必须在 (0,1] 内', () => {
+    expect(() => new PmStore(db, { liquidity: LIQUIDITY, negRiskConfidencePenalty: 0 })).toThrow(
+      /negRiskConfidencePenalty/,
+    )
+    expect(() => new PmStore(db, { liquidity: LIQUIDITY, negRiskConfidencePenalty: 1.01 })).toThrow(
+      /negRiskConfidencePenalty/,
+    )
   })
 })
 
