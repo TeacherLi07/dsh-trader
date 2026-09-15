@@ -42,14 +42,31 @@
       name: dsh-trader/plugins/exec
       config:
         mode: paper
-        perOrderCapUsd: 200
-        maxExposureUsd: 2000
-        maxLeverage: 2
-        dailyLossLimitUsd: 100
-        maxDrawdownUsd: 300
-        maxConsecutiveLosses: 4
-        maxSpreadBps: 25
-        maxOpenOrders: 10
+        # ── 风险限额：由**实测权益 24.914 USDT** 推导，不写死"安全数"（plan §6.5 / §12 #17）──
+        # 单笔风险 0.2% → 0.05 USDT；BTC 1h 2×ATR 止损约 0.5% → 名义 ≈10 USDT。
+        # 自洽校验：maxNotionalAtMinStop = 24.914 × 0.002 ÷ 0.005 ≈ 9.97 ≤ perOrderCapUsd=12 ✓
+        # ★ 注意交易所最小下单量（实测）：BTC 永续 1 张 ≈76.4 USDT、ETH ≈24.2、DOGE ≈8.2 ——
+        #   24.9 USDT 在 1× 下几乎只能碰 DOGE；换标的/入金属于需要人决定的阻塞项（§12.2 A）。
+        riskPct: 0.002
+        perOrderCapUsd: 12
+        maxExposureUsd: 24
+        maxLeverage: 1
+        dailyLossLimitUsd: 1.25
+        maxDrawdownUsd: 2.5
+        maxConsecutiveLosses: 3
+        maxSpreadBps: 10
+        maxOpenOrders: 2
+        symbols: [BTC/USDT:USDT, ETH/USDT:USDT]
+        timeframes: [1h]
+        benchmark: BTC/USDT:USDT
+        venue: htx
+        # 组合根：lazy 启动 broker + ports + 启动/周期对账；paper 模式**不触网**
+        reconcileEnabled: true
+        reconcileMs: 300000
+        liveAckOrphans: false     # 第①步语义：只报告不撤单
+        paperInitialEquityQuote: 24.914
+        paperSlippageBps: 5
+        paperFeeBps: 5
         # 密钥只从环境注入，绝不写进仓库/prompt；systemd 用 EnvironmentFile=%h/.dsh/trading.env (0600)
         # 交互式运行：把这两行变量写进 $DSH_HOME/.env（chmod 600），DSH 启动时自动加载
         apiKey: !!js process.env.TRADER_API_KEY
@@ -60,7 +77,7 @@
         preflightVenue: htx
         preflightSymbol: BTC/USDT:USDT
         sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
-        accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑 BTC/USDT:USDT 必须读 swap 账户
+        accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑永续必须读 swap 账户
 
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor
@@ -68,6 +85,13 @@
         deskSessionId: trade-desk
         l2: { provider: deepseek-official, model: deepseek-flash }
         l3: { provider: deepseek-official, model: deepseek-reasoner }
+        # W1 审议窗（plan §2）：00:30Z、每 4h、23:30Z。`at` 为 UTC 时刻，`everyMs` 为间隔。
+        windows:
+          - { id: pre_session, at: '00:30Z' }
+          - { id: midday, everyMs: 14400000 }
+          - { id: post_session, at: '23:30Z' }
+        windowScanMs: 60000
+        wakeTimeoutMs: 300000
         l3MinIntervalMs: 14400000
         dailyBudgetUsd: 5
         heartbeatMs: 15000

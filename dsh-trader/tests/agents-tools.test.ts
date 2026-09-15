@@ -96,6 +96,7 @@ describe('tool registry', () => {
     expect(sideEffects).toEqual([
       'trade_cancel',
       'trade_execute_order',
+      'trade_plan_card',
       'trade_prediction_watch',
       'trade_record_decision',
     ])
@@ -368,5 +369,65 @@ describe('trade_risk_check and trade_cancel', () => {
     expect(before.length).toBeGreaterThan(0)
     await call('trade_cancel', { symbol: SYMBOL })
     expect(await broker.getOpenOrders()).toEqual([])
+  })
+})
+
+describe('trade_plan_card（无人值守回路的入口：判断 → 可执行计划卡）', () => {
+  const validCard = (): string =>
+    JSON.stringify({
+      thesis: 'test: 收盘站上 ema20 则做多',
+      confidence: 0.5,
+      commitments: [
+        {
+          id: 'c1',
+          seq: 1,
+          tf: TF,
+          when: 'position.qty == 0 and bar.close > ema20',
+          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 } },
+        },
+      ],
+      invalidation: [
+        { id: 'inv1', tf: TF, when: 'bar.close < ema20', then: { action: 'close' } },
+      ],
+      forbidden: [],
+      noTrade: false,
+    })
+
+  it('校验通过即落库；同一内容重复提交是幂等 no-op', async () => {
+    const tool = toolByName('trade_plan_card')
+    expect(tool).toBeDefined()
+    const first = (await tool?.execute(
+      { symbol: SYMBOL, windowEndsInHours: 4, cardJson: validCard() },
+      ports,
+    )) as { saved: boolean; status: string; planId: string; contentHash: string }
+    expect(first.saved).toBe(true)
+    expect(first.planId.startsWith('pc-')).toBe(true)
+
+    const second = (await tool?.execute(
+      { symbol: SYMBOL, windowEndsInHours: 4, cardJson: validCard() },
+      ports,
+    )) as { status: string }
+    expect(second.status).toBe('unchanged')
+  })
+
+  it('结构非法（when 语法错 / 缺 action 必需字段）一律拒绝，绝不落库', async () => {
+    const tool = toolByName('trade_plan_card')
+    const bad = JSON.stringify({
+      thesis: 'bad',
+      confidence: 0.5,
+      commitments: [{ id: 'c1', seq: 1, tf: TF, when: 'bar.close >', then: { action: 'open' } }],
+      invalidation: [],
+    })
+    await expect(
+      tool?.execute({ symbol: SYMBOL, windowEndsInHours: 4, cardJson: bad }, ports),
+    ).rejects.toThrow(ToolArgumentError)
+    expect(ports.plans.active(SYMBOL)).toBeUndefined()
+  })
+
+  it('cardJson 不是 JSON 对象时拒绝（不猜）', async () => {
+    const tool = toolByName('trade_plan_card')
+    await expect(
+      tool?.execute({ symbol: SYMBOL, windowEndsInHours: 4, cardJson: '[]' }, ports),
+    ).rejects.toThrow(ToolArgumentError)
   })
 })

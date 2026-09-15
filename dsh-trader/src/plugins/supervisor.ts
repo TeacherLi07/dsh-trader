@@ -1,23 +1,37 @@
 /**
- * trade-supervisor —— 循环的发动机：会话恢复 + followup 投递 + 心跳。
+ * trade-supervisor —— 无人值守的发动机：W1 窗口唤醒 + 心跳。
  *
- * 状态：骨架（T0.1）。T1.x 实现 ctx.agents.resume() / agent.followup() 回路。
+ * 职责边界（plan §2）：
+ *   · **W1**：审议窗到点 ⇒ 用 `notice` 唤醒 desk agent，让它产出/刷新计划卡；
+ *   · **机械执行**不在本插件：由 `live-engine` 在每根已收盘 bar 上匹配计划卡并执行（market 插件驱动）；
+ *   · **W2/W3** 的路由是纯函数（`supervisor/windows.ts` 的 `decideWake`），预算/限流都走代码。
  *
- * ⚠️ 心跳的撤单动作不能只放在进程内：进程死亡时 HeartbeatGuard 自己也死了（plan §6.3）。
- * 本插件只负责写心跳 + 检测内部卡死；真正的撤单由进程外 watchdog 或交易所原生
- * dead-man 机制执行。
+ * ⚠️ 两条实测约束（plan §2 ★、`plugins/probe.ts`）：
+ *   1. **不能在 `apply` 期间调用 `ctx.agents.create/resume`** —— agent factory 由 `dsh-agent-loop`
+ *      注册，若在 apply 里 await 等待会死锁 plugin loader。这里只在**窗口触发时**（定时器回调，
+ *      早已脱离 apply）才 attach。
+ *   2. 心跳的撤单动作不能只放在进程内：进程死亡时本插件自己也死了；真正的撤单由**进程外** watchdog
+ *      或交易所原生 dead-man 执行（plan §6.3）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent' // 载入 cordis Events/Context 的模块增强
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
 import { dayKey, PriceTableStore, priceTableStaleAlert } from '../cost-ledger.js'
 import { getDatabase } from '../db/runtime.js'
 import { Statements } from '../db/statements.js'
 import { DecisionJournal } from '../exec/journal.js'
+import type { TradePorts } from '../exec/ports.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
+import { dueWindows, validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
+import { getExecPorts } from './exec.js'
 
 export const name = 'trade-supervisor'
+/** 需要 agents 服务才能唤醒 desk；心跳与行情不依赖它。 */
+export const inject = ['agents']
 
 export const Config = z.object({
   deskSessionId: z.string().required(),
@@ -26,6 +40,9 @@ export const Config = z.object({
   l3MinIntervalMs: z.number(),
   dailyBudgetUsd: z.number(),
   heartbeatMs: z.number(),
+  windows: z.array(z.object({ id: z.string(), at: z.string(), everyMs: z.number() })),
+  windowScanMs: z.number(),
+  wakeTimeoutMs: z.number(),
 })
 
 export interface SupervisorConfig {
@@ -35,12 +52,58 @@ export interface SupervisorConfig {
   l3MinIntervalMs?: number
   dailyBudgetUsd?: number
   heartbeatMs?: number
+  /** W1 审议窗；`at` 为 UTC 时刻，`everyMs` 为间隔（`at` 优先）。 */
+  windows?: readonly WindowSpec[]
+  windowScanMs?: number
+  wakeTimeoutMs?: number
+}
+
+const DEFAULT_WINDOWS: readonly WindowSpec[] = [
+  { id: 'pre_session', at: '00:30Z' },
+  { id: 'midday', everyMs: 14_400_000 },
+  { id: 'post_session', at: '23:30Z' },
+]
+
+const MAX_NOTICE_SUMMARY = 120
+
+/**
+ * W1 事件包 + notice 文案（plan §5.1：`summary` ≤ 120 字符硬上限）。
+ *
+ * 数字只用于**理解**，不用于计算：真正的仓位/权益由工具在下单前重新向交易所重取（§6.2）。
+ */
+export function buildWindowNotice(
+  fire: WindowFire,
+  ports: TradePorts | undefined,
+): { readonly summary: string; readonly text: string } {
+  const lines: string[] = [`W1 审议窗 ${fire.id}（${new Date(fire.fireTs).toISOString()}）。`]
+  if (ports === undefined) {
+    lines.push('执行组合根尚未就绪：本轮只做判断，不要调用下单类工具。')
+  } else {
+    try {
+      const active = ports.plans.active(ports.symbols[0] ?? '')
+      lines.push(
+        `标的 ${ports.symbols.join(', ')}；时间框 ${ports.timeframes.join(', ')}；` +
+          `active 计划卡 ${active === undefined ? '无' : active.planId}。`,
+      )
+    } catch (error) {
+      lines.push(`读取本地计划卡失败：${String(error)}。`)
+    }
+  }
+  lines.push(
+    '请按你的角色判断本窗口是否有值得执行的机会：',
+    '1) 用只读工具核对行情/特征/持仓（不要相信上下文里记住的数字）；',
+    '2) 若判断可执行，调用 trade_plan_card 提交计划卡（when 必须是 §3.2 词表内可求值的布尔表达式；数量/价位由代码推导）；',
+    '3) 若判断不值得做，调用 trade_record_decision 记 no_trade 并说明理由 —— 这是合法且常见的输出；',
+    '4) 拿不准时不要硬凑方向。',
+  )
+  return {
+    summary: `W1 ${fire.id}: 交易窗口到点，请复核并决定是否更新计划卡`.slice(0, MAX_NOTICE_SUMMARY),
+    text: lines.join('\n'),
+  }
 }
 
 export function apply(ctx: Context, config: SupervisorConfig): void {
-  // TODO(T1.x): ctx.agents.resume({ resumeSessionId: config.deskSessionId, setup }) + agent.followup(pack)
-  // TODO(T1.x): W1 窗口定时器；W2/W3 仅在限流与预算允许时唤醒（无新信息不唤醒 → 零 token）。
-  // 心跳由本进程写；撤单由**进程外** watchdog 执行（进程死亡时本进程自己也死了，plan §6.3）。
+  const logger = ctx.logger('trade-supervisor')
   const clock = systemClock()
   const database = getDatabase()
   const journal = new DecisionJournal(database)
@@ -79,12 +142,125 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     checkPriceTableAge()
   }, heartbeatMs)
 
+  // ── W1 审议窗 ───────────────────────────────────────────────────────────────
+  const specs = config.windows ?? DEFAULT_WINDOWS
+  for (const spec of specs) {
+    const errors = validateWindowSpec(spec)
+    if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
+  }
+
+  let deskAgent: Agent | undefined
+  let attaching: Promise<Agent | undefined> | undefined
+  let busy = false
+
+  const ensureDeskAgent = async (): Promise<Agent | undefined> => {
+    if (deskAgent !== undefined) return deskAgent
+    if (attaching !== undefined) return attaching
+    const agentOptions: { provider?: string; model?: string } = {}
+    if (config.l3?.provider !== undefined) agentOptions.provider = config.l3.provider
+    if (config.l3?.model !== undefined) agentOptions.model = config.l3.model
+    attaching = (async () => {
+      // 首次 resume 失败（会话还不存在）即 create；两次都失败就本轮放弃并告警，不阻塞心跳。
+      try {
+        const handle = await ctx.agents.resume({
+          resumeSessionId: config.deskSessionId as never,
+          agentOptions,
+        })
+        deskAgent = handle.agent
+        return handle.agent
+      } catch (resumeError) {
+        try {
+          const handle = await ctx.agents.create({
+            sessionId: config.deskSessionId as never,
+            agentOptions,
+          })
+          deskAgent = handle.agent
+          return handle.agent
+        } catch (createError) {
+          logger.error(`desk agent attach 失败：resume=${String(resumeError)} create=${String(createError)}`)
+          return undefined
+        }
+      }
+    })()
+    try {
+      return await attaching
+    } finally {
+      attaching = undefined
+    }
+  }
+
+  const driveWindow = async (fire: WindowFire): Promise<void> => {
+    const now = clock.now()
+    if (busy) {
+      // agent 忙时不打断，只入队/留痕（plan §2：仅 P0 持仓风险允许 steer）
+      journal.appendAudit({
+        actor: 'system',
+        kind: 'w1_skipped_busy',
+        payload: { windowId: fire.id, fireTs: fire.fireTs },
+        ts: now,
+      })
+      return
+    }
+    busy = true
+    try {
+      const agent = await ensureDeskAgent()
+      if (agent === undefined) {
+        journal.appendAudit({
+          actor: 'system',
+          kind: 'w1_wake_failed',
+          payload: { windowId: fire.id, fireTs: fire.fireTs, reason: 'desk agent 不可用' },
+          ts: clock.now(),
+        })
+        return
+      }
+      const { summary, text } = buildWindowNotice(fire, getExecPorts())
+      agent.followup(
+        createUserMessage({
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin', plugin: 'trade-supervisor', form: 'notice', summary },
+        }),
+      )
+      const timeoutMs = config.wakeTimeoutMs ?? 300_000
+      await Promise.race([
+        agent.whenIdle(),
+        new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+      ])
+      journal.appendAudit({
+        actor: 'system',
+        kind: 'w1_wake',
+        payload: { windowId: fire.id, fireTs: fire.fireTs, dedupKey: windowDedupKey(fire.id, fire.fireTs) },
+        ts: clock.now(),
+      })
+    } catch (error) {
+      logger.error(`W1 唤醒失败：${String(error)}`)
+      journal.appendAudit({
+        actor: 'system',
+        kind: 'w1_wake_failed',
+        payload: { windowId: fire.id, fireTs: fire.fireTs, reason: String(error) },
+        ts: clock.now(),
+      })
+    } finally {
+      busy = false
+    }
+  }
+
+  // 扫描边界持久化在内存即可：重启后的第一轮以"启动时刻"为起点，历史窗口不补跑
+  // （补跑会一口气唤醒多次，且那些时刻的市场早已不存在 —— 判断必须发生在敞口打开之前）。
+  let lastScanAt = clock.now()
+  const windowScanMs = config.windowScanMs ?? 60_000
+  const stopWindows = clock.setInterval(() => {
+    const now = clock.now()
+    const fires = dueWindows([...specs], lastScanAt, now)
+    lastScanAt = now
+    for (const fire of fires) void driveWindow(fire)
+  }, windowScanMs)
+
   ctx.effect(
     () => () => {
       stopHeartbeat()
-      /* T1.x: 清理定时器 / 解除会话绑定 */
+      stopWindows()
+      /* 解除会话绑定由 agent handle 的 owner（本插件的 fiber）负责 */
     },
     'trade.supervisor.close',
   )
-  void config
 }

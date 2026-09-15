@@ -28,6 +28,8 @@ export const SIDE_EFFECT_TOOLS = [
   'trade_cancel',
   'trade_record_decision',
   'trade_prediction_watch',
+  /** 写 plan_cards（本窗口唯一可被机械执行的判断），因此是副作用工具，只给裁决者。 */
+  'trade_plan_card',
 ] as const
 
 /** plan §11.4 的完整目标工具箱（含尚未实现的）。 */
@@ -48,6 +50,7 @@ export const KNOWN_TOOL_NAMES = [
   'trade_execute_order',
   'trade_cancel',
   'trade_record_decision',
+  'trade_plan_card',
   'trade_workflow_run',
   'trade_prediction_watch',
   'trade_review',
@@ -106,6 +109,7 @@ export const ROLE_SPECS: Readonly<Record<RoleName, RoleSpec>> = {
       'trade_execute_order',
       'trade_cancel',
       'trade_record_decision',
+      'trade_plan_card',
       'trade_workflow_run',
       'trade_prediction_watch',
     ],

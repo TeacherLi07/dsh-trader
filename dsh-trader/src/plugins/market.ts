@@ -24,7 +24,9 @@ import {
 } from '../market/features.js'
 import { createMarketRuntime, type MarketRuntime } from '../market/runtime.js'
 import type { Candle } from '../market/types.js'
+import { createLiveEngine, type LiveEngine } from '../exec/live-engine.js'
 import { getTriggerRuntime } from '../trigger/runtime.js'
+import { getExecPorts } from './exec.js'
 
 export const name = 'trade-market'
 
@@ -59,7 +61,10 @@ async function loadCcxt(): Promise<CcxtModule> {
 }
 
 export function apply(ctx: Context, config: MarketConfig): void {
+  const logger = ctx.logger('trade-market')
   let runtime: MarketRuntime | undefined
+  /** 懒建：组合根（trade-exec）可能在 market 之后才 apply，因此每根 bar 现查端口。 */
+  let liveEngine: LiveEngine | undefined
   let disposed = false
 
   ctx.effect(
@@ -109,6 +114,48 @@ export function apply(ctx: Context, config: MarketConfig): void {
             barTs: candle.openTime,
             context: createFeatureContext(snapshot),
           })
+          // ★ 机械执行（无人值守的核心一环）：每根已收盘 bar 匹配 active 计划卡并执行。
+          // 与回放共用同一份 execute-action；组合根未就绪时跳过（不静默假装执行）。
+          const ports = getExecPorts()
+          if (ports === undefined) return
+          // paper 模式的保护单是"挂单"，必须靠 bar 推进才可能触发；真实 broker 没有 onBar
+          // （它的止损在交易所侧），因此这里是可选的、不改变实盘语义。
+          const paperLike = ports.broker as typeof ports.broker & {
+            onBar?: (symbol: string, candle: { high: number; low: number; close: number }) => unknown
+          }
+          paperLike.onBar?.(candle.symbol, {
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+          })
+          liveEngine ??= createLiveEngine({
+            journal: ports.journal,
+            plans: ports.plans,
+            bars: ports.bars,
+            features: ports.features,
+            broker: ports.broker,
+            clock: ports.clock,
+            mode: ports.mode,
+            limits: ports.limits,
+            riskPct: ports.riskPct,
+          })
+          void liveEngine
+            .onClosedBar({
+              symbol: candle.symbol,
+              timeframe: candle.timeframe,
+              barTs: candle.openTime,
+            })
+            .then((outcome) => {
+              if (outcome.kind === 'noop') return
+              logger.info(
+                `live-engine ${candle.symbol} ${candle.timeframe} ${candle.openTime}: ` +
+                  `${outcome.kind}${outcome.reason === undefined ? '' : `（${outcome.reason}）`}`,
+              )
+            })
+            .catch((error) => {
+              // 单根 bar 执行失败不得让行情循环崩溃；如实告警（审计优先，不擦掉失败）
+              logger.error(`live-engine 执行失败：${String(error)}`)
+            })
         },
         onError: () => {
           // TODO(OBS/T1.6): 写 audit_events + 接告警通道（plan §10.3）。

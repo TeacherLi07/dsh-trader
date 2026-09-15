@@ -17,7 +17,14 @@ import { computeSize, stopPriceFor, takeProfitFor } from '../exec/sizing.js'
 import type { BarArchive } from '../market/archive.js'
 import type { FeatureArchive } from '../market/feature-archive.js'
 import { regimeOf } from '../market/regime.js'
-import { DECISION_ACTIONS, TIMEFRAMES, type DecisionAction, type StopSpec } from '../plan/schema.js'
+import {
+  DECISION_ACTIONS,
+  TIMEFRAMES,
+  computeContentHash,
+  validatePlanCard,
+  type DecisionAction,
+  type StopSpec,
+} from '../plan/schema.js'
 import type { PlanStore } from '../plan/store.js'
 import { recallLessons } from '../memory/recall.js'
 import { horizonMsForTimeframe } from '../memory/settle.js'
@@ -905,6 +912,86 @@ const tradePredictionWatch: ToolDefinition = {
   },
 }
 
+/**
+ * 计划卡落地工具（plan §3.1）—— 把模型的"判断与方法"变成一张**可判定、有期限、幂等、不可事后改写**的卡。
+ *
+ * 为什么必须有它：`live-engine` 每根已收盘 bar 只能执行**已存在**的计划卡；没有这个工具，
+ * 无人值守回路就产不出任何卡，机械执行永远匹配不到东西（= 系统看起来在跑，但一笔都不会发生）。
+ *
+ * 卡片以 `cardJson` 传入（结构化 JSON），代码负责：补齐 createdAt/windowEndsAt/contentHash/planId、
+ * 用 `validatePlanCard` 做结构+语义校验（失败即拒，绝不回退成散文再正则解析）、再 `PlanStore.save`。
+ * 数量/价位仍由执行层推导（§3.4），这里不接受 qty。
+ */
+const tradePlanCard: ToolDefinition = {
+  name: 'trade_plan_card',
+  description:
+    '提交/更新本窗口的计划卡（有副作用，仅裁决者）。计划卡是本窗口唯一可被机械执行的判断：' +
+    'commitments/invalidation 的 when 必须是 §3.2 词表内、能被代码求值的布尔表达式；' +
+    '同一个标的新卡会取代旧卡（旧卡留档），因此这是"提高判断质量"的正常路径，不是错误。',
+  sideEffect: true,
+  parameters: {
+    symbol: { type: 'string', required: true },
+    windowEndsInHours: { type: 'number', required: true, description: '本卡有效期（小时），到期即失效' },
+    cardJson: {
+      type: 'string',
+      required: true,
+      description:
+        'JSON：{thesis, confidence, keyLevels?, invalidation:[{id,tf,when,then}], ' +
+        'commitments:[{id,seq,tf,when,then,...}], forbidden?, noTrade?}；when 用 §3.2 DSL',
+    },
+    planId: { type: 'string', description: '省略时按 symbol+时间+内容指纹生成' },
+  },
+  async execute(args, ports) {
+    const symbol = requireString(args, 'symbol')
+    const windowEndsInHours = requireNumber(args, 'windowEndsInHours')
+    if (!(windowEndsInHours > 0) || windowEndsInHours > 24 * 14) {
+      throw new ToolArgumentError(`windowEndsInHours 必须在 (0, 336] 内，收到 ${windowEndsInHours}`)
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(requireString(args, 'cardJson'))
+    } catch (error) {
+      throw new ToolArgumentError(`cardJson 不是合法 JSON：${(error as Error).message}`)
+    }
+    if (!isRecord(parsed)) throw new ToolArgumentError('cardJson 必须是 JSON 对象')
+
+    const createdAt = ports.clock.now()
+    const windowEndsAt = createdAt + windowEndsInHours * 3_600_000
+    // 模型只提供判断内容；身份/时间/哈希一律由代码补齐，避免模型自造幂等根。
+    const base = {
+      ...parsed,
+      symbol,
+      createdAt,
+      windowEndsAt,
+      author: 'model' as const,
+      authority: 'model' as const,
+    }
+    // planId 的指纹**不含 planId 自身**（否则自指）；最终 contentHash 再对含 planId 的完整内容求一次。
+    // 这样 PlanStore.save 的"contentHash 必须与内容一致"校验才会通过，且相同判断重放得到同一 id。
+    const idHash = computeContentHash(base as Parameters<typeof computeContentHash>[0])
+    const planId =
+      optionalString(args, 'planId') ??
+      `pc-${symbol.replace(/[^A-Za-z0-9]/g, '').toLowerCase()}-${createdAt}-${idHash.slice(7, 15)}`
+    const finalCard = { ...base, planId }
+    const contentHash = computeContentHash(finalCard as Parameters<typeof computeContentHash>[0])
+    const validation = validatePlanCard({ ...finalCard, contentHash })
+    if (!validation.ok) {
+      throw new ToolArgumentError(`计划卡校验失败：${validation.errors.join('；')}`)
+    }
+
+    const saved = ports.plans.save(validation.card, createdAt)
+    return {
+      saved: true,
+      status: saved.status,
+      planId: saved.planId,
+      version: saved.version,
+      contentHash,
+      windowEndsAt,
+      note: '已广播给 live-engine：下一根已收盘 bar 起按 invalidation → commitments 优先级执行',
+    }
+  },
+}
+
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tradeMarket,
   tradeRegime,
@@ -917,6 +1004,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tradeExecuteOrder,
   tradeCancel,
   tradeRecordDecision,
+  tradePlanCard,
   tradePredictions,
   tradePredictionWatch,
 ]
