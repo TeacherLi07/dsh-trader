@@ -651,6 +651,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | P1.5 通道闸门 | `node scripts/ab-gate.mjs htx BTC/USDT 1h 92` | 判定：关闭 W2/W3（`docs/p1.5-gate-run-2026-09-14.md`） |
 | P2 ①②④ 故障注入 | `node scripts/fault-injection.mjs /tmp/p2-fault.json` | 50 轮中 38 次真 SIGKILL；孤儿挂单 0 / 重复成交 0；同一 `clientOrderId` 提交 10 次→成交 1；保护单在"模型停摆"下仍触发（`docs/p2-fault-injection-2026-09-15.md`） |
 | P2 ③ 外部 watchdog | `node scripts/watchdog-check.mjs /tmp/p2-watchdog.json` | 8/8：真实 `SIGSTOP` → stale → 撤单 → 挂单清空 → halted 落库 → 幂等（`docs/p2-watchdog-2026-09-15.md`） |
+| §12.2 A 第①步 HTX 只读预检 | `node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs htx BTC/USDT:USDT` | exit 0：私有端点认证成功、读到余额、交易所空仓空挂单；`executedActions=[]`。**对账为平凡一致**（两边都 0），非空验证到的是只读链路（`docs/htx-preflight-2026-09-15.md`） |
 
 **非空跑纪律**（这三条是被真实踩坑逼出来的，永久保留）：① 结算成功率必须报**分母**（机械执行路径曾不登记 `reflection_due_at` ⇒ "100%" 是在 **0 个样本**上通过的）；② 预测市场 novelty 检查必须有 `pm_signals_exercised`（样本曾全是日变化 ≈0.001 的远期政治盘 ⇒ 规则不触发却"通过"）；③ 验收阈值**从真实数据推导**，不写死（写死 3% 时同一脚本会随行情飘）。
 
@@ -733,7 +734,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 
 | # | 事项 | 需要什么 | 现状与替代路径 |
 |---|---|---|---|
-| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已接线并可一条命令跑**：`node scripts/htx-preflight.mjs`（只读对账，`executedActions` 恒为空；操作手册与实测坑见 `docs/htx-credentials.md`）。三步只欠 key |
+| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已实测通过（2026-09-15）**：`node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs` → exit 0，私有端点认证成功、账户空仓空挂单、`executedActions=[]`（只读保证成立）。★ 该次"对账一致"是**平凡**的（两边都是 0），非空验证到的是只读链路可用；账户余额不足 1 USDT，进入第③步前需入金。手册见 `docs/htx-credentials.md`，实测记录见 `docs/htx-preflight-2026-09-15.md`。**第②③步待做** |
 | B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |
