@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SUGGESTED_LIMITS } from '../src/config.js'
+import { EXAMPLE_LIMITS } from '../src/config.js'
 import type { AccountSnapshot, OrderRequest } from '../src/exec/broker.js'
 import { validateIntent, type GatePolicy } from '../src/exec/gate.js'
 
@@ -30,7 +30,7 @@ const intent = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 
 const policy = (over: Partial<GatePolicy> = {}): GatePolicy => ({
   mode: 'paper',
-  limits: SUGGESTED_LIMITS,
+  limits: EXAMPLE_LIMITS,
   tradingWindowOpen: true,
   duplicateDecision: false,
   paperVenue: 'paper',
@@ -87,7 +87,7 @@ describe('validateIntent (hard gate)', () => {
       totalExposureUsd: 99_999,
     }
     const tight = policy({
-      limits: { ...SUGGESTED_LIMITS, dailyLossLimitUsd: 1, maxSpreadBps: 1 },
+      limits: { ...EXAMPLE_LIMITS, dailyLossLimitUsd: 1, maxSpreadBps: 1 },
       tradingWindowOpen: false,
     })
     expect(validateIntent(reduce, stressed, tight)).toEqual({ kind: 'allow' })

@@ -24,7 +24,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import ccxt from 'ccxt'
 import { ReplayClock, systemClock } from '../lib/clock.js'
-import { SUGGESTED_LIMITS } from '../lib/config.js'
+import { EXAMPLE_LIMITS } from '../lib/config.js'
 import { migrate } from '../lib/db/schema.js'
 import { PaperBroker } from '../lib/exec/paper.js'
 import { replay } from '../lib/exec/replay.js'
@@ -50,7 +50,7 @@ const [venue = 'htx', symbol = 'BTC/USDT', timeframe = '1h', days = '90', outPat
   process.argv.slice(2)
 
 const RISK_PCT = 0.002
-const LIMITS = { ...SUGGESTED_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
+const LIMITS = { ...EXAMPLE_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
 const BARS_PER_DAY = 24
 const THRESHOLDS = { ...DEFAULT_GATE_THRESHOLDS, minBars: 90 * BARS_PER_DAY }
 

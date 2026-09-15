@@ -12,6 +12,14 @@
 
 import type { AnalystReport, JudgmentPack } from './types.js'
 
+/** 提示词版本必须可追溯，才能回答一条决策使用的是哪版提示词。 */
+export const PROMPT_VERSION = 'v1'
+
+/** 给宪法正文加上显式版本；模型看到的版本也会被上下文组装器纳入 C1 指纹。 */
+export function constitutionWithVersion(base: string, version = PROMPT_VERSION): string {
+  return `${base}\n\n提示词版本：${version}`
+}
+
 export const ANALYST_ROLES = ['market', 'flow', 'news', 'onchain'] as const
 export type AnalystRole = (typeof ANALYST_ROLES)[number]
 

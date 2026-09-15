@@ -11,6 +11,7 @@ import {
   type ContextInput,
 } from '../src/agents/context.js'
 import { ContextSnapshotStore } from '../src/agents/context-store.js'
+import { PROMPT_VERSION } from '../src/agents/prompts.js'
 
 const NOW = 1_700_000_000_000
 
@@ -65,6 +66,18 @@ describe('assembleContext', () => {
     expect(reordered.ctxHash).toBe(a.ctxHash)
   })
 
+  it('提示词版本进入 C1 与总哈希，版本变化会标记 C1', () => {
+    const first = assembleContext(input({ promptVersion: 'v1' }))
+    const same = assembleContext(input({ promptVersion: 'v1' }))
+    const changed = assembleContext(input({ promptVersion: 'v2' }), first.partHashes)
+
+    expect(first.ctxHash).toBe(same.ctxHash)
+    expect(changed.ctxHash).not.toBe(first.ctxHash)
+    expect(changed.partHashes.C1).not.toBe(first.partHashes.C1)
+    expect(changed.changedParts).toContain('C1')
+    expect(changed.blocks.find((block) => block.kind === 'C1')?.text).toContain('v2')
+  })
+
   it('changedParts 精确指出变化的类别', () => {
     const first = assembleContext(input())
     expect(first.changedParts).toEqual(['C1', 'C2', 'C3', 'C4', 'C5', 'C6'])
@@ -91,8 +104,10 @@ describe('assembleContext', () => {
     expect(context.overflow).toContain('C1')
     const c1 = context.blocks.find((block) => block.kind === 'C1')
     expect(c1?.compressible).toBe(false)
-    // canonicalJson 会加引号，因此长度略大于原文；关键是**没有被截断**
-    expect(JSON.parse(c1?.text ?? '""')).toHaveLength(9_000)
+    // C1 现在是带版本的 canonical 对象；关键是宪法正文仍然**没有被截断**
+    const parsed = JSON.parse(c1?.text ?? '{}') as { constitution?: string; version?: string }
+    expect(parsed.version).toBe(PROMPT_VERSION)
+    expect(parsed.constitution?.startsWith('x'.repeat(9_000))).toBe(true)
   })
 
   it('只有 C5 可压缩：摘要后仍保留精确数值与重取指路', () => {

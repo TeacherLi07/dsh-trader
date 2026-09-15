@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
-  SUGGESTED_LIMITS,
+  EXAMPLE_LIMITS,
   StartupParamsError,
+  checkLimitsConsistency,
   describeStartup,
   resolveStartupParams,
 } from '../src/config.js'
@@ -11,7 +12,7 @@ const complete = {
   riskPct: 0.01,
   symbols: ['BTC/USDT:USDT'],
   benchmark: 'BTC/USDT:USDT',
-  limits: SUGGESTED_LIMITS,
+  limits: EXAMPLE_LIMITS,
 }
 
 describe('startup params', () => {
@@ -36,6 +37,65 @@ describe('startup params', () => {
     expect(params.waiver).toBe(false)
     expect(params.decidedAt).toBe(1000)
     expect(Object.isFrozen(params)).toBe(true)
+  })
+
+  it('rejects inconsistent limits and reports both available fixes', () => {
+    expect(() => resolveStartupParams({ ...complete, equityQuoteUsd: 10_000 }, 1000)).toThrow(StartupParamsError)
+    try {
+      resolveStartupParams({ ...complete, equityQuoteUsd: 10_000 }, 1000)
+    } catch (error) {
+      expect(error).toBeInstanceOf(StartupParamsError)
+      const errors = (error as StartupParamsError).errors
+      expect(errors.length).toBeGreaterThan(0)
+      expect(errors.join('\n')).toContain('调低 riskPct')
+      expect(errors.join('\n')).toContain('调高 perOrderCapUsd')
+      expect(errors.join('\n')).toContain('180')
+      expect(errors.join('\n')).toContain('0.2%')
+    }
+  })
+
+  it('accepts a self-consistent parameter set when equity is supplied', () => {
+    const params = resolveStartupParams(
+      { ...complete, equityQuoteUsd: 10_000, limits: { ...EXAMPLE_LIMITS, perOrderCapUsd: 25_000 } },
+      1000,
+    )
+    expect(params.limits?.perOrderCapUsd).toBe(25_000)
+  })
+
+  it('keeps the example limits explicit and frozen', () => {
+    expect(EXAMPLE_LIMITS).toBeDefined()
+    expect(Object.isFrozen(EXAMPLE_LIMITS)).toBe(true)
+  })
+
+  it('returns errors instead of calculating with invalid consistency inputs', () => {
+    const invalidValues = [0, -1, Number.NaN]
+    expect(invalidValues.length).toBeGreaterThan(0)
+    for (const value of invalidValues) {
+      expect(
+        checkLimitsConsistency({
+          equityQuoteUsd: value,
+          riskPct: 0.002,
+          perOrderCapUsd: 500,
+          minStopDistancePct: 0.005,
+        }),
+      ).toEqual(expect.any(String))
+      expect(
+        checkLimitsConsistency({
+          equityQuoteUsd: 10_000,
+          riskPct: value,
+          perOrderCapUsd: 500,
+          minStopDistancePct: 0.005,
+        }),
+      ).toEqual(expect.any(String))
+      expect(
+        checkLimitsConsistency({
+          equityQuoteUsd: 10_000,
+          riskPct: 0.002,
+          perOrderCapUsd: 500,
+          minStopDistancePct: value,
+        }),
+      ).toEqual(expect.any(String))
+    }
   })
 
   it('treats an explicit waiver as first-class and keeps it continuously visible', () => {

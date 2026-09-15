@@ -19,6 +19,7 @@
  */
 
 import { canonicalJson, sha256Hex } from '../util/canonical.js'
+import { constitutionWithVersion, PROMPT_VERSION } from './prompts.js'
 
 export const CONTEXT_KINDS = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6'] as const
 export type ContextKind = (typeof CONTEXT_KINDS)[number]
@@ -62,6 +63,8 @@ export interface ContextInput {
   readonly commitments: readonly unknown[]
   readonly episodes: readonly unknown[]
   readonly budgets?: Partial<Record<ContextKind, number>>
+  /** C1 使用的提示词版本；为什么需要：版本变化必须进入哈希，省略时沿用当前 PROMPT_VERSION。 */
+  readonly promptVersion?: string
 }
 
 export type PartHashes = Readonly<Partial<Record<ContextKind, string>>>
@@ -94,6 +97,11 @@ function partOf(value: unknown): { text: string; hash: string } {
   return { text, hash: `sha256:${sha256Hex(text)}` }
 }
 
+/** C1 的 canonical 文本同时是模型输入和哈希输入，避免版本只进指纹而未进宪法正文。 */
+function constitutionPart(base: string, version: string): { text: string; hash: string } {
+  return partOf({ version, constitution: constitutionWithVersion(base, version) })
+}
+
 /** C5 摘要：保留精确数值与 id，只截断散文。 */
 function summarizeEpisodes(episodes: readonly unknown[], budget: number): string {
   const full = canonicalJson(episodes)
@@ -117,7 +125,7 @@ function summarizeEpisodes(episodes: readonly unknown[], budget: number): string
 export function assembleContext(input: ContextInput, previous?: PartHashes): AssembledContext {
   const budgets = { ...DEFAULT_BLOCK_BUDGETS, ...(input.budgets ?? {}) }
 
-  const c1 = partOf(input.constitution)
+  const c1 = constitutionPart(input.constitution, input.promptVersion ?? PROMPT_VERSION)
   const c2 = partOf(input.configuration)
   const c3 = partOf(input.state)
   const c4 = partOf(input.commitments)

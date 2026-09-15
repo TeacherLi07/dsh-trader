@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
-import { SUGGESTED_LIMITS, type RiskLimits } from '../src/config.js'
+import { EXAMPLE_LIMITS, type RiskLimits } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
 import { BarArchive } from '../src/market/archive.js'
 import { FeatureArchive } from '../src/market/feature-archive.js'
@@ -26,7 +26,7 @@ const HOUR = 3_600_000
 const START = 1_700_000_000_000
 
 const LIMITS: RiskLimits = {
-  ...SUGGESTED_LIMITS,
+  ...EXAMPLE_LIMITS,
   perOrderCapUsd: 5_000,
   maxExposureUsd: 50_000,
   maxOpenOrders: 50,

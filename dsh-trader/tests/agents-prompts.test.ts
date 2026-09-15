@@ -11,7 +11,9 @@ import {
   RISK_ROLES,
   analystPrompt,
   buildWorkflowPrompts,
+  constitutionWithVersion,
   judgePrompt,
+  PROMPT_VERSION,
   renderPrompt,
 } from '../src/agents/prompts.js'
 import type { JudgmentPackInput } from '../src/agents/types.js'
@@ -24,6 +26,16 @@ const pack = freezeContextPack({
   deskState: { equityQuote: 10_000, positions: [], openOrders: 0 },
   lessons: [],
 } satisfies JudgmentPackInput)
+
+describe('constitution versioning', () => {
+  it('writes the prompt version into the constitution text', () => {
+    const current = constitutionWithVersion('纪律：不许逆势加仓。')
+    const other = constitutionWithVersion('纪律：不许逆势加仓。', 'v2')
+    expect(current).toContain(PROMPT_VERSION)
+    expect(other).toContain('v2')
+    expect(other).not.toBe(current)
+  })
+})
 
 describe('renderPrompt', () => {
   it('appends every piece of material as JSON after the fixed instructions', () => {

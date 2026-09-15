@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
-import { SUGGESTED_LIMITS, type RiskLimits } from '../src/config.js'
+import { EXAMPLE_LIMITS, type RiskLimits } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
 import { BarArchive } from '../src/market/archive.js'
 import { normalizeCandles } from '../src/market/normalize.js'
@@ -21,7 +21,7 @@ const START = 1_700_000_000_000
 const BARS = 720 // 30 天 × 24 根 1h
 
 /** 起始参数在启动时提供（plan §6.5）；这里放宽单笔上限，让开仓真的能成交。 */
-const LIMITS: RiskLimits = { ...SUGGESTED_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
+const LIMITS: RiskLimits = { ...EXAMPLE_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
 
 interface Harness {
   readonly db: Database.Database
@@ -172,7 +172,10 @@ describe('T0.8b acceptance: deterministic replay (plan §10 P0 ②③)', () => {
         symbol: SYMBOL,
         createdAt: START,
         windowEndsAt: START + BARS * HOUR,
-        invalidation: [{ id: 'inv-adx', tf: TF, when: 'adx14 > 25', then: { action: 'close' } }],
+        // ★ T2.4 之后 `adx14` 已是可实现指标（回放会算出真实值），因此"不可求值"的样本
+        // 改用 `funding.rate`：它在词汇表内，但回放没有注入衍生品数据 ⇒ 取值缺失 ⇒ UNCOVERED。
+        // 这正是 fail-closed 要守的语义：**已实现但当时无数据**也不许静默当成 false。
+        invalidation: [{ id: 'inv-funding', tf: TF, when: 'funding.rate > 0.0001', then: { action: 'close' } }],
         commitments: [],
       }),
       START,

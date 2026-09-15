@@ -45,6 +45,10 @@ export interface StartupParamsInput {
   limits?: Partial<RiskLimits>
   waiver?: boolean
   decidedAt?: number
+  /** 账户报价币种权益；传入后才启用启动期自洽校验，省略以保持旧调用方行为。 */
+  equityQuoteUsd?: number
+  /** 最小止损距离的小数比例；用于自洽校验，省略时采用 BTC 1h 2×ATR 的实测中位值 0.005。 */
+  minStopDistancePct?: number
 }
 
 export class StartupParamsError extends Error {
@@ -56,8 +60,8 @@ export class StartupParamsError extends Error {
   }
 }
 
-/** 引导用户采纳的建议参数 —— 只在 UI/文档里展示，**绝不**作为静默默认值套用。 */
-export const SUGGESTED_LIMITS: RiskLimits = Object.freeze({
+/** **示例，非建议**；系统不替用户猜一个安全的数，也不会把示例静默套用。 */
+export const EXAMPLE_LIMITS: RiskLimits = Object.freeze({
   perOrderCapUsd: 200,
   maxExposureUsd: 2000,
   maxLeverage: 2,
@@ -83,6 +87,55 @@ function positive(value: unknown, label: string, errors: string[]): void {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     errors.push(`${label} 必须是有限正数，收到 ${JSON.stringify(value)}`)
   }
+}
+
+const DEFAULT_MIN_STOP_DISTANCE_PCT = 0.005
+
+export interface LimitsConsistencyInput {
+  /** 账户报价币种权益；用于判断最小止损下的理论名义金额。 */
+  readonly equityQuoteUsd: number
+  /** 单笔风险占权益比例；使用小数比例，例如 0.01 表示 1%。 */
+  readonly riskPct: number
+  /** 硬闸允许的单笔最大名义金额。 */
+  readonly perOrderCapUsd: number
+  /** 止损距离是小数比例；省略时使用 BTC 1h 2×ATR 的实测中位值。 */
+  readonly minStopDistancePct?: number
+}
+
+function displayValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isNaN(value)) return 'NaN'
+  return String(value)
+}
+
+/**
+ * 检查权益、风险比例、止损距离与单笔上限是否能互相容纳，避免每单都在硬闸处失败。
+ * 返回 null 表示自洽；所有数值先校验再计算，避免把 NaN 传播到启动错误或审计信息中。
+ */
+export function checkLimitsConsistency(input: LimitsConsistencyInput): string | null {
+  const minStopDistancePct = input.minStopDistancePct === undefined
+    ? DEFAULT_MIN_STOP_DISTANCE_PCT
+    : input.minStopDistancePct
+  const values: readonly [string, unknown][] = [
+    ['equityQuoteUsd', input.equityQuoteUsd],
+    ['riskPct', input.riskPct],
+    ['perOrderCapUsd', input.perOrderCapUsd],
+    ['minStopDistancePct', minStopDistancePct],
+  ]
+
+  for (const [label, value] of values) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      return `风控自洽校验输入非法：${label} 必须是有限正数，收到 ${displayValue(value)}`
+    }
+  }
+
+  const maxNotionalAtMinStop = input.equityQuoteUsd * input.riskPct / minStopDistancePct
+  if (!Number.isFinite(maxNotionalAtMinStop)) {
+    return '风控自洽校验结果非法：maxNotionalAtMinStop 无法表示为有限数，请调整输入规模'
+  }
+  if (input.perOrderCapUsd < maxNotionalAtMinStop) {
+    return `风控参数不自洽：maxNotionalAtMinStop=${maxNotionalAtMinStop} USD（equityQuoteUsd=${input.equityQuoteUsd} × riskPct=${input.riskPct} ÷ minStopDistancePct=${minStopDistancePct}）超过 perOrderCapUsd=${input.perOrderCapUsd} USD；可选修法：调低 riskPct 或调高 perOrderCapUsd。实测 riskPct=1% 时 180 次命中全部被拒，名义约为权益的 2 倍，riskPct=0.2% 才成交。`
+  }
+  return null
 }
 
 /**
@@ -138,6 +191,16 @@ export function resolveStartupParams(input: StartupParamsInput, now: number): St
       if (value === undefined) errors.push(`limits.${key} 未提供`)
       else positive(value, `limits.${key}`, errors)
     }
+  }
+
+  if (input.equityQuoteUsd !== undefined) {
+    const consistencyError = checkLimitsConsistency({
+      equityQuoteUsd: input.equityQuoteUsd,
+      riskPct: input.riskPct ?? Number.NaN,
+      perOrderCapUsd: limits?.perOrderCapUsd ?? Number.NaN,
+      minStopDistancePct: input.minStopDistancePct,
+    })
+    if (consistencyError !== null) errors.push(consistencyError)
   }
 
   if (errors.length > 0) throw new StartupParamsError(errors)

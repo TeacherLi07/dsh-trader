@@ -22,7 +22,7 @@ import { join } from 'node:path'
 import Database from 'better-sqlite3'
 import ccxt from 'ccxt'
 import { ReplayClock, systemClock } from '../lib/clock.js'
-import { SUGGESTED_LIMITS } from '../lib/config.js'
+import { EXAMPLE_LIMITS } from '../lib/config.js'
 import { migrate } from '../lib/db/schema.js'
 import { PaperBroker } from '../lib/exec/paper.js'
 import { replay } from '../lib/exec/replay.js'
@@ -44,7 +44,7 @@ const SYMBOL = 'BTC/USDT'
 const TF = '1h'
 const HORIZON = 4 * 3_600_000
 const RISK_PCT = 0.002
-const LIMITS = { ...SUGGESTED_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
+const LIMITS = { ...EXAMPLE_LIMITS, perOrderCapUsd: 5_000, maxExposureUsd: 50_000, maxOpenOrders: 50 }
 
 // ── 1) 真实行情 ──────────────────────────────────────────────────────────────
 const Exchange = ccxt.htx
