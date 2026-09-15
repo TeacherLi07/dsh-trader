@@ -43,7 +43,12 @@ export function computeSize(input: SizingInput): SizingResult {
   const riskQuote = equityQuote * riskPct
   const step = input.qtyStep !== undefined && input.qtyStep > 0 ? input.qtyStep : undefined
   let qty = riskQuote / stopDistance
-  if (step !== undefined) qty = Math.floor(qty / step) * step
+  if (step !== undefined) {
+    // `Math.floor(qty / step)` 会因浮点误差丢一整步：0.3/0.1 = 2.9999999999999996 ⇒ floor 2。
+    // 加一个相对 epsilon 吸收该误差；乘回后再收敛掉 3*0.1 = 0.30000000000000004 这类噪声。
+    const steps = Math.floor(qty / step + 1e-9)
+    qty = steps <= 0 ? 0 : Number.parseFloat((steps * step).toPrecision(12))
+  }
 
   const minQty = input.minQty ?? 0
   if (!(qty > 0) || qty < minQty) {

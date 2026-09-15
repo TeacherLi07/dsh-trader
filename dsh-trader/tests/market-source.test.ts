@@ -133,3 +133,12 @@ describe('applyProxyAwareFetch', () => {
     expect(exchange.fetchImplementation).toBeUndefined()
   })
 })
+
+describe('classifyError：保留已分类的行为标签（审计修复）', () => {
+  it('★ MarketSourceError.kind 不再被消息文本覆盖成 other', () => {
+    for (const kind of ['no_data', 'rate_limit', 'not_configured', 'other'] as const) {
+      // 中文消息里没有 "rate limit"/"not configured" 等关键词，旧实现一律降级为 other
+      expect(classifyError(new MarketSourceError(kind, '不支持的时间框架：3m'))).toBe(kind)
+    }
+  })
+})

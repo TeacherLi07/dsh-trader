@@ -63,10 +63,19 @@ export interface OrderAck {
   readonly exchangeOrderId?: string
   readonly state: OrderState
   readonly ts: number
+  /**
+   * 实际成交均价（成交后由 broker 回填）。
+   * 结算必须用它，而不是"信号 bar 的收盘价" —— 否则滑点从未进入账本（plan §5.3）。
+   */
+  readonly avgPrice?: number
+  /** 本单实际支付的手续费（计价货币金额）。缺省表示 broker 未提供。 */
+  readonly fee?: number
 }
 
 export interface ProtectiveRequest {
   readonly symbol: string
+  /** 幂等键；由调用方给出后 broker 必须原样使用，保证审计链与恢复对得上。 */
+  readonly clientOrderId?: string
   readonly stopLossPrice?: number
   readonly takeProfitPrice?: number
   readonly trailingPercent?: number

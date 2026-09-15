@@ -265,7 +265,14 @@ export function standInJudge(options: StandInJudgeOptions = {}): JudgmentChannel
         return Promise.resolve({ approve: false, reason: 'stand-in:已有仓位，拒绝加仓' })
       }
       if (input.atr !== null && input.referencePrice > 0) {
-        const distance = input.atr / input.referencePrice
+        // 用**真实**止损距离：`stop.method='atr'` 时是 k×ATR（不是 1×ATR），
+        // `structure` 时是 |level − price|。旧实现按 1×ATR 估算，把 B 臂做得约 2× 过严，
+        // 使 P1.5 的保留/关闭判定建立在与文档不同的规则上（实测）。
+        const stop = input.action.stop
+        const distance =
+          stop.method === 'atr'
+            ? (stop.k * input.atr) / input.referencePrice
+            : Math.abs(stop.level - input.referencePrice) / input.referencePrice
         if (distance < minStopDistancePct) {
           return Promise.resolve({
             approve: false,

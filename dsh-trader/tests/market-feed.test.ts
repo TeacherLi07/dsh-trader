@@ -11,6 +11,7 @@ import {
   type MarketFeedOptions,
 } from '../src/market/feed.js'
 import { MarketSourceError, type MarketDataSource } from '../src/market/types.js'
+import { TokenBucket } from '../src/market/ratelimit.js'
 import { FakeSource, series } from './helpers/market.js'
 
 const TF = '1h'
@@ -173,5 +174,31 @@ describe('MarketSourceError', () => {
     const error = new MarketSourceError('no_data', 'nothing here')
     expect(error.kind).toBe('no_data')
     expect(error).toBeInstanceOf(Error)
+  })
+})
+
+describe('限流耗尽必须 fail-closed（审计修复）', () => {
+  it('★ 令牌耗尽且 sleep 不推进时钟时，不得"照样发请求"', async () => {
+    const clock = new ReplayClock(NOW)
+    const source = new FakeSource({ pages: [series(NOW - HOUR, 1)] })
+    const limiter = new TokenBucket(clock, { capacity: 1, refillTokens: 1, refillMs: 1e12 })
+    const seen: FeedErrorInfo[] = []
+    const feed = makeFeed(source, clock, {
+      limiter,
+      sleep: () => Promise.resolve(),
+      onError: (_error, info) => {
+        seen.push(info)
+      },
+    })
+
+    const first = await feed.pollOnce()
+    expect(first.failures).toBe(0)
+    expect(source.calls).toHaveLength(1)
+
+    const second = await feed.pollOnce()
+    expect(second.failures).toBe(1)
+    // 关键：没有第二次请求打出去（旧实现会 fail-open 继续请求）
+    expect(source.calls).toHaveLength(1)
+    expect(seen.at(-1)?.kind).toBe('rate_limit')
   })
 })

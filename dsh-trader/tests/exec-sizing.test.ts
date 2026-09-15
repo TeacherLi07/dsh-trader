@@ -82,3 +82,14 @@ describe('takeProfitFor', () => {
     expect(takeProfitFor(100, 'long', 95, 0)).toBeUndefined()
   })
 })
+
+describe('floorToStep 浮点收敛（审计修复）', () => {
+  it('★ 0.3 / step 0.1 不得因浮点误差丢一步', () => {
+    const result = computeSize({ equityQuote: 30, riskPct: 0.01, entryPrice: 1, stopPrice: 0, qtyStep: 0.1 })
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.qty).toBeCloseTo(0.3, 12)
+      expect(result.qty / 0.1).toBeCloseTo(3, 9)
+    }
+  })
+})

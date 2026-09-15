@@ -13,7 +13,6 @@
 
 import type { Clock } from '../clock.js'
 import type { BarArchive } from '../market/archive.js'
-import { timeframeMs } from '../market/normalize.js'
 import { fingerprint } from '../util/canonical.js'
 import type { DecisionJournal, FillView, OutcomeRecord, PendingSettlement } from '../exec/journal.js'
 
@@ -54,7 +53,9 @@ export function computeSettlement(
   const { decision, fills, entryPrice, direction, bars, benchmarkBars } = inputs
 
   const feesQuote = fills.reduce((sum, fill) => sum + (Number.isFinite(fill.fee) ? fill.fee : 0), 0)
-  const qty = fills.reduce((sum, fill) => sum + Math.abs(fill.qty), 0)
+  // 仓位规模取**首笔（入场腿）**的数量，而不是所有成交之和：
+  // 保护单成交现在也会归属到同一条决策，求和会把两条腿叠加成 2× 仓位。
+  const qty = fills.length > 0 ? Math.abs((fills[0] as FillView).qty) : 0
   const notional = entryPrice * (qty > 0 ? qty : 1)
   const feesPct = notional > 0 ? (feesQuote / notional) * 100 : 0
   const slippagePct = 2 * (options.slippageBps / 10_000) * 100
@@ -109,8 +110,32 @@ export function computeSettlement(
   }
 }
 
-// ── 反思闸门 ─────────────────────────────────────────────────────────────────
+/**
+ * 由一串成交重建持仓（数量 + 均价）—— 用于给 `reduce`/`close` 决策找回**真实入场**。
+ * 与 `PaperBroker.#fill` 同一套均价规则：加仓按量加权，减仓不改均价，反向不会"翻仓
+ * 却留着旧均价"（数量符号翻转时均价归零）。
+ */
+export function reconstructPosition(
+  fills: readonly { readonly qty: number; readonly price: number; readonly side: string }[],
+): { readonly qty: number; readonly avgPrice: number } {
+  let qty = 0
+  let avgPrice = 0
+  for (const fill of fills) {
+    const signed = fill.side === 'sell' ? -Math.abs(fill.qty) : Math.abs(fill.qty)
+    if (qty === 0 || Math.sign(qty) === Math.sign(signed)) {
+      const next = qty + signed
+      avgPrice = next === 0 ? 0 : (avgPrice * Math.abs(qty) + fill.price * Math.abs(signed)) / Math.abs(next)
+      qty = next
+    } else {
+      qty += signed
+      if (qty === 0) avgPrice = 0
+      // 部分平仓不改剩余持仓的均价
+    }
+  }
+  return { qty, avgPrice }
+}
 
+// ── 反思闸门 ─────────────────────────────────────────────────────────────────
 export interface ReflectionCandidate {
   readonly text: string
   readonly evidenceRefs: readonly string[]
@@ -244,9 +269,12 @@ export class SettlementScheduler {
         const entry = fills.length > 0 ? (fills[0] as FillView) : undefined
 
         const horizonEnd = decision.decidedAt + this.deps.horizonMs
+        // `until` 是**开区间**：`open_time < horizonEnd` ⇒ 只取在 horizon 内收盘的 bar。
+        // 旧实现写 `horizonEnd + timeframeMs`，会多算一根"在结算时点之后才收盘"的 bar，
+        // 把未来价格算进 exitPrice / MFE / MAE（实测 exitPrice 取自未来 bar）。
         const bars = this.deps.bars.closedBars(decision.symbol, this.deps.timeframe, {
           since: decision.decidedAt,
-          until: horizonEnd + timeframeMs(this.deps.timeframe),
+          until: horizonEnd,
         })
 
         // 数据可用性闸门：没有成交**也没有**行情 ⇒ 没有价格基准。
@@ -261,12 +289,31 @@ export class SettlementScheduler {
           continue
         }
 
-        const direction: 1 | -1 = entry?.side === 'sell' ? -1 : 1
-        const entryPrice = entry?.price ?? (bars[0] as { close: number }).close
+        const isExit = decision.action === 'reduce' || decision.action === 'close'
+        let direction: 1 | -1
+        let entryPrice: number
+        if (isExit) {
+          // ★ 平/减仓必须对齐**真实入场**：用该标的在此次成交之前的全部成交重建持仓。
+          // 旧实现把平仓成交当入场 → 一笔 +20% 的回合被记成 ~0%（净额只剩成本）。
+          const before = entry?.ts ?? decision.decidedAt
+          const position = reconstructPosition(
+            this.deps.journal.fillsForSymbolBefore(decision.symbol, before),
+          )
+          if (position.qty === 0) {
+            // 找不到入场成交 ⇒ 缺数据，推迟而不是编造一个 0 收益的交易（plan §12 #20）
+            deferredIds.push(decision.decisionId)
+            continue
+          }
+          direction = position.qty > 0 ? 1 : -1
+          entryPrice = position.avgPrice
+        } else {
+          direction = entry?.side === 'sell' ? -1 : 1
+          entryPrice = entry?.price ?? (bars[0] as { close: number }).close
+        }
         const benchmarkBars = this.deps.bars.closedBars(
           this.deps.benchmarkSymbol,
           this.deps.timeframe,
-          { since: decision.decidedAt, until: horizonEnd + timeframeMs(this.deps.timeframe) },
+          { since: decision.decidedAt, until: horizonEnd },
         )
 
         const computation = computeSettlement(

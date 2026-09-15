@@ -256,3 +256,42 @@ describe('standInJudge（确定性替身，非 LLM）', () => {
     expect(first).toEqual(second)
   })
 })
+
+describe('standInJudge：止损距离用真实的 k×ATR（审计修复）', () => {
+  const base = (over: Record<string, unknown> = {}) => ({
+    symbol: 'BTC/USDT',
+    timeframe: '1h',
+    barTs: 0,
+    planId: 'pc-1',
+    conditionId: 'c-open',
+    expression: 'rsi14 < 45',
+    action: { action: 'open' as const, side: 'long' as const, method: 'market' as const, stop: { method: 'atr' as const, k: 2 }, riskPct: 0.002 },
+    referencePrice: 70_000,
+    atr: 700,
+    equityQuote: 10_000,
+    positionQty: 0,
+    ...over,
+  })
+
+  it('★ k=2、ATR=105、价格 70000 ⇒ 距离 0.3% ≥ 0.2%，必须放行', async () => {
+    const verdict = await standInJudge()(base({ atr: 105 }) as never)
+    expect(verdict.approve).toBe(true)
+  })
+
+  it('structure 止损按 |level − price| 计算', async () => {
+    const narrow = await standInJudge()(
+      base({
+        atr: 1,
+        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_950 }, riskPct: 0.002 },
+      }) as never,
+    )
+    expect(narrow.approve).toBe(false)
+    const wide = await standInJudge()(
+      base({
+        atr: 1,
+        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_000 }, riskPct: 0.002 },
+      }) as never,
+    )
+    expect(wide.approve).toBe(true)
+  })
+})

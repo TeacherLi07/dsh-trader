@@ -8,9 +8,10 @@ import { normalizeCandles } from '../src/market/normalize.js'
 import { PlanStore } from '../src/plan/store.js'
 import { PaperBroker } from '../src/exec/paper.js'
 import { replay, type ReplayDeps, type ReplayResult } from '../src/exec/replay.js'
+import { CrashRecovery } from '../src/exec/recovery.js'
 import { buildRules } from '../src/trigger/engine.js'
 import { TriggerQueue } from '../src/trigger/queue.js'
-import { randomSeries } from './helpers/market.js'
+import { randomSeries, raw } from './helpers/market.js'
 import { makeCard } from './helpers/plan.js'
 
 const SYMBOL = 'BTC/USDT'
@@ -256,5 +257,202 @@ describe('回放/机械执行也要进结算队列（P1 ④ 的前置）', () =>
     expect(second.skipped).toBe(0)
     expect((db.prepare('SELECT COUNT(*) AS n FROM outcomes').get() as { n: number }).n).toBe(first.settled)
     expect(new DecisionJournal(db).duplicateClientOrderIds()).toBe(0)
+  })
+})
+
+// ── 审计修复的回归测试（保护单/成交价/平仓/限价/计划年龄）─────────────────────
+describe('回放审计修复', () => {
+  const H = 3_600_000
+  const S = 'BTC/USDT'
+  const T = 1_700_000_000_000
+  type CardOver = Parameters<typeof makeCard>[0]
+
+  function scenario(
+    rawBars: readonly ReturnType<typeof raw>[],
+    cardOver: CardOver,
+    brokerOver: { readonly feeBps?: number; readonly slippageBps?: number } = {},
+  ) {
+    const db = new Database(':memory:')
+    migrate(db)
+    const clock = new ReplayClock(T - 100 * H)
+    const bars = new BarArchive(db)
+    const queue = new TriggerQueue(db)
+    bars.upsertClosed(normalizeCandles(rawBars, S, TF, T + 1000 * H).candles, {
+      source: 'synthetic',
+      fetchedAt: T,
+    })
+    const broker = new PaperBroker({
+      clock,
+      book: { price: () => undefined },
+      initialEquityQuote: 100_000,
+      slippageBps: brokerOver.slippageBps ?? 5,
+      feeBps: brokerOver.feeBps ?? 5,
+    })
+    const plans = new PlanStore(db)
+    plans.save(
+      makeCard({ planId: 'pc-audit', symbol: S, createdAt: T, windowEndsAt: T + 100 * H, ...cardOver }),
+      T,
+    )
+    const deps: ReplayDeps = {
+      db,
+      bars,
+      plans,
+      queue,
+      broker,
+      clock,
+      riskPct: 0.01,
+      mode: 'paper',
+      limits: null,
+    }
+    return { db, clock, bars, queue, broker, deps }
+  }
+
+  it('★ set_stop 不再撞外键崩掉整个回放，并且保护单也进审计链', async () => {
+    const h = scenario(
+      [raw(T, 100), raw(T + H, 100)],
+      {
+        invalidation: [{ id: 'inv-x', tf: TF, when: 'bar.close < 0', then: { action: 'close' } }],
+        commitments: [
+          {
+            id: 'c-open',
+            seq: 1,
+            tf: TF,
+            when: 'position.qty == 0',
+            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+          },
+          {
+            id: 'c-stop',
+            seq: 2,
+            tf: TF,
+            when: 'position.qty > 0',
+            then: { action: 'set_stop', price: 85 },
+          },
+        ],
+      },
+    )
+    const result = await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + 2 * H })
+    expect(result.counters.executed).toBe(2)
+    // 自动保护单 + set_stop 都应有 order_intents 行
+    const ids = result.intentIds
+    expect(ids.some((id) => id.startsWith('pi-open:'))).toBe(true)
+    expect(ids.some((id) => id.startsWith('pi:'))).toBe(true)
+  })
+
+  it('★ 做空限价单挂在市价之上（偏移方向与做多相反）', async () => {
+    const h = scenario(
+      [raw(T, 100), raw(T + H, 100), raw(T + 2 * H, 100)],
+      {
+        invalidation: [{ id: 'inv-none', tf: TF, when: 'bar.close < 0', then: { action: 'close' } }],
+        commitments: [
+          {
+            id: 'c-short-limit',
+            seq: 1,
+            tf: TF,
+            when: 'position.qty == 0',
+            then: {
+              action: 'open',
+              side: 'short',
+              method: 'limit',
+              limitOffsetBps: 50,
+              stop: { method: 'structure', level: 100_000 },
+              riskPct: 0.01,
+            },
+          },
+        ],
+      },
+    )
+    await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + H })
+    const row = h.db
+      .prepare("SELECT side, price FROM order_intents WHERE client_order_id LIKE 'co:%' LIMIT 1")
+      .get() as { side: string; price: number } | undefined
+    expect(row?.side).toBe('sell')
+    expect(row?.price).toBeGreaterThan(100) // 100 × (1 + 50bps)
+  })
+
+  it('★ close 必须 cancelAll(symbol)，否则残留保护单会反向开仓', async () => {
+    const h = scenario(
+      [raw(T, 100), raw(T + H, 95, { open: 100, high: 100, low: 94 })],
+      {
+        invalidation: [{ id: 'inv-none', tf: TF, when: 'bar.close < 0', then: { action: 'close' } }],
+        commitments: [
+          {
+            id: 'c-open',
+            seq: 1,
+            tf: TF,
+            when: 'position.qty == 0',
+            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+          },
+          { id: 'c-close', seq: 2, tf: TF, when: 'position.qty > 0 and bar.close < 99', then: { action: 'close' } },
+        ],
+      },
+    )
+    const result = await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + 2 * H })
+    expect(result.counters.executed).toBe(2)
+    expect(await h.broker.getOpenOrders()).toHaveLength(0)
+  })
+
+  it('★ 非命中 bar 上的止损也必须计入 realizedPnl，且成交价/手续费是真实的', async () => {
+    const bars: ReturnType<typeof raw>[] = []
+    for (let i = 0; i < 5; i += 1) bars.push(raw(T + i * H, 100, { open: 100, high: 101, low: 99.5 }))
+    bars.push(raw(T + 5 * H, 91, { open: 100, high: 101, low: 90 }))
+
+    const h = scenario(bars, {
+      invalidation: [{ id: 'inv-none', tf: TF, when: 'bar.close < 0', then: { action: 'close' } }],
+      commitments: [
+        {
+          id: 'c-open-once',
+          seq: 1,
+          tf: TF,
+          when: 'position.qty == 0 and bar.close > 99',
+          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 95 }, riskPct: 0.01 },
+        },
+      ],
+    })
+    const result = await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + 6 * H })
+    expect(result.counters.executed).toBe(1)
+    // 止损在最后一根（无计划命中）触发 ⇒ 盈亏必须被采样到
+    expect(result.realizedPnl).not.toBe(0)
+    expect(result.tradePnl.length).toBeGreaterThan(0)
+    // 成交价必须含滑点（≠ 信号 bar 收盘价），手续费必须非 0
+    const fills = h.db.prepare('SELECT price, fee FROM fills').all() as { price: number; fee: number }[]
+    expect(fills.length).toBeGreaterThanOrEqual(2)
+    expect(fills.some((fill) => fill.price !== 100)).toBe(true)
+    expect(fills.every((fill) => fill.fee > 0)).toBe(true)
+  })
+
+  it('★ 计划卡引用 plan.ageMs 必须可求值（不是永久 UNCOVERED）', async () => {
+    const h = scenario([raw(T, 100), raw(T + H, 100), raw(T + 2 * H, 100)], {
+      invalidation: [{ id: 'inv-age', tf: TF, when: 'plan.ageMs >= 0', then: { action: 'noop' } }],
+      commitments: [],
+    })
+    const result = await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + 3 * H })
+    expect(result.counters.uncovered).toBe(0)
+    expect(result.counters.matched).toBe(3)
+  })
+
+  it('★ 自动保护单有本地记录 ⇒ 恢复不会再把它判成孤儿单', async () => {
+    const h = scenario([raw(T, 100), raw(T + H, 100)], {
+      invalidation: [{ id: 'inv-none', tf: TF, when: 'bar.close < 0', then: { action: 'close' } }],
+      commitments: [
+        {
+          id: 'c-open',
+          seq: 1,
+          tf: TF,
+          when: 'position.qty == 0',
+          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+        },
+      ],
+    })
+    await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + H })
+    const live = await h.broker.getOpenOrders(S)
+    expect(live.length).toBeGreaterThan(0)
+    const recovery = new CrashRecovery({
+      journal: new (await import('../src/exec/journal.js')).DecisionJournal(h.db),
+      broker: h.broker as never,
+      clock: h.clock,
+      symbols: [S],
+    })
+    const result = await recovery.run()
+    expect(result.orphanOpenOrders).toEqual([])
   })
 })

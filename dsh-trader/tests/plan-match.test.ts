@@ -176,3 +176,22 @@ describe('matchPlan', () => {
     expect(outcome).toMatchObject({ kind: 'uncovered', id: 'c-1', reason: 'forbidden_action' })
   })
 })
+
+describe('失效条件不可判定时 fail-closed（审计修复）', () => {
+  it('★ 失效条件引用未知路径 ⇒ 即使承诺为真也必须 UNCOVERED', () => {
+    const plan = makeCard({
+      invalidation: [{ id: 'inv-adx', tf: '15m', when: 'adx14 > 25', then: { action: 'close' } }],
+      commitments: [
+        { id: 'c-1', seq: 1, tf: '15m', when: 'bar.close > 110', then: { action: 'reduce', fraction: 0.5 } },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 120 }),
+    })
+    expect(outcome.kind).toBe('uncovered')
+  })
+})

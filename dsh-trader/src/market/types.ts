@@ -42,6 +42,11 @@ export class MarketSourceError extends Error {
 }
 
 export function classifyError(error: unknown): SourceErrorKind {
+  // 已经带行为分类的错误必须原样保留：`createCcxtSource` 会把 ccxt 错误包成
+  // `MarketSourceError(kind)`，再按消息文本重新分类会把它一律降级成 'other'，
+  // 于是一个"未配置/限流"变成"其他 ⇒ 告警"，路由策略失效（实测）。
+  if (error instanceof MarketSourceError) return error.kind
+
   const name = (error as { name?: string } | undefined)?.name ?? ''
   const message = String((error as { message?: string } | undefined)?.message ?? error).toLowerCase()
 

@@ -68,8 +68,9 @@ export function selectPrice(
   const wanted = priceTier(at)
   const exact = sameVersion.find((p) => (p.tier ?? 'any') === wanted)
   if (exact !== undefined) return exact
-  const fallback = sameVersion.find((p) => (p.tier ?? 'any') === 'any')
-  return fallback ?? version
+  // 只允许 `any` 兜底；**缺本档位就必须当作"缺行"**（返回 undefined ⇒ cost_known=0 + 告警）。
+  // 旧实现 `?? version` 会把峰时价拿去算谷时（或反之），静默高估/低估一倍且标记为可信。
+  return sameVersion.find((p) => (p.tier ?? 'any') === 'any')
 }
 
 export function estimateCost(

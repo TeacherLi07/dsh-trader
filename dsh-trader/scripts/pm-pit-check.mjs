@@ -22,7 +22,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
-import { ReplayClock } from '../lib/clock.js'
+import { systemClock } from '../lib/clock.js'
 import { migrate } from '../lib/db/schema.js'
 import { createDslContext, evaluateWhen } from '../lib/plan/evaluate.js'
 import { createPmClients } from '../lib/predictions/client.js'
@@ -38,7 +38,9 @@ const LIQUIDITY = { liquidityFloorQuote: 1_000, spreadCeilBps: 300 }
 const SCAN = Number(process.env.PM_SCAN ?? '60')
 
 const now = Date.now()
-const clock = new ReplayClock(now)
+// 真实网络 + 真实 sleep ⇒ 必须用**会随墙钟前进**的时钟驱动令牌桶；
+// 用冻结的 ReplayClock 会让"排队后重取"永远取不到令牌（验收会看起来像卡死）。
+const clock = systemClock()
 const clients = createPmClients({
   fetch: async (url, init) => {
     const response = await fetch(url, { ...(init?.method ? { method: init.method } : {}), signal: init?.signal })
@@ -52,7 +54,9 @@ const clients = createPmClients({
 const dir = mkdtempSync(join(tmpdir(), 'dsh-trader-pmpit-'))
 const db = new Database(join(dir, 'pm.db'))
 migrate(db)
-const store = new PmStore(db, { liquidity: LIQUIDITY })
+// 验收要**广扫**市场挑样本（两页各 SCAN 条、去重后可能 >SCAN），所以显式放宽 active 上限；
+// 生产默认的 30 条上限由 tests/predictions-store.test.ts 单独验证。
+const store = new PmStore(db, { liquidity: LIQUIDITY, maxActiveWatches: 500 })
 
 // ── 1) 真实数据：扫描若干活跃市场，取 30 天序列 + 一条真实盘口 ────────────────
 // 样本要**同时**满足两件事，缺一不可：

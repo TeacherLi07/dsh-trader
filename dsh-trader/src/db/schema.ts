@@ -225,7 +225,8 @@ CREATE TABLE IF NOT EXISTS budget_ledger (
   tokens_out INTEGER NOT NULL DEFAULT 0,
   tokens_cached INTEGER NOT NULL DEFAULT 0,
   est_usd REAL NOT NULL DEFAULT 0,
-  cost_known INTEGER NOT NULL DEFAULT 1 CHECK (cost_known IN (0, 1)),
+  -- 默认 0（未知）而非 1：与 plan §4.1 的 DDL 一致，且"缺价目"必须 fail-closed
+  cost_known INTEGER NOT NULL DEFAULT 0 CHECK (cost_known IN (0, 1)),
   PRIMARY KEY (day, scope)
 );
 

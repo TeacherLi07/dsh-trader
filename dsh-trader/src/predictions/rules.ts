@@ -53,6 +53,8 @@ export interface PmRuleConfig {
   readonly volumeSpikeCooldownMs: number
   /** `pm_spread_blowout`：点差上限（bps）。 */
   readonly spreadCeilBps: number
+  /** 流动性硬门槛（USD）：低于它的市场**不产生任何 novelty**（含新市场）。 */
+  readonly liquidityFloorQuote: number
   /** `pm_spread_blowout` 冷却。 */
   readonly spreadBlowoutCooldownMs: number
   /** `pm_spread_blowout` 时对该 alias 的置信度折扣。 */
@@ -73,6 +75,7 @@ export const DEFAULT_PM_RULE_CONFIG: PmRuleConfig = {
   volumeSpikeMultiple: 5,
   volumeSpikeCooldownMs: 60 * 60_000,
   spreadCeilBps: 300,
+  liquidityFloorQuote: 1_000,
   spreadBlowoutCooldownMs: 60 * 60_000,
   spreadConfidencePenalty: 0.5,
   newMarketEventWhitelist: [],
@@ -101,6 +104,7 @@ export function assertPmRuleConfig(config: PmRuleConfig): void {
     problems.push(`jumpLookback 必须是 ${PM_JUMP_LOOKBACKS.join('|')}，收到 ${String(config.jumpLookback)}`)
   }
   if (!(config.spreadCeilBps > 0)) problems.push('spreadCeilBps 必须为正')
+  if (!(config.liquidityFloorQuote > 0)) problems.push('liquidityFloorQuote 必须为正')
   if (!(config.spreadConfidencePenalty > 0 && config.spreadConfidencePenalty <= 1)) {
     problems.push('spreadConfidencePenalty 必须在 (0,1]')
   }
@@ -335,8 +339,10 @@ function newMarketSignal(
   if (config.newMarketEventWhitelist.length === 0) return undefined
   const matched = market.eventSlugs.filter((slug) => config.newMarketEventWhitelist.includes(slug))
   if (matched.length === 0) return undefined
-  // 薄市场的新市场通知同样要过流动性门槛 —— 否则会变成噪声源
-  if (market.liquidity === null || market.liquidity <= 0) return undefined
+  // 薄市场的新市场通知同样要过**硬性流动性门槛**（plan §4.4）：不能只判 `> 0`。
+  // 新市场通常还没有盘口/价差数据，因此这里只应用流动性下限；价差在盘口出现后由
+  // `pm_spread_blowout` / `pm_prob_jump` 各自的路径把关。
+  if (market.liquidity === null || market.liquidity < config.liquidityFloorQuote) return undefined
   return {
     ruleId: 'pm_new_market',
     alias: market.slug,

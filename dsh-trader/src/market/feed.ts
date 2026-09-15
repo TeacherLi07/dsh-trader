@@ -14,6 +14,7 @@ import type { BarArchive } from './archive.js'
 import { closedOnly, normalizeCandles, timeframeMs } from './normalize.js'
 import type { TokenBucket } from './ratelimit.js'
 import {
+  MarketSourceError,
   classifyError,
   realSleep,
   type Candle,
@@ -124,10 +125,19 @@ export class MarketFeed {
           timeframeMs(timeframe)
 
           if (limiter !== undefined) {
+            let acquired = false
             for (let attempt = 0; attempt < MAX_RATE_LIMIT_RETRIES; attempt += 1) {
               const result = limiter.tryAcquire(limiterCost)
-              if (result.ok) break
+              if (result.ok) {
+                acquired = true
+                break
+              }
               await sleep(result.waitMs)
+            }
+            // 旧实现在重试耗尽后**照样发请求**（fail-open ⇒ 撞限额）。这里必须 fail-closed，
+            // 与 backfill 的 `acquireToken` 行为一致：抛 rate_limit，由 onError 计数/退避。
+            if (!acquired) {
+              throw new MarketSourceError('rate_limit', '限流等待超过重试上限')
             }
           }
 

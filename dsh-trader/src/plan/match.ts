@@ -90,6 +90,19 @@ export function matchPlan(input: MatchInput): MatchOutcome {
     }
   }
 
+  // ── 1b) 失效条件求值失败 ⇒ 立刻 UNCOVERED（fail-closed）─────────────────────
+  // 论点是否被证伪**未知**时，绝不能继续执行风险动作。旧实现先跑承诺，
+  // 只要有一条承诺为真就返回 commitment，把"失效条件无法判定"吞掉了（实测）。
+  const firstInvalidationFailure = failures[0]
+  if (firstInvalidationFailure !== undefined) {
+    return {
+      kind: 'uncovered',
+      id: firstInvalidationFailure.id,
+      reason: firstInvalidationFailure.reason,
+      dedupKey: firstInvalidationFailure.dedupKey,
+    }
+  }
+
   // ── 2) 承诺：按 seq 升序，命中即执行（零 token、零延迟）──────────────────────
   if (!plan.noTrade) {
     const ordered = [...plan.commitments].sort((a, b) => a.seq - b.seq)

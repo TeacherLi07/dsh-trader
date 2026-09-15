@@ -288,3 +288,25 @@ describe('BudgetLedger', () => {
     ).toBe(false)
   })
 })
+
+describe('selectPrice：缺档位必须当作缺行（审计修复）', () => {
+  it('★ 只有 peak 行时，谷时取价必须未知，绝不拿 peak 价顶上', () => {
+    const peakOnly: ModelPrice[] = [
+      { model: 'm', effectiveFrom: 0, tier: 'peak', inPerMtok: 0.3, outPerMtok: 1.2 },
+    ]
+    const offPeak = Date.UTC(2026, 8, 12, 12, 0, 0) // 周六 ⇒ 谷时
+    expect(priceTier(offPeak)).toBe('off_peak')
+    expect(selectPrice(peakOnly, 'm', offPeak)).toBeUndefined()
+    const estimate = estimateCost(
+      { tokensIn: 1_000_000, tokensOut: 0, tokensCached: 0 },
+      peakOnly,
+      'm',
+      offPeak,
+    )
+    expect(estimate.known).toBe(false)
+
+    // `any` 兜底行仍然可用（那是显式声明的不分峰谷价）
+    const anyRow: ModelPrice[] = [{ model: 'm', effectiveFrom: 0, tier: 'any', inPerMtok: 0.3, outPerMtok: 1.2 }]
+    expect(selectPrice(anyRow, 'm', offPeak)?.tier).toBe('any')
+  })
+})

@@ -145,6 +145,11 @@ export class CrashRecovery {
       if (ack === undefined) {
         return { kind: 'unknown', reason: '交易所查不到该 client_order_id' }
       }
+      // 交易所返回 `created`/`unknown` 时仍是**未定状态**（超时无 ack 的语义）：
+      // 必须按未知处理并冻结标的，绝不能记成 `acked` 后继续自动交易（plan §4.2/§6.3）。
+      if (ack.state === 'created' || ack.state === 'unknown') {
+        return { kind: 'unknown', reason: `交易所返回未定状态 ${ack.state}` }
+      }
       return {
         kind: 'resolved',
         state: ack.state,

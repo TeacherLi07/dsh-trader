@@ -176,3 +176,11 @@ describe('schema (plan §4.1 invariants)', () => {
     ).toThrow()
   })
 })
+
+describe('schema 与 plan §4.1 同步（审计修复）', () => {
+  it('★ budget_ledger.cost_known 默认 0（缺价目 fail-closed，不是"可信"）', () => {
+    db.prepare(`INSERT INTO budget_ledger (day, scope) VALUES ('2026-01-01', 'global')`).run()
+    const row = db.prepare(`SELECT cost_known FROM budget_ledger`).get() as { cost_known: number }
+    expect(row.cost_known).toBe(0)
+  })
+})

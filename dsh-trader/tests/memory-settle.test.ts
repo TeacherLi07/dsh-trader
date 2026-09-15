@@ -485,3 +485,100 @@ describe('结算的数据可用性（P1 ④）', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM outcomes').get()).toEqual({ n: 200 })
   })
 })
+
+// ── 审计修复的回归测试：结算不得看未来 bar、平仓必须对齐真实入场 ────────────────
+describe('结算 PIT 与交易级净额（审计修复）', () => {
+  /** 一条"已成交"决策，ts/decidedAt 可控。 */
+  function filled(
+    id: string,
+    action: 'open' | 'reduce' | 'close',
+    side: 'buy' | 'sell',
+    price: number,
+    qty: number,
+    ts: number,
+    dueAt: number,
+  ): void {
+    journal.recordDecision({
+      decisionId: id,
+      symbol: 'BTC/USDT',
+      decidedAt: ts,
+      contextHash: `ctx:${id}`,
+      action,
+      executed: false,
+      reflectionDueAt: dueAt,
+    })
+    const coid = `co-${id}`
+    journal.recordIntent({
+      intentId: `intent-${id}`,
+      clientOrderId: coid,
+      decisionId: id,
+      venue: 'paper',
+      symbol: 'BTC/USDT',
+      state: 'filled',
+      type: 'market',
+      side,
+      qty,
+      reduceOnly: action !== 'open',
+      createdAt: ts,
+    })
+    journal.recordOrder({
+      orderId: `ex-${id}`,
+      venue: 'paper',
+      exchangeOrderId: `ex-${id}`,
+      clientOrderId: coid,
+      symbol: 'BTC/USDT',
+      status: 'filled',
+      qty,
+      filledQty: qty,
+      updatedAt: ts,
+    })
+    journal.recordFill({
+      fillId: `fill-${id}`,
+      orderId: `ex-${id}`,
+      qty,
+      price,
+      fee: 0,
+      feeCurrency: 'USDT',
+      ts,
+    })
+    journal.markDecisionExecuted(id)
+    journal.markDecisionReflectionDue(id, dueAt)
+  }
+
+  it('★ 结算绝不能读入"结算时点之后才收盘"的 bar（look-ahead off-by-one）', async () => {
+    // 最后一根 bar 的 openTime = T0+4h（= horizon 终点）⇒ 它在 horizon 之后才收盘
+    flatBars('BTC/USDT', [100, 101, 102, 103, 999])
+    flatBars(BENCH, [100, 100, 101, 101, 101])
+    journal.recordDecision({
+      decisionId: 'd-hold2',
+      symbol: 'BTC/USDT',
+      decidedAt: T0,
+      contextHash: 'ctx:hold2',
+      action: 'open',
+      executed: false,
+    })
+    journal.markDecisionReflectionDue('d-hold2', T0 + HORIZON)
+
+    await scheduler().runOnce(NOW)
+    // 只能是 horizon 内最后一根（openTime T0+3h，close 103），绝不是 999
+    expect(journal.outcomeFor('d-hold2')?.exitPrice).toBe(103)
+  })
+
+  it('★ close 决策以**真实入场**结算，而不是把平仓成交当新入场', async () => {
+    flatBars('BTC/USDT', [100, 101, 120, 120, 120])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    filled('d-open', 'open', 'buy', 100, 1, T0, T0 + HORIZON)
+    filled('d-close', 'close', 'sell', 120, 1, T0 + 2 * HOUR, T0 + 2 * HOUR + HORIZON)
+
+    const result = await scheduler().runOnce(T0 + 6 * HOUR)
+    expect(result.settled).toBe(2)
+
+    const closeOutcome = journal.outcomeFor('d-close')
+    expect(closeOutcome?.entryPrice).toBe(100)
+    // 一个 +20% 的回合必须被记成 +20% 左右，而不是 ~0%
+    expect(closeOutcome?.realizedGrossPct).toBeCloseTo(20, 6)
+    // 双边滑点（scheduler slippageBps=10 ⇒ 2×0.1%）后为 19.8%，基准未动 ⇒ alpha 同步
+    expect(closeOutcome?.realizedNetPct).toBeCloseTo(19.8, 6)
+    expect(closeOutcome?.alphaPct).toBeCloseTo(19.8, 6)
+  })
+})

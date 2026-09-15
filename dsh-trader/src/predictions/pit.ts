@@ -39,6 +39,11 @@ export type MarketView =
 /** 存在门控 + 结算门控：`now` 时刻该市场能看到什么。 */
 export function marketAsOf(market: PmMarketRecord, now: number): MarketView {
   if (!Number.isFinite(now)) throw new PmTimeError(`now 非法：${now}`)
+  // 缺失/非法的创建时刻**不能**当成"远古就在" —— 那会让存在门控在任意过去时点放行。
+  // 源数据缺字段时 `normalizeGammaMarket` 退化到 0，这里把它当作"尚不可见"（fail-closed）。
+  if (!Number.isFinite(market.createdAt) || market.createdAt <= 0) {
+    return { visible: false, reason: 'not_created_yet' }
+  }
   if (market.createdAt > now) return { visible: false, reason: 'not_created_yet' }
   const resolved =
     market.closed && market.resolvedAt !== undefined && market.resolvedAt <= now

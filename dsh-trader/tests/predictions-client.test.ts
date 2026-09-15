@@ -47,8 +47,11 @@ function harness(script: readonly (PmResponse | Error)[], over: { readonly degra
   const http = new PmHttp({
     fetch,
     clock,
+    // 真实 sleep 会推进墙钟；这里必须同样推进注入时钟，否则令牌桶"排队后重取"
+    // 会永远取不到令牌（那等于假设生产 sleep 不推进时钟）。
     sleep: (ms) => {
       sleeps.push(ms)
+      clock.advanceTo(clock.now() + ms)
       return Promise.resolve()
     },
     ...over,
@@ -80,11 +83,22 @@ describe('PmHttp：令牌桶（plan §10 专项 ⑤）', () => {
     expect(http.stats().retries).toBe(0)
   })
 
+  it('溢出的请求必须真的扣费：超发一倍会让同一窗口的请求数翻倍', async () => {
+    const { http, clock } = harness([json(200, [])])
+    const start = clock.now()
+    // 桶容量 = 60：第 61..120 次必须**各排一次队**（每次约 10000/60 ≈ 167ms），
+    // 即总共约 10s。若像旧实现那样"sleep 一次就发、不扣费"，同样的 120 次约 5s 就发完。
+    for (let i = 0; i < 120; i += 1) await markets(http)
+    const elapsed = clock.now() - start
+    expect(elapsed).toBeGreaterThanOrEqual(9_000)
+  })
+
   it('时钟推进后令牌回满（桶随时间补充）', async () => {
     const { http, clock, sleeps } = harness([json(200, [])])
     for (let i = 0; i < 65; i += 1) await markets(http)
     expect(sleeps.length).toBe(5)
-    clock.advanceTo(NOW + 10_000)
+    // 从**当前**时刻再推进一整个窗口 ⇒ 桶回满；若从 NOW 推进会少算排队期间已流逝的时间
+    clock.advanceTo(clock.now() + 10_000)
     for (let i = 0; i < 60; i += 1) await markets(http)
     expect(sleeps.length).toBe(5)
   })

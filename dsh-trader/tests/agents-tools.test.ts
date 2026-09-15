@@ -235,7 +235,11 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     expect(positions).toHaveLength(1)
     expect(positions[0]!.qty).toBeGreaterThan(0)
 
-    expect(ports.journal.intentIds()).toHaveLength(1)
+    // 两条意图：下单 + 成交后立即挂的保护单（保护单也必须有审计行，否则恢复会当它是孤儿单）
+    expect(ports.journal.intentIds()).toEqual(
+      expect.arrayContaining(['oi:dec-1:open:BTC/USDT', 'pi:dec-1:open:BTC/USDT']),
+    )
+    expect(ports.journal.intentIds()).toHaveLength(2)
     expect(ports.journal.fillIds()).toHaveLength(1)
     const decision = ports.journal.recentDecisions()[0]
     expect(decision?.decisionId).toBe('dec-1:open:BTC/USDT')
@@ -270,7 +274,8 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     const second = (await call('trade_execute_order', openArgs)) as { executed: boolean; reason: string }
     expect(second.executed).toBe(false)
     expect(second.reason).toContain('幂等')
-    expect(ports.journal.intentIds()).toHaveLength(1)
+    // 下单意图 + 保护单意图；第二次调用不得新增任何意图
+    expect(ports.journal.intentIds()).toHaveLength(2)
   })
 
   it('决策的 context_hash 由代码给出，模型无法伪造（T1.5）', async () => {

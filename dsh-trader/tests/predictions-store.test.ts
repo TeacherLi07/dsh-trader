@@ -824,3 +824,143 @@ describe('PmSignalRouter：pm 信号走同一套触发治理（T1.10）', () => 
     })
   })
 })
+
+// ── 审计修复的回归测试（静态审阅 + 动态探测确认过的真问题）────────────────────
+describe('PmStore 审计修复：watch 上限、别名冲突、元数据流动性回退', () => {
+  it('★ 同一 alias 用不同规格再登记 ⇒ 可读的 WatchError，绝不抛原始 SqliteError', () => {
+    store.registerWatch(watch({ alias: 'a1', expiresAt: NOW + DAY }), NOW)
+    let error: unknown
+    try {
+      // 规格不同（冷却不同）但 alias 相同
+      store.registerWatch(watch({ alias: 'a1', cooldownMs: 60_000, expiresAt: NOW + DAY }), NOW + HOUR)
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toBeInstanceOf(WatchError)
+    expect(String((error as Error).message)).toMatch(/alias a1/)
+  })
+
+  it('★ 同一规格续期是幂等 no-op，并把期限延长（不是崩溃、也不是静默忽略）', () => {
+    const first = store.registerWatch(watch({ alias: 'a1', expiresAt: NOW + DAY }), NOW)
+    expect(first.created).toBe(true)
+    const renewed = store.registerWatch(watch({ alias: 'a1', expiresAt: NOW + 3 * DAY }), NOW + HOUR)
+    expect(renewed.created).toBe(false)
+    expect(renewed.watch.watchId).toBe(first.watch.watchId)
+    expect(renewed.watch.expiresAt).toBe(NOW + 3 * DAY)
+  })
+
+  it('★ 已 cancel 的 alias 可以原地复用（UNIQUE(alias) 不允许另起一行）', () => {
+    store.registerWatch(watch({ alias: 'a1', expiresAt: NOW + DAY }), NOW)
+    expect(store.cancelWatch('a1')).toBe(true)
+    const reused = store.registerWatch(watch({ alias: 'a1', cooldownMs: 60_000, expiresAt: NOW + 2 * DAY }), NOW + HOUR)
+    expect(reused.created).toBe(true)
+    expect(reused.watch.state).toBe('active')
+    expect(reused.watch.triggerCount).toBe(0)
+    expect(store.activeWatches(NOW + HOUR)).toHaveLength(1)
+  })
+
+  it('★ active 关注有上限（默认 30），超限必须拒绝而不是无限膨胀', () => {
+    for (let index = 0; index < 30; index += 1) {
+      store.registerWatch(watch({ alias: `a${index}`, expiresAt: NOW + DAY }), NOW)
+    }
+    expect(() => store.registerWatch(watch({ alias: 'one_too_many', expiresAt: NOW + DAY }), NOW)).toThrow(
+      /上限 30/,
+    )
+    // 上限可配置（用独立库，避免上面 30 个关注的干扰）
+    const fresh = new Database(':memory:')
+    migrate(fresh)
+    const small = new PmStore(fresh, { liquidity: LIQUIDITY, maxActiveWatches: 1 })
+    small.registerWatch(watch({ alias: 'b1', expiresAt: NOW + DAY }), NOW)
+    expect(() => small.registerWatch(watch({ alias: 'b2', expiresAt: NOW + DAY }), NOW)).toThrow(/上限 1/)
+    fresh.close()
+  })
+
+  it('★ 盘口缺流动性时回退到 pm_markets 元数据（否则门槛永远"缺少流动性数据"）', () => {
+    store.registerWatch(watch({ alias: 's1', tokenIds: ['111'], expiresAt: NOW + DAY }), NOW)
+    store.upsertMarket(market({ liquidity: 50_000 }), NOW)
+    // 盘口端点不返回 liquidity：只写价差
+    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.4, spread: 0.01 })
+    const snapshot = store.snapshotAt(NOW)[0]
+    expect(snapshot?.liquidity.pass).toBe(true)
+    expect(snapshot?.liquidityQuote).toBe(50_000)
+    expect(snapshot?.volume24h).toBe(5_000)
+
+    // 元数据也没有 ⇒ 仍然 fail-closed
+    const fresh = new Database(':memory:')
+    migrate(fresh)
+    const bare = new PmStore(fresh, { liquidity: LIQUIDITY })
+    bare.registerWatch(watch({ alias: 'zz', tokenIds: ['999'], expiresAt: NOW + DAY }), NOW)
+    bare.recordQuote({ tokenId: '999', observedAt: NOW, mid: 0.4, spread: 0.01 })
+    expect(bare.snapshotAt(NOW)[0]?.liquidity.pass).toBe(false)
+    fresh.close()
+  })
+
+  it('★ 创建时刻缺失（归一化后退化 0）不得被当成"远古就存在"', () => {
+    store.upsertMarket(market({ createdAt: 0 }), NOW)
+    expect(store.marketViewAt('0xcond1', NOW)).toEqual({ visible: false, reason: 'not_created_yet' })
+    expect(store.marketsVisibleAt(NOW)).toHaveLength(0)
+  })
+})
+
+describe('pm 规则族审计修复：新市场也必须过流动性硬门槛', () => {
+  const newMarket = {
+    conditionId: '0xnew',
+    slug: 'fed-sep-2026-25bps',
+    question: 'q',
+    eventSlugs: ['fed-decision-in-september-762'],
+    firstSeenAt: NOW,
+    liquidity: 1,
+  }
+
+  it('★ liquidity < floor 的新市场一条 novelty 都不发', () => {
+    const config = { ...DEFAULT_PM_RULE_CONFIG, newMarketEventWhitelist: ['fed-decision-in-september-762'] }
+    expect(evaluatePmRules({ now: NOW, snapshots: [], newMarkets: [newMarket] }, config)).toHaveLength(0)
+    // 过门槛才发
+    const rich = evaluatePmRules(
+      { now: NOW, snapshots: [], newMarkets: [{ ...newMarket, liquidity: 50_000 }] },
+      config,
+    )
+    expect(rich).toHaveLength(1)
+  })
+
+  it('★ 无 watch 的新市场信号不被 watch 治理静默压掉（走 governor 限流）', () => {
+    const queue = new TriggerQueue(db)
+    const router = new PmSignalRouter({ store, queue, clock: new ReplayClock(NOW), ttlMs: HOUR })
+    const signal: PmSignal = {
+      ruleId: 'pm_new_market',
+      alias: 'fed-sep-2026-25bps',
+      tokenId: '',
+      purpose: 'novelty',
+      severity: 'P1',
+      reason: '白名单事件下出现新市场',
+      dedupKey: 'pm:new:0xnew',
+      isTradeTrigger: false,
+      payload: { cooldownMs: HOUR },
+    }
+    const routed = router.route([signal], NOW)
+    expect(routed[0]?.watchAllowed).toBe(true)
+    expect(routed[0]?.wake).toBe('W3')
+    expect(routed[0]?.disposition).toEqual({ kind: 'novelty' })
+
+    // 有 watch 但冷却未过：落库为 cooldown，且返回的 disposition 与落库一致
+    store.registerWatch(watch({ alias: 's1', tokenIds: ['111'], cooldownMs: 15 * 60_000 }), NOW)
+    expect(store.recordWatchFire('s1', NOW)).toBe(true)
+    const suppressed = router.route([{ ...signal, alias: 's1', dedupKey: 'pm:k9' }], NOW + 60_000)
+    expect(suppressed[0]?.disposition).toMatchObject({ kind: 'cooldown' })
+    expect(queue.get('pm:k9')).toBeUndefined()
+    expect(queue.has('pm-suppressed:pm:k9')).toBe(true)
+  })
+})
+
+describe('PmStore watch 生命周期边界（审计修复）', () => {
+  it('★ cancel 后登记**完全相同**的规格也会重新激活，而不是静默返回 disabled', () => {
+    const first = store.registerWatch(watch({ alias: 'a1' }), NOW)
+    expect(store.cancelWatch('a1')).toBe(true)
+    const revived = store.registerWatch(watch({ alias: 'a1' }), NOW + HOUR)
+    expect(revived.created).toBe(true)
+    expect(revived.watch.watchId).toBe(first.watch.watchId)
+    expect(revived.watch.state).toBe('active')
+    expect(revived.watch.triggerCount).toBe(0)
+    expect(store.activeWatches(NOW + HOUR)).toHaveLength(1)
+  })
+})

@@ -213,22 +213,47 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
         : action.action === 'set_target'
           ? { takeProfitPrice: (action as LevelAction).price }
           : { trailingPercent: (action as TrailingAction).percent }
-    const ack = await args.broker.placeProtective({ symbol: args.symbol, ...protective })
+    const protectiveClientId = `pco:${args.plan.planId}:${args.conditionId}:${args.barTs}`
+    // ★ 顺序：先写决策（`order_intents.decision_id` 有外键），再写意图，最后才发请求。
+    // 旧实现先 recordIntent 后 record(true)，任何 set_stop 都会撞外键直接崩掉整个回放（实测）。
+    record(true)
     args.journal.recordIntent({
       intentId: `pi:${decisionId}`,
-      clientOrderId: `pco:${args.plan.planId}:${args.conditionId}:${args.barTs}`,
+      clientOrderId: protectiveClientId,
       decisionId,
       venue: args.broker.venue,
       symbol: args.symbol,
-      state: ack.state === 'filled' ? 'filled' : 'acked',
+      state: 'created',
       type: 'protective',
       side: (args.position.qty ?? 0) > 0 ? 'sell' : 'buy',
       qty: Math.abs(args.position.qty),
       reduceOnly: true,
       createdAt: now,
-      ...(ack.exchangeOrderId === undefined ? {} : { exchangeOrderId: ack.exchangeOrderId }),
     })
-    record(true)
+    const ack = await args.broker.placeProtective({
+      symbol: args.symbol,
+      clientOrderId: protectiveClientId,
+      ...protective,
+    })
+    args.journal.markIntentAcked(
+      protectiveClientId,
+      ack.state === 'filled' ? 'filled' : ack.state === 'rejected' ? 'rejected' : 'acked',
+      ack.exchangeOrderId,
+      now,
+    )
+    if (ack.exchangeOrderId !== undefined) {
+      args.journal.recordOrder({
+        orderId: ack.exchangeOrderId,
+        venue: args.broker.venue,
+        exchangeOrderId: ack.exchangeOrderId,
+        clientOrderId: protectiveClientId,
+        symbol: args.symbol,
+        status: ack.state,
+        qty: Math.abs(args.position.qty),
+        filledQty: ack.state === 'filled' ? Math.abs(args.position.qty) : 0,
+        updatedAt: now,
+      })
+    }
     return { executed: true, decisionId }
   }
 
@@ -271,7 +296,14 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
       notionalUsd: sizing.notionalUsd,
       reduceOnly: false,
       ...(open.method === 'limit' && open.limitOffsetBps !== undefined
-        ? { price: entry * (1 - open.limitOffsetBps / 10_000) }
+        ? {
+            // 限价偏移是"往更优方向挂"：做多挂在 reference 之下，做空挂在 reference 之上。
+            // 旧实现一律 `entry * (1 - bps)`，做空会挂到市价之下 → 立即成交且成交价更差。
+            price:
+              open.side === 'long'
+                ? entry * (1 - open.limitOffsetBps / 10_000)
+                : entry * (1 + open.limitOffsetBps / 10_000),
+          }
         : {}),
       stopLossPrice: derivedStop,
       ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
@@ -325,7 +357,9 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     return { executed: false, reason: '硬闸未放行', decisionId }
   }
 
-  const ack = await args.broker.placeOrder(intent)
+  // ★ 意图**先落库**再发请求（plan §4.2）：崩溃时 `order_intents` 里那条 `created`
+  // 且无 ack 的记录是恢复的唯一线索。旧实现先 placeOrder 后落库，崩溃窗口里交易所
+  // 可能已受理而本地毫无记录（孤儿订单）。决策行也必须先写：意图有 decision_id 外键。
   args.journal.recordDecision({
     decisionId,
     symbol: args.symbol,
@@ -333,7 +367,7 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     decidedAt: now,
     contextHash,
     action: toDecisionAction(action.action),
-    executed: ack.state === 'filled',
+    executed: false,
     ...(sizeQty === undefined ? {} : { sizeQty }),
     ...(stopPrice === undefined ? {} : { stopPrice }),
     ...(takeProfit === undefined ? {} : { takeProfit }),
@@ -344,7 +378,7 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     decisionId,
     venue: args.broker.venue,
     symbol: args.symbol,
-    state: ack.state,
+    state: 'created',
     type: intent.type,
     side: intent.side,
     qty: intent.qty,
@@ -352,8 +386,15 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
     reduceOnly: intent.reduceOnly === true,
     createdAt: now,
     ...(intent.price === undefined ? {} : { price: intent.price }),
-    ...(ack.exchangeOrderId === undefined ? {} : { exchangeOrderId: ack.exchangeOrderId }),
   })
+
+  const ack = await args.broker.placeOrder(intent)
+  args.journal.markIntentAcked(
+    intent.clientOrderId,
+    ack.state === 'filled' ? 'filled' : ack.state === 'rejected' ? 'rejected' : 'acked',
+    ack.exchangeOrderId,
+    now,
+  )
   if (ack.exchangeOrderId !== undefined) {
     args.journal.recordOrder({
       orderId: ack.exchangeOrderId,
@@ -364,6 +405,8 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
       status: ack.state,
       qty: intent.qty,
       filledQty: ack.state === 'filled' ? intent.qty : 0,
+      // 真实成交均价（含滑点），不是信号 bar 的收盘价
+      ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
       updatedAt: now,
     })
     if (ack.state === 'filled') {
@@ -371,20 +414,64 @@ async function executePlanAction(args: ExecuteArgs): Promise<ExecuteOutcome> {
         fillId: `fill:${ack.exchangeOrderId}`,
         orderId: ack.exchangeOrderId,
         qty: intent.qty,
-        price: args.referencePrice,
-        fee: 0,
+        // 用 broker 回填的实际成交价与手续费；缺失时才退回参考价（并记 0 费）
+        price: ack.avgPrice ?? args.referencePrice,
+        fee: ack.fee ?? 0,
         feeCurrency: 'USDT',
         ts: now,
       })
     }
     // 成交后**立即**挂保护单（HTX 不支持原子括号单 ⇒ 存在暴露窗口，plan §8.2）
     if (action.action === 'open' && ack.state === 'filled' && stopPrice !== undefined) {
-      await args.broker.placeProtective({
+      const protectiveClientId = `pco-open:${decisionId}`
+      const protectiveSide: 'sell' | 'buy' = intent.side === 'buy' ? 'sell' : 'buy'
+      // 保护单也要落库：否则它对恢复流程而言是"交易所挂着、本地无记录"的孤儿单
+      // （实测会被判成 P0 不一致并要求撤销）。
+      args.journal.recordIntent({
+        intentId: `pi-open:${decisionId}`,
+        clientOrderId: protectiveClientId,
+        decisionId,
+        venue: args.broker.venue,
         symbol: args.symbol,
+        state: 'created',
+        type: 'protective',
+        side: protectiveSide,
+        qty: intent.qty,
+        reduceOnly: true,
+        createdAt: now,
+      })
+      const protectiveAck = await args.broker.placeProtective({
+        symbol: args.symbol,
+        clientOrderId: protectiveClientId,
         stopLossPrice: stopPrice,
         ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
       })
+      args.journal.markIntentAcked(
+        protectiveClientId,
+        protectiveAck.state === 'filled' ? 'filled' : 'acked',
+        protectiveAck.exchangeOrderId,
+        now,
+      )
+      if (protectiveAck.exchangeOrderId !== undefined) {
+        args.journal.recordOrder({
+          orderId: protectiveAck.exchangeOrderId,
+          venue: args.broker.venue,
+          exchangeOrderId: protectiveAck.exchangeOrderId,
+          clientOrderId: protectiveClientId,
+          symbol: args.symbol,
+          status: protectiveAck.state,
+          qty: intent.qty,
+          filledQty: 0,
+          updatedAt: now,
+        })
+      }
     }
+  }
+
+  // `close` = 全平 + cancelAll(symbol)（plan §3.3）：否则残留的保护单之后会触发，
+  // 把一个已平的仓位反向打开（实测）。
+  if (action.action === 'close') {
+    await args.broker.cancelAll(args.symbol)
   }
 
   // ★ 成交后登记结算到期时刻（plan §7.9）：**回放/机械执行路径也必须进结算队列**。
@@ -437,7 +524,27 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
   for (const bar of bars) {
     // 1) 时钟推进到本 bar 收盘；保护单先按 bar 的 high/low 触发（毫秒级不依赖 LLM）
     advanceClock(deps.clock, bar.closeTime)
-    deps.broker.onBar(request.symbol, { high: bar.high, low: bar.low, close: bar.close })
+    const protectiveFills = deps.broker.onBar(request.symbol, {
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+    })
+    // 保护单在 bar 内触发也是**成交**，必须落库（plan §13.7 审计优先 / §5.3 用真实成交）。
+    // 否则 fills 表只有入场腿，出场腿缺失，且恢复/对账看到的成交不完整。
+    for (const ack of protectiveFills) {
+      if (ack.state !== 'filled' || ack.exchangeOrderId === undefined) continue
+      const intentRow = journal.intentByClientOrderId(ack.clientOrderId)
+      if (intentRow === undefined || intentRow.qty === null) continue
+      journal.recordFill({
+        fillId: `fill:${ack.exchangeOrderId}`,
+        orderId: ack.exchangeOrderId,
+        qty: intentRow.qty,
+        price: ack.avgPrice ?? intentRow.price ?? bar.close,
+        fee: ack.fee ?? 0,
+        feeCurrency: 'USDT',
+        ts: deps.clock.now(),
+      })
+    }
 
     // 2) 特征（增量）
     const snapshot = engine.onClosedCandle(bar)
@@ -447,6 +554,9 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
     const positions = await deps.broker.getPositions()
     const position = positions.find((candidate) => candidate.symbol === request.symbol)
 
+    // 4) 计划卡：先取 active（context 需要按计划计算 plan.ageMs / window.sinceMs）
+    const plan = deps.plans.active(request.symbol)
+
     const context = createFeatureContext(snapshot, {
       extra: {
         'position.qty': position?.qty ?? 0,
@@ -454,11 +564,14 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
         'position.unrealizedPnl': position?.unrealizedPnlUsd ?? 0,
         'equity.quote': account.equityQuote,
         'price.last': bar.close,
+        // v0 计划卡的窗口 = [createdAt, windowEndsAt]；窗口开始即计划创建时刻。
+        // 这两个取值在 §3.2 词汇表里，必须真的提供，否则引用它们的计划卡永远 UNCOVERED。
+        ...(plan === undefined
+          ? {}
+          : { 'plan.ageMs': bar.closeTime - plan.createdAt, 'window.sinceMs': bar.closeTime - plan.createdAt }),
       },
     })
 
-    // 4) 计划卡：先清理过期，再匹配
-    const plan = deps.plans.active(request.symbol)
     let matchedThisBar = false
     if (plan !== undefined) {
       const outcome = matchPlan({
@@ -547,7 +660,6 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
           denied += 1
           log.push(`denied:${outcome.id}:${result.reason ?? 'unknown'}`)
         }
-        samplePnl()
       } else if (outcome.kind === 'uncovered') {
         uncovered += 1
         log.push(`UNCOVERED:${outcome.reason}`)
@@ -576,6 +688,10 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
         }
       }
     }
+
+    // 每根 bar 结束都采样一次：保护单可能在 onBar 阶段就平掉了仓位（与计划卡是否命中无关）。
+    // 旧实现只在计划卡命中后采样，漏掉了"止损在非命中 bar 触发"的盈亏（实测 realizedPnl=0）。
+    samplePnl()
   }
 
   return {
@@ -587,7 +703,7 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
     triggerKeys: journal.triggerKeys(),
     log,
     duplicateClientOrderIds: journal.duplicateClientOrderIds(),
-    realizedPnl: lastRealized,
+    realizedPnl: deps.broker.realizedPnl?.() ?? lastRealized,
     tradePnl,
     judgment: { reviewed, approved, vetoed },
   }

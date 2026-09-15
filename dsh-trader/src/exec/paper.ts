@@ -62,6 +62,8 @@ interface PaperOrder {
   readonly qty: number
   filledQty: number
   avgPrice?: number
+  /** 本单累计手续费（从现金里扣除过）—— 回填到 OrderAck 供结算对账。 */
+  feePaid: number
   status: OrderState
   readonly protective: ProtectiveSpec
   highWater?: number
@@ -194,6 +196,7 @@ export class PaperBroker implements Broker {
       side: request.side,
       qty: request.qty,
       filledQty: 0,
+      feePaid: 0,
       status: 'acked',
       protective: {
         ...(request.stopLossPrice === undefined ? {} : { stopLossPrice: request.stopLossPrice }),
@@ -233,7 +236,8 @@ export class PaperBroker implements Broker {
     }
     const side: OrderSide = position.qty > 0 ? 'sell' : 'buy'
     const now = this.options.clock.now()
-    const clientOrderId = `protect-${request.symbol}-${now}`
+    // 调用方给了幂等键就用它（审计/恢复能对上）；没给才退回自造键
+    const clientOrderId = request.clientOrderId ?? `protect-${request.symbol}-${now}`
 
     const existing = this.#byClientId.get(clientOrderId)
     if (existing !== undefined) return this.#ack(this.#orders.get(existing) as PaperOrder)
@@ -246,6 +250,7 @@ export class PaperBroker implements Broker {
       side,
       qty: Math.abs(position.qty),
       filledQty: 0,
+      feePaid: 0,
       status: 'acked',
       protective: {
         ...(request.stopLossPrice === undefined ? {} : { stopLossPrice: request.stopLossPrice }),
@@ -293,7 +298,22 @@ export class PaperBroker implements Broker {
   }
 
   #fill(order: PaperOrder, price: number, at: number): OrderAck {
-    const signed = order.side === 'buy' ? order.qty : -order.qty
+    let signed = order.side === 'buy' ? order.qty : -order.qty
+
+    // ★ reduceOnly 绝不能增加/翻转敞口：一个"平多"的止损单在持仓已被部分平掉后，
+    // 若不封顶就会把仓位翻成裸空（实测），并留下旧均价 → 虚假浮盈与错误权益。
+    if (order.protective.reduceOnly) {
+      const current = this.#positions.get(order.symbol)
+      const currentQty = current?.qty ?? 0
+      if (currentQty === 0 || Math.sign(currentQty) === Math.sign(signed)) {
+        order.status = 'rejected'
+        return this.#ack(order)
+      }
+      if (Math.abs(signed) > Math.abs(currentQty)) {
+        signed = Math.sign(signed) * Math.abs(currentQty)
+      }
+    }
+
     let position = this.#positions.get(order.symbol)
     if (position === undefined) {
       position = { qty: 0, avgPrice: 0 }
@@ -301,6 +321,12 @@ export class PaperBroker implements Broker {
     }
     const notional = Math.abs(signed) * price
     const fee = (notional * (this.options.feeBps ?? 5)) / 10_000
+
+    // 手续费是一等成本（plan §5.3 / §8）：`realizedPnl` 与每日亏损都必须含费，
+    // 否则硬闸的 dailyLossLimit 与 A/B 的净 PnL 都会低估成本。
+    this.#realizedPnl -= fee
+    const feeDay = Math.floor(at / DAY_MS) * DAY_MS
+    this.#realizedByDay.set(feeDay, (this.#realizedByDay.get(feeDay) ?? 0) - fee)
 
     if (position.qty === 0 || Math.sign(position.qty) === Math.sign(signed)) {
       const newQty = position.qty + signed
@@ -310,11 +336,12 @@ export class PaperBroker implements Broker {
     } else {
       const closing = Math.min(Math.abs(signed), Math.abs(position.qty))
       const direction = Math.sign(position.qty)
-      const realized = (price - position.avgPrice) * closing * direction
-      this.#realizedPnl += realized
+      const gross = (price - position.avgPrice) * closing * direction
+      const net = gross - fee
+      this.#realizedPnl += gross
       const day = Math.floor(at / DAY_MS) * DAY_MS
-      this.#realizedByDay.set(day, (this.#realizedByDay.get(day) ?? 0) + realized)
-      this.#consecutiveLosses = realized < 0 ? this.#consecutiveLosses + 1 : 0
+      this.#realizedByDay.set(day, (this.#realizedByDay.get(day) ?? 0) + gross)
+      this.#consecutiveLosses = net < 0 ? this.#consecutiveLosses + 1 : 0
       position.qty += signed
       if (position.qty === 0) position.avgPrice = 0
     }
@@ -322,6 +349,7 @@ export class PaperBroker implements Broker {
     this.#cash -= signed * price
     this.#cash -= fee
     order.filledQty += Math.abs(signed)
+    order.feePaid += fee
     order.avgPrice = price
     order.status = 'filled'
     return this.#ack(order)
@@ -367,6 +395,8 @@ export class PaperBroker implements Broker {
       exchangeOrderId: order.orderId,
       state: order.status,
       ts: this.options.clock.now(),
+      ...(order.avgPrice === undefined ? {} : { avgPrice: order.avgPrice }),
+      ...(order.feePaid > 0 ? { fee: order.feePaid } : {}),
     }
   }
 

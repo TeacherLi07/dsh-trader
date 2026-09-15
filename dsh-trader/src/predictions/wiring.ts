@@ -53,10 +53,16 @@ export class PmSignalRouter {
     const routed: PmRoutedSignal[] = []
     for (const signal of signals) {
       const wake: 'W3' | 'none' = signal.purpose === 'novelty' ? 'W3' : 'none'
-      const watchAllowed = this.options.store.recordWatchFire(signal.alias, now)
+      // watch 治理只对**已登记关注**的信号生效。`pm_new_market` 的信号 alias 是市场 slug，
+      // 没有对应的 watch —— 若也去 `recordWatchFire(slug)`，它会永远返回 false，
+      // 结果是"白名单新市场"永远被静默压掉（实测）。这类信号由 governor 的 novelty 限流把关。
+      const watch = this.options.store.watchByAlias(signal.alias)
+      const watchAllowed = watch === undefined ? true : this.options.store.recordWatchFire(signal.alias, now)
 
       if (!watchAllowed) {
         // 治理拒绝：落库但不唤醒
+        const lastFiredAt = watch?.lastFiredAt ?? now
+        const until = lastFiredAt + (watch?.cooldownMs ?? 0)
         this.options.queue.enqueue({
           triggerId: `pm-suppressed:${signal.dedupKey}`,
           dedupKey: `pm-suppressed:${signal.dedupKey}`,
@@ -75,7 +81,8 @@ export class PmSignalRouter {
           alias: signal.alias,
           severity: signal.severity,
           wake: 'none',
-          disposition: { kind: 'rate_limited', window: 'hour', limit: 0 },
+          // 返回的 disposition 必须与落库的一致（旧实现写 'cooldown' 却报 rate_limited）
+          disposition: { kind: 'cooldown', until },
           persisted: true,
           watchAllowed: false,
         })

@@ -122,7 +122,10 @@ export async function backfill(
       break
     }
     const next = last.openTime + tfMs
-    if (next > request.until) {
+    // `until` 是**不含**的：next 一旦到达边界，后续页只可能取到区间外的 bar ⇒ 到此为止。
+    // 旧实现写 `next > request.until`，`next === until` 时还会多发一次请求，
+    // 并把停止原因误记成 'empty'（实测）。
+    if (next >= request.until) {
       stoppedBy = 'reached_until'
       break
     }

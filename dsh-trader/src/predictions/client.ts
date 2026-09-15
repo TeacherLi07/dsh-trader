@@ -180,9 +180,18 @@ export class PmHttp {
     let lastError: unknown
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
-      // 排队：令牌不足就等，而不是撞限额
-      const acquire = bucket.tryAcquire()
-      if (!acquire.ok) await this.options.sleep(acquire.waitMs)
+      // 排队：令牌不足就等到**真的取到**令牌为止，而不是撞限额。
+      // ⚠️ 必须循环重取：`tryAcquire` 在不 ok 时**不扣费**，只 sleep 一次就发请求会让
+      // 溢出的请求全部免费（实测 10s 窗口内请求数约为 20% 预算的 2 倍）。
+      let acquire = bucket.tryAcquire()
+      while (!acquire.ok) {
+        const before = this.options.clock.now()
+        await this.options.sleep(acquire.waitMs)
+        acquire = bucket.tryAcquire()
+        // 睡眠必须让注入时钟前进（生产是 systemClock）。若时钟不动（例如误用冻结的
+        // ReplayClock + 真实 sleep），再循环只会空转 ⇒ 睡过一次就放行，保证活性。
+        if (!acquire.ok && this.options.clock.now() <= before) break
+      }
 
       this.#requests += 1
       const controller = new AbortController()

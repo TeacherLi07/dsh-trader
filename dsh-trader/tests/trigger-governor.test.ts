@@ -186,3 +186,23 @@ describe('T0.7 acceptance: replaying the same bar twice produces zero duplicate 
     expect(first.keys).toEqual(second.keys)
   })
 })
+
+describe('冷却锚定（审计修复）', () => {
+  it('★ 冷却窗口不随被压掉的命中往前滑，否则规则会被永久静音', () => {
+    const watch = makeWatch([
+      { id: 'n', purpose: 'novelty', when: 'abs(zscore20) > 2', cooldownMs: 10 * 60_000 },
+    ])
+    const ctx = createDslContext({ zscore20: 2.5 })
+    const kinds: string[] = []
+    for (let i = 0; i <= 10; i += 1) {
+      clock.advanceTo(START + i * 60_000)
+      const out = watch.onBar({ symbol: SYMBOL, timeframe: TF, barTs: START + i * 60_000, context: ctx })
+      kinds.push(out.decisions[0]?.disposition.kind ?? 'missing')
+    }
+    expect(kinds[0]).toBe('novelty')
+    // 中间 9 次都该被冷却压掉
+    expect(kinds.slice(1, 10).every((kind) => kind === 'cooldown')).toBe(true)
+    // 正好 10 分钟后必须再次触发（旧实现依旧报 cooldown）
+    expect(kinds[10]).toBe('novelty')
+  })
+})

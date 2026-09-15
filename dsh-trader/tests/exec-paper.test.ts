@@ -156,3 +156,26 @@ describe('PaperBroker', () => {
     await expect(broker.placeProtective({ symbol: SYMBOL, stopLossPrice: 90 })).rejects.toThrow()
   })
 })
+
+describe('reduceOnly 与手续费（审计修复）', () => {
+  it('★ reduceOnly 绝不翻转仓位（保护单 qty 在挂单时被冻结）', async () => {
+    const { broker } = setup(100, { feeBps: 0, slippageBps: 0 })
+    await broker.placeOrder(request())
+    await broker.placeProtective({ symbol: SYMBOL, stopLossPrice: 95 })
+    await broker.placeOrder(
+      request({ intentId: 'i2', clientOrderId: 'c2', side: 'sell', qty: 0.5, reduceOnly: true }),
+    )
+    // 保护单数量仍记为 1，但剩余持仓只有 0.5 —— 必须封顶而不是翻成 -0.5
+    broker.onBar(SYMBOL, { high: 100, low: 90, close: 90 })
+    expect(await broker.getPositions()).toEqual([])
+  })
+
+  it('★ realizedPnl 与 dailyLoss 含手续费', async () => {
+    const { broker } = setup(100, { feeBps: 10 })
+    await broker.placeOrder(request())
+    await broker.placeOrder(request({ intentId: 'i2', clientOrderId: 'c2', side: 'sell' }))
+    expect(broker.realizedPnl()).toBeLessThan(0)
+    const account = await broker.getAccount()
+    expect(account.dailyLossUsd).toBeGreaterThan(0)
+  })
+})

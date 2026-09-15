@@ -59,3 +59,18 @@ describe('when DSL v0', () => {
     expect(defaultFunctions('crossBelow', [1, 2])).toBeUndefined()
   })
 })
+
+describe('and/or 不短路（审计修复）', () => {
+  it('★ 任一侧是未知取值时整式必须 ok:false，且与书写顺序无关', () => {
+    // rsi14 缺失 = 暖机期 / 未注册的 pm alias 同构
+    const partial = createDslContext({ 'bar.close': 100, ema20: 90 })
+    expect(evaluateWhen('bar.close < ema20 and rsi14 < 30', partial).ok).toBe(false)
+    expect(evaluateWhen('rsi14 < 30 and bar.close < ema20', partial).ok).toBe(false)
+    expect(evaluateWhen('bar.close > ema20 or rsi14 < 30', partial).ok).toBe(false)
+    expect(evaluateWhen('rsi14 < 30 or bar.close > ema20', partial).ok).toBe(false)
+    // 已知取值时行为不变
+    const known = createDslContext({ 'bar.close': 100, ema20: 90, rsi14: 20 })
+    expect(evaluateWhen('bar.close < ema20 and rsi14 < 30', known)).toEqual({ ok: true, value: false })
+    expect(evaluateWhen('bar.close > ema20 or rsi14 < 30', known)).toEqual({ ok: true, value: true })
+  })
+})

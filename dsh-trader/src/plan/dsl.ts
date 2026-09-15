@@ -270,10 +270,17 @@ function evaluateBinary(
   ctx: DslContext,
 ): Primitive {
   if (node.op === 'and') {
-    return truthy(evaluateNode(node.left, ctx)) && truthy(evaluateNode(node.right, ctx))
+    // ⚠️ **不短路**：`and`/`or` 两侧都必须求值。若短路，`bar.close < ema20 and rsi14 < 30`
+    // 在 rsi14 未注册/暖机时左侧为假就直接返回 false（ok:true），把"未知"伪装成"没命中"。
+    // 项目纪律：任何未知取值必须让整式 ok:false → UNCOVERED（fail-closed）。
+    const left = truthy(evaluateNode(node.left, ctx))
+    const right = truthy(evaluateNode(node.right, ctx))
+    return left && right
   }
   if (node.op === 'or') {
-    return truthy(evaluateNode(node.left, ctx)) || truthy(evaluateNode(node.right, ctx))
+    const left = truthy(evaluateNode(node.left, ctx))
+    const right = truthy(evaluateNode(node.right, ctx))
+    return left || right
   }
 
   const left = evaluateNode(node.left, ctx)

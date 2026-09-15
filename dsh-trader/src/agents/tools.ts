@@ -571,17 +571,18 @@ const tradeExecuteOrder: ToolDefinition = {
         status: ack.state,
         qty: intent.qty,
         filledQty: ack.state === 'filled' ? intent.qty : 0,
+        ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
         updatedAt: ports.clock.now(),
       })
       if (ack.state === 'filled') {
-        const executionPrice =
-          intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? 0
+        const fallbackPrice = intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? 0
         ports.journal.recordFill({
           fillId: `fill:${ack.exchangeOrderId}`,
           orderId: ack.exchangeOrderId,
           qty: intent.qty,
-          price: executionPrice,
-          fee: 0,
+          // 结算必须用真实成交价与手续费（plan §5.3），不能写"信号价 + 0 费"
+          price: ack.avgPrice ?? fallbackPrice,
+          fee: ack.fee ?? 0,
           feeCurrency: 'USDT',
           ts: ports.clock.now(),
         })
@@ -603,11 +604,52 @@ const tradeExecuteOrder: ToolDefinition = {
     // ⑤ 成交后**立即**挂保护单（HTX 无原子括号单 ⇒ 已知暴露窗口）
     let protectiveAck: unknown = null
     if (action === 'open' && executed && stopPrice !== undefined) {
-      protectiveAck = await ports.broker.placeProtective({
+      const protectiveClientId = `pco:${effectiveDecisionId}`
+      // 保护单同样要进审计链：否则恢复流程会把它当成"交易所挂着、本地无记录"的孤儿单
+      ports.journal.recordIntent({
+        intentId: `pi:${effectiveDecisionId}`,
+        clientOrderId: protectiveClientId,
+        decisionId: effectiveDecisionId,
+        venue: ports.broker.venue,
         symbol,
+        state: 'created',
+        type: 'protective',
+        side: intent.side === 'buy' ? 'sell' : 'buy',
+        qty: intent.qty,
+        reduceOnly: true,
+        createdAt: ports.clock.now(),
+      })
+      const pAck = await ports.broker.placeProtective({
+        symbol,
+        clientOrderId: protectiveClientId,
         stopLossPrice: stopPrice,
         ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
       })
+      ports.journal.markIntentAcked(
+        protectiveClientId,
+        pAck.state === 'filled' ? 'filled' : 'acked',
+        pAck.exchangeOrderId,
+        ports.clock.now(),
+      )
+      if (pAck.exchangeOrderId !== undefined) {
+        ports.journal.recordOrder({
+          orderId: pAck.exchangeOrderId,
+          venue: ports.broker.venue,
+          exchangeOrderId: pAck.exchangeOrderId,
+          clientOrderId: protectiveClientId,
+          symbol,
+          status: pAck.state,
+          qty: intent.qty,
+          filledQty: 0,
+          updatedAt: ports.clock.now(),
+        })
+      }
+      protectiveAck = pAck
+    }
+
+    // `close` = 全平 + cancelAll(symbol)（plan §3.3）
+    if (action === 'close' && executed) {
+      await ports.broker.cancelAll(symbol)
     }
 
     return {

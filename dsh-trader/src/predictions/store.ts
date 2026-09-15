@@ -107,7 +107,15 @@ export class WatchError extends Error {
 /** 别名必须能用在小写路径里：`pm.<alias>.prob`。 */
 const ALIAS_PATTERN = /^[a-z][a-z0-9_]{0,40}$/
 
-function watchContentHash(spec: WatchSpec): string {
+/**
+ * 关注规格指纹（identity）。**不含 `expiresAt`**：续期只是把同一个关注延长，不是新规格 ——
+ * 若把它算进去，`UNIQUE(alias)` 会让"续期"变成一条撞唯一键的崩溃（实测）。
+ * 也**不含 `createdBy`**（谁登记的不改变规格）。
+ *
+ * `cooldownMs` / `maxTriggers` 取**生效值**（含默认）后参与指纹：改了冷却就是改了规格，
+ * 不能被静默当成"重复登记 → no-op"（旧实现忽略它们，改了冷却却毫无效果）。
+ */
+function watchContentHash(spec: WatchSpec, cooldownMs: number, maxTriggers: number): string {
   return `sha256:${sha256Hex(
     canonicalJson({
       alias: spec.alias,
@@ -118,7 +126,8 @@ function watchContentHash(spec: WatchSpec): string {
       tags: [...(spec.tags ?? [])].sort(),
       query: spec.query ?? null,
       planId: spec.planId ?? null,
-      expiresAt: spec.expiresAt,
+      cooldownMs,
+      maxTriggers,
     }),
   )}`
 }
@@ -127,6 +136,8 @@ function watchContentHash(spec: WatchSpec): string {
 
 export interface PmStoreOptions {
   readonly liquidity: LiquidityGateConfig
+  /** 同时 active 的关注上限（plan §4.4：默认 30）。 */
+  readonly maxActiveWatches?: number
 }
 
 export class PmStore {
@@ -212,10 +223,13 @@ export class PmStore {
     return row === undefined ? undefined : toMarketRow(row)
   }
 
-  /** 市场清单：**只返回 `created_at <= now` 的市场**（存在门控）。 */
+  /**
+   * 市场清单：**只返回 `0 < created_at <= now` 的市场**（存在门控）。
+   * `created_at = 0` 是"源没给创建时间"的退化值，不能当成"远古就存在"（fail-closed）。
+   */
   marketsVisibleAt(now: number, limit = 200): readonly PmMarketRow[] {
     const rows = this.#statements
-      .get('SELECT * FROM pm_markets WHERE created_at <= ? ORDER BY created_at DESC LIMIT ?')
+      .get('SELECT * FROM pm_markets WHERE created_at > 0 AND created_at <= ? ORDER BY created_at DESC LIMIT ?')
       .all(now, limit) as Record<string, unknown>[]
     return rows.map(toMarketRow)
   }
@@ -347,9 +361,82 @@ export class PmStore {
     if (!(cooldownMs > 0)) throw new WatchError(`cooldown_ms 必须是正数：${cooldownMs}`)
     if (!(maxTriggers > 0)) throw new WatchError(`max_triggers 必须是正数：${maxTriggers}`)
 
-    const contentHash = watchContentHash(spec)
+    const contentHash = watchContentHash(spec, cooldownMs, maxTriggers)
     const existing = this.watchByContentHash(contentHash)
-    if (existing !== undefined) return { watch: existing, created: false }
+    if (existing !== undefined) {
+      // 曾被 cancel 的同一规格：原地重新激活（否则"cancel 后再登记同一规格"会静默无效）
+      if (existing.state === 'disabled') {
+        this.#statements
+          .get(
+            `UPDATE pm_watches
+             SET state = 'active', trigger_count = 0, last_fired_at = NULL,
+                 expires_at = @expiresAt, created_at = @createdAt
+             WHERE watch_id = @watchId`,
+          )
+          .run({ watchId: existing.watchId, expiresAt: spec.expiresAt, createdAt: now })
+        const revived = this.watchById(existing.watchId)
+        if (revived === undefined) throw new WatchError('重新激活关注失败')
+        return { watch: revived, created: true }
+      }
+      // 同一规格：幂等 no-op；若给了更长的期限则顺带续期（续期不是新规格）
+      if (spec.expiresAt > existing.expiresAt) {
+        this.#statements
+          .get('UPDATE pm_watches SET expires_at = ? WHERE watch_id = ?')
+          .run(spec.expiresAt, existing.watchId)
+        return { watch: { ...existing, expiresAt: spec.expiresAt }, created: false }
+      }
+      return { watch: existing, created: false }
+    }
+
+    const row = {
+      alias: spec.alias,
+      contentHash,
+      kind: spec.kind,
+      expr: spec.expr ?? null,
+      tokenIdsJson: canonicalJson(spec.tokenIds),
+      tagsJson: canonicalJson(spec.tags ?? []),
+      query: spec.query ?? null,
+      purpose: spec.purpose,
+      planId: spec.planId ?? null,
+      cooldownMs,
+      maxTriggers,
+      expiresAt: spec.expiresAt,
+      createdBy: spec.createdBy,
+      createdAt: now,
+    }
+
+    // `alias` 有 UNIQUE 约束：同一 alias 只能有一行。若不先处理别名冲突，
+    // 插入会抛出原始 `SqliteError: UNIQUE constraint failed`（实测），既不是幂等也不是
+    // 可读的领域错误 —— 工具层只把 WatchError 转成 ToolArgumentError。
+    const aliasOwner = this.watchByAlias(spec.alias)
+    if (aliasOwner !== undefined) {
+      if (aliasOwner.state !== 'disabled') {
+        throw new WatchError(
+          `alias ${spec.alias} 已被一个规格不同的关注占用（kind/purpose/expr/冷却等不一致）；先 cancel 再重新登记`,
+        )
+      }
+      // 已取消的 alias 原地复用（不能另起一行，UNIQUE(alias) 不允许）
+      this.#statements
+        .get(
+          `UPDATE pm_watches
+           SET content_hash = @contentHash, kind = @kind, expr = @expr, token_ids_json = @tokenIdsJson,
+               tags_json = @tagsJson, query = @query, purpose = @purpose, plan_id = @planId,
+               cooldown_ms = @cooldownMs, max_triggers = @maxTriggers, trigger_count = 0,
+               expires_at = @expiresAt, state = 'active', created_by = @createdBy,
+               created_at = @createdAt, last_fired_at = NULL
+           WHERE watch_id = @watchId`,
+        )
+        .run({ ...row, watchId: aliasOwner.watchId })
+      const reused = this.watchById(aliasOwner.watchId)
+      if (reused === undefined) throw new WatchError('复用关注失败')
+      return { watch: reused, created: true }
+    }
+
+    // 上限（plan §4.4：默认 30 个 active）—— 无限登记会让轮询 token 与 novelty 面无限膨胀。
+    const cap = this.options.maxActiveWatches ?? 30
+    if (this.activeWatches(now).length >= cap) {
+      throw new WatchError(`active 关注已达上限 ${cap}（plan §4.4）；先 cancel 一些再登记`)
+    }
 
     const watchId = `pmw-${fingerprint({ alias: spec.alias, contentHash }).slice(7, 23)}`
     this.#statements
@@ -361,23 +448,7 @@ export class PmStore {
            (@watchId, @alias, @contentHash, @kind, @expr, @tokenIdsJson, @tagsJson, @query, @purpose, @planId,
             @cooldownMs, @maxTriggers, 0, @expiresAt, 'active', @createdBy, @createdAt)`,
       )
-      .run({
-        watchId,
-        alias: spec.alias,
-        contentHash,
-        kind: spec.kind,
-        expr: spec.expr ?? null,
-        tokenIdsJson: canonicalJson(spec.tokenIds),
-        tagsJson: canonicalJson(spec.tags ?? []),
-        query: spec.query ?? null,
-        purpose: spec.purpose,
-        planId: spec.planId ?? null,
-        cooldownMs,
-        maxTriggers,
-        expiresAt: spec.expiresAt,
-        createdBy: spec.createdBy,
-        createdAt: now,
-      })
+      .run({ ...row, watchId })
     const created = this.watchById(watchId)
     if (created === undefined) throw new WatchError('写入关注失败')
     return { watch: created, created: true }
@@ -479,12 +550,29 @@ export class PmStore {
             ...(quote.lastTradePrice === undefined ? {} : { lastTradePrice: quote.lastTradePrice }),
           })
     const series = this.seriesAsOf(tokenId, now)
-    const liquidity: LiquidityVerdict =
-      quote === undefined ? { pass: false, reason: '没有可见的盘口快照' } : liquidityGate(quote, this.options.liquidity)
 
     const market = this.marketsVisibleAt(now).find((row) => row.tokenIds.includes(tokenId))
     const marketView =
       market === undefined ? undefined : this.marketViewAt(market.conditionId, now)
+
+    /**
+     * 流动性来自 **盘口快照或 Gamma 元数据**，两者取其一。
+     * 盘口端点不返回 liquidity；元数据页只覆盖"最新 N 个市场"，
+     * 因此一个早已存在、但不在最新页里的关注市场会拿不到流动性 ⇒ 门槛永远"缺少流动性数据"。
+     * 这是实测过的空跑风险：novelty 会**因为错的理由**一条都不发（专项 ④ 假通过）。
+     * 价差仍**只**认盘口（元数据没有可信价差）；缺价差即 fail-closed。
+     */
+    const liquidityValue = quote?.liquidity ?? market?.liquidity ?? undefined
+    const liquidity: LiquidityVerdict =
+      quote === undefined && liquidityValue === undefined
+        ? { pass: false, reason: '没有可见的盘口快照' }
+        : liquidityGate(
+            {
+              ...(liquidityValue === undefined ? {} : { liquidity: liquidityValue }),
+              ...(quote?.spread === undefined ? {} : { spread: quote.spread }),
+            },
+            this.options.liquidity,
+          )
 
     return {
       alias: watch.alias,
@@ -497,8 +585,8 @@ export class PmStore {
       liquidity,
       mid: quote?.mid ?? null,
       spread: quote?.spread ?? null,
-      volume24h: quote?.volume24h ?? null,
-      liquidityQuote: quote?.liquidity ?? null,
+      volume24h: quote?.volume24h ?? market?.volume24h ?? null,
+      liquidityQuote: liquidityValue ?? null,
       ageMs: quote === undefined ? null : now - quote.observedAt,
       change1h: priceChange(series, now, 3_600_000),
       change24h: priceChange(series, now, 24 * 3_600_000),

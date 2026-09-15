@@ -178,3 +178,37 @@ describe('CrashRecovery：在途意图（plan §4.2 / P1 ⑤）', () => {
     expect(await recovery.run()).toMatchObject({ scanned: 0, freezeSymbols: [], orphanOpenOrders: [] })
   })
 })
+
+describe('恢复对未定状态必须冻结（审计修复）', () => {
+  it('★ 交易所返回 created/unknown ⇒ 标 unknown + 冻结标的，绝不记 acked', async () => {
+    crashScene('co-unknown')
+    const recovery = new CrashRecovery({
+      journal,
+      clock,
+      broker: brokerStub({
+        lookup: (clientOrderId) =>
+          Promise.resolve({ intentId: `oi:${clientOrderId}`, clientOrderId, state: 'unknown', ts: NOW }),
+      }),
+    })
+    const result = await recovery.run()
+    expect(result.freezeSymbols).toContain('BTC/USDT')
+    expect(result.resolved[0]?.outcome.kind).toBe('unknown')
+    const row = db.prepare('SELECT state, acked_at FROM order_intents WHERE client_order_id = ?').get('co-unknown') as {
+      state: string
+      acked_at: number | null
+    }
+    expect(row.state).toBe('unknown')
+    expect(row.acked_at).toBeNull()
+
+    crashScene('co-created')
+    const recovery2 = new CrashRecovery({
+      journal,
+      clock,
+      broker: brokerStub({
+        lookup: (clientOrderId) =>
+          Promise.resolve({ intentId: `oi:${clientOrderId}`, clientOrderId, state: 'created', ts: NOW }),
+      }),
+    })
+    expect((await recovery2.run()).freezeSymbols).toContain('BTC/USDT')
+  })
+})

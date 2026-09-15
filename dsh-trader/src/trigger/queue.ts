@@ -123,9 +123,20 @@ export class TriggerQueue {
     return this.#statements.get('SELECT 1 AS x FROM triggers WHERE dedup_key = ?').get(dedupKey) !== undefined
   }
 
-  /** 该 (rule, symbol) 最近一次触发时间 —— 冷却窗口的依据。 */
+  /**
+   * 该 (rule, symbol) **最近一次真正生效**的触发时间 —— 冷却窗口的依据。
+   *
+   * ⚠️ 必须排除被冷却/限流压掉的尝试：它们的 `created_at` 也不断刷新，
+   * 若把它们算进来，冷却窗口会随着每次被压掉的命中一直往后滑，
+   * 一条命中频率高于冷却的规则会**永远无法再次触发**（实测：31 次命中只发 1 次）。
+   */
   latestFireAt(ruleId: string, symbol: string): number | undefined {
-    const row = this.#statements.get('SELECT MAX(created_at) AS t FROM triggers WHERE rule_id = ? AND symbol = ?')
+    const row = this.#statements
+      .get(
+        `SELECT MAX(created_at) AS t FROM triggers
+         WHERE rule_id = ? AND symbol = ?
+           AND disposition NOT IN ('cooldown', 'rate_limited')`,
+      )
       .get(ruleId, symbol) as { t: number | null }
     return row.t ?? undefined
   }

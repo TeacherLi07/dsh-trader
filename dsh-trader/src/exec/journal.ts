@@ -461,7 +461,10 @@ export class DecisionJournal {
            (order_id, venue, exchange_order_id, client_order_id, symbol, status, qty, filled_qty, avg_price, updated_at)
          VALUES
            (@orderId, @venue, @exchangeOrderId, @clientOrderId, @symbol, @status, @qty, @filledQty, @avgPrice, @updatedAt)
-         ON CONFLICT (order_id) DO NOTHING`,
+         -- 两个唯一键分别兜底（不用裸 DO NOTHING，也不用 INSERT OR IGNORE：
+         -- 后两者语义更宽，容易把 CHECK/NOT NULL 违反一起吞掉）
+         ON CONFLICT (order_id) DO NOTHING
+         ON CONFLICT (venue, exchange_order_id) DO NOTHING`,
       )
       .run({
         orderId: order.orderId,
@@ -482,7 +485,9 @@ export class DecisionJournal {
     const result = this.#statements.get(
         `INSERT INTO fills (fill_id, order_id, qty, price, fee, fee_ccy, ts)
          VALUES (@fillId, @orderId, @qty, @price, @fee, @feeCurrency, @ts)
-         ON CONFLICT (fill_id) DO NOTHING`,
+         -- fill_id 主键与 UNIQUE(order_id, ts, qty)（交易所重复推送）分别兜底
+         ON CONFLICT (fill_id) DO NOTHING
+         ON CONFLICT (order_id, ts, qty) DO NOTHING`,
       )
       .run({
         fillId: fill.fillId,
@@ -553,6 +558,73 @@ export class DecisionJournal {
       side: row.side,
       ts: row.ts,
     }))
+  }
+
+  /**
+   * 某标的在 `beforeTs` 之前的**全部成交**（按时间升序）。
+   * 用途：结算 `reduce`/`close` 决策时重建当时的持仓与**真实入场均价** ——
+   * 否则会把"平仓成交"当成新入场，把一笔 +20% 的回合记成 ~0%（实测）。
+   */
+  fillsForSymbolBefore(symbol: string, beforeTs: number): readonly FillView[] {
+    const rows = this.#statements
+      .get(
+        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts, COALESCE(oi.side, 'buy') AS side
+         FROM fills f
+         JOIN orders o ON o.order_id = f.order_id
+         JOIN order_intents oi ON oi.client_order_id = o.client_order_id
+         WHERE oi.symbol = ? AND f.ts < ?
+         ORDER BY f.ts ASC, f.fill_id ASC`,
+      )
+      .all(symbol, beforeTs) as {
+      fill_id: string
+      qty: number
+      price: number
+      fee: number | null
+      ts: number
+      side: string
+    }[]
+    return rows.map((row) => ({
+      fillId: row.fill_id,
+      qty: row.qty,
+      price: row.price,
+      fee: row.fee ?? 0,
+      side: row.side,
+      ts: row.ts,
+    }))
+  }
+
+  /** 按 client_order_id 取意图的最小视图 —— 成交回报用它补 qty/decisionId。 */
+  intentByClientOrderId(clientOrderId: string):
+    | {
+        readonly intentId: string
+        readonly decisionId: string | null
+        readonly symbol: string
+        readonly side: string | null
+        readonly qty: number | null
+        readonly price: number | null
+      }
+    | undefined {
+    const row = this.#statements
+      .get('SELECT intent_id, decision_id, symbol, side, qty, price FROM order_intents WHERE client_order_id = ?')
+      .get(clientOrderId) as
+      | {
+          intent_id: string
+          decision_id: string | null
+          symbol: string
+          side: string | null
+          qty: number | null
+          price: number | null
+        }
+      | undefined
+    if (row === undefined) return undefined
+    return {
+      intentId: row.intent_id,
+      decisionId: row.decision_id,
+      symbol: row.symbol,
+      side: row.side,
+      qty: row.qty,
+      price: row.price,
+    }
   }
 
   triggerKeys(): readonly string[] {

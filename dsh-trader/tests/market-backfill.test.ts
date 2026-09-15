@@ -134,3 +134,18 @@ describe('backfill', () => {
     ).rejects.toThrow(MarketSourceError)
   })
 })
+
+describe('backfill：until 是开区间（审计修复）', () => {
+  it('★ next === until 时必须立即停，且停止原因是 reached_until', async () => {
+    const clock = new ReplayClock(at(10))
+    const source = new FakeSource({ pages: [series(at(0), 3), series(at(3), 3)] })
+    const result = await backfill(
+      { source, archive, clock },
+      { symbol: SYMBOL, timeframe: TF, since: at(0), until: at(3) },
+    )
+    expect(source.calls).toHaveLength(1)
+    expect(result.stoppedBy).toBe('reached_until')
+    // 区间内只有 0/1/2 三根
+    expect(result.written).toBe(3)
+  })
+})
