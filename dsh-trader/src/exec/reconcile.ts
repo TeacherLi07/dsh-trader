@@ -10,6 +10,9 @@
  *   · 有持仓但无保护单 → **P0 不一致**（plan §6.3，HTX 不支持原子括号单带来的窗口）。
  */
 
+import type { Clock } from '../clock.js'
+import type { OrderAck, PositionSnapshot } from './broker.js'
+
 export interface LocalOrderSnapshot {
   readonly clientOrderId: string
   readonly symbol: string
@@ -143,3 +146,151 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
 }
 
 export { severityOf }
+
+export type ReconciliationSnapshotProvider<T> = (() => T | Promise<T>) | T
+
+export type ReconciliationEvent = ReconciliationAction & {
+  /** 保留完整动作，调用方不必依赖动作联合的字段展开方式。 */
+  readonly action: ReconciliationAction
+  readonly at: number
+  readonly level: SeverityClass
+  readonly message: string
+  readonly error?: string
+}
+
+export interface ReconcilerDeps {
+  readonly broker: {
+    readonly getOpenOrders: () =>
+      | readonly (Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string })[]
+      | Promise<readonly (Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string })[]>
+    readonly getPositions: () =>
+      | readonly Pick<PositionSnapshot, 'symbol' | 'qty'>[]
+      | Promise<readonly Pick<PositionSnapshot, 'symbol' | 'qty'>[]>
+    readonly cancelOrder: (exchangeOrderId: string) => Promise<unknown>
+  }
+  readonly clock: Clock
+  readonly localOrders: ReconciliationSnapshotProvider<readonly LocalOrderSnapshot[]>
+  readonly localPositions: ReconciliationSnapshotProvider<readonly LocalPositionSnapshot[]>
+  /** 该回调也是审计端口：包括已执行的撤单与未执行成功的动作。 */
+  readonly onAlert: (event: ReconciliationEvent) => void
+  readonly audit?: (event: ReconciliationEvent) => void
+}
+
+export interface ReconcilerResult {
+  readonly result: ReconciliationResult
+  readonly applied: readonly ReconciliationAction[]
+  readonly freezeTrading: boolean
+}
+
+async function readSnapshot<T>(provider: ReconciliationSnapshotProvider<T>): Promise<T> {
+  if (typeof provider === 'function') return await (provider as () => T)()
+  return provider
+}
+
+function eventFor(action: ReconciliationAction, at: number, error?: unknown): ReconciliationEvent {
+  return {
+    ...action,
+    action,
+    at,
+    level: severityOf(action),
+    message: actionMessage(action),
+    ...(error === undefined ? {} : { error: String(error) }),
+  } as ReconciliationEvent
+}
+
+function emitEvent(deps: ReconcilerDeps, event: ReconciliationEvent): void {
+  deps.onAlert(event)
+  deps.audit?.(event)
+}
+
+function actionMessage(action: ReconciliationAction): string {
+  switch (action.kind) {
+    case 'cancel_orphan':
+      return '撤销孤儿订单 ' + action.clientOrderId + '：' + action.reason
+    case 'alert_missing_order':
+      return '本地订单 ' + action.clientOrderId + ' 在交易所不存在：' + action.reason
+    case 'alert_unknown_position':
+      return '发现未知持仓 ' + action.symbol + '，数量 ' + action.qty + '；冻结自动交易。'
+    case 'alert_unprotected_position':
+      return '持仓 ' + action.symbol + ' 没有保护单；冻结自动交易。'
+    case 'alert_qty_mismatch':
+      return (
+        '持仓 ' +
+        action.symbol +
+        ' 数量不一致：本地 ' +
+        action.local +
+        '，交易所 ' +
+        action.remote +
+        '；冻结自动交易。'
+      )
+  }
+}
+
+function isFreezeAction(action: ReconciliationAction): boolean {
+  return (
+    action.kind === 'alert_unknown_position' ||
+    action.kind === 'alert_unprotected_position' ||
+    action.kind === 'alert_qty_mismatch'
+  )
+}
+
+export class Reconciler {
+  constructor(private readonly deps: ReconcilerDeps) {}
+
+  async runOnce(): Promise<ReconcilerResult> {
+    const [remoteOrders, remotePositions, localOrders, localPositions] = await Promise.all([
+      this.deps.broker.getOpenOrders(),
+      this.deps.broker.getPositions(),
+      readSnapshot(this.deps.localOrders),
+      readSnapshot(this.deps.localPositions),
+    ])
+    const result = reconcile({
+      localOrders,
+      remoteOrders: remoteOrders.map(toRemoteOrder),
+      localPositions,
+      remotePositions: remotePositions.map(toRemotePosition),
+    })
+    const applied: ReconciliationAction[] = []
+    let freezeTrading = result.freezeTrading
+
+    for (const action of result.actions) {
+      const at = this.deps.clock.now()
+      if (action.kind === 'cancel_orphan') {
+        try {
+          // 当前快照没有单独的 exchangeOrderId 字段，只能沿用其稳定 clientOrderId。
+          await this.deps.broker.cancelOrder(action.clientOrderId)
+          applied.push(action)
+          emitEvent(this.deps, eventFor(action, at))
+        } catch (error) {
+          freezeTrading = true
+          emitEvent(this.deps, {
+            ...eventFor(action, at, error),
+            level: 'P0',
+            message: '撤销孤儿订单失败，冻结自动交易：' + action.clientOrderId,
+          } as ReconciliationEvent)
+        }
+        continue
+      }
+
+      if (isFreezeAction(action)) freezeTrading = true
+      applied.push(action)
+      emitEvent(this.deps, eventFor(action, at))
+    }
+
+    return { result, applied, freezeTrading }
+  }
+}
+
+type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string }
+type BrokerPosition = Pick<PositionSnapshot, 'symbol' | 'qty'>
+
+function toRemoteOrder(order: BrokerOpenOrder): RemoteOrderSnapshot {
+  return {
+    clientOrderId: order.clientOrderId,
+    symbol: order.symbol ?? '',
+  }
+}
+
+function toRemotePosition(position: BrokerPosition): RemotePositionSnapshot {
+  return { symbol: position.symbol, qty: position.qty }
+}
