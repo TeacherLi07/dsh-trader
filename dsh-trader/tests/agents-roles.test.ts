@@ -60,8 +60,10 @@ describe('role surface (T1.2)', () => {
 
   it('reports the unimplemented tools instead of pretending the surface is complete', () => {
     const missing = missingTools(IMPLEMENTED_TOOL_NAMES)
+    expect(missing.length).toBeGreaterThan(0)
     expect(missing).toContain('trade_derivatives')
-    expect(missing).toContain('trade_regime')
+    expect(IMPLEMENTED_TOOL_NAMES).toContain('trade_regime')
+    expect(missing).not.toContain('trade_regime')
     expect(missing).toContain('trade_stress_test')
     expect(missing).toContain('trade_workflow_run')
     // 已实现的绝不能出现在"缺失"里

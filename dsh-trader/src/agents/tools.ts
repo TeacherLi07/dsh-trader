@@ -16,9 +16,11 @@ import type { DecisionJournal } from '../exec/journal.js'
 import { computeSize, stopPriceFor, takeProfitFor } from '../exec/sizing.js'
 import type { BarArchive } from '../market/archive.js'
 import type { FeatureArchive } from '../market/feature-archive.js'
+import { regimeOf } from '../market/regime.js'
 import { DECISION_ACTIONS, TIMEFRAMES, type DecisionAction, type StopSpec } from '../plan/schema.js'
 import type { PlanStore } from '../plan/store.js'
 import { recallLessons } from '../memory/recall.js'
+import { horizonMsForTimeframe } from '../memory/settle.js'
 import {
   WATCH_KINDS,
   WATCH_PURPOSES,
@@ -197,6 +199,69 @@ const tradeMarket: ToolDefinition = {
       })),
       snapshot: latest?.values ?? null,
       fingerprint: latest?.fingerprint ?? null,
+    }
+  },
+}
+
+const tradeRegime: ToolDefinition = {
+  name: 'trade_regime',
+  description:
+    '只读：按同标的同时间框架近 90 天特征快照计算 regime 分桶；历史不足或指标暖机时 fail-closed。',
+  sideEffect: false,
+  parameters: {
+    symbol: { type: 'string', required: true },
+    timeframe: { type: 'string', required: true, enum: TIMEFRAMES },
+  },
+  async execute(args, ports) {
+    const symbol = requireString(args, 'symbol')
+    const timeframe = requireEnum(args, 'timeframe', TIMEFRAMES)
+    const asOf = ports.clock.now()
+    const ninetyDaysMs = 90 * 24 * 3_600_000
+    const snapshots = ports.features.range(symbol, timeframe, {
+      since: asOf - ninetyDaysMs,
+      until: asOf,
+      // 90 天的 1m 快照约 12.96 万根；归档上限会再次保护异常大的请求。
+      limit: 200_000,
+    })
+    const latest = snapshots.at(-1)
+    const inputs = {
+      ema20: latest?.values.ema20 ?? null,
+      ema50: latest?.values.ema50 ?? null,
+      atr14: latest?.values.atr14 ?? null,
+      volRealized20: latest?.values.volRealized20 ?? null,
+    }
+    const volHistory = snapshots
+      .map((snapshot) => snapshot.values.volRealized20)
+      .filter((value): value is number => value !== null && Number.isFinite(value))
+    const result = regimeOf({ symbol, timeframe, ...inputs, volHistory })
+
+    if (!result.ok) {
+      return {
+        ok: false,
+        symbol,
+        timeframe,
+        bucket: null,
+        trend: null,
+        vol: null,
+        inputs,
+        samples: volHistory.length,
+        asOf,
+        reason: result.reason,
+        note: 'regime 未完成暖机或历史样本不足；不猜测桶。',
+      }
+    }
+
+    return {
+      ok: true,
+      symbol,
+      timeframe,
+      bucket: result.bucket,
+      trend: result.trend,
+      vol: result.vol,
+      inputs,
+      samples: result.samples,
+      asOf,
+      note: 'trend 使用 abs(ema20-ema50)/atr14，vol 使用近 90 天 volRealized20 分位；结果只读。',
     }
   },
 }
@@ -592,11 +657,13 @@ const tradeExecuteOrder: ToolDefinition = {
     const executed = ack.state === 'filled'
     if (executed) {
       ports.journal.markDecisionExecuted(effectiveDecisionId)
-      // 只有成交的决策才进结算队列（plan §7.9 ④）：到期时刻与"何时重跑该标的"无关
+      // 只有成交的决策才进结算队列（plan §7.9 ④）：到期时刻与"何时重跑该标的"无关。
+      // 视界**按 tf 推导**（plan §12 #18）：1h→4h、4h→16h、1d→24h；全局 4h 常量对 1d 卡过短。
       if (action === 'open' || action === 'close' || action === 'reduce') {
         ports.journal.markDecisionReflectionDue(
           effectiveDecisionId,
-          ports.clock.now() + (ports.reflectionHorizonMs ?? DEFAULT_REFLECTION_HORIZON_MS),
+          ports.clock.now() +
+            (ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe)),
         )
       }
     }
@@ -840,6 +907,7 @@ const tradePredictionWatch: ToolDefinition = {
 
 export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   tradeMarket,
+  tradeRegime,
   tradePortfolio,
   tradeOrderStatus,
   tradeLimits,

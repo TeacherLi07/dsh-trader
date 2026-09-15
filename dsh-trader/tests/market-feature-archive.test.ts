@@ -80,4 +80,40 @@ describe('FeatureArchive', () => {
     expect(archive.get(SYMBOL, TF, START)).toBeDefined()
     expect(archive.get(SYMBOL, TF, START - HOUR)).toBeUndefined()
   })
+
+  it('reads an inclusive range in ascending open-time order and respects limit', () => {
+    const bars = normalizeCandles(randomSeries(START, 8), SYMBOL, TF, START + 8 * HOUR).candles
+    const engine = new FeatureEngine()
+    const stored: FeatureSnapshot[] = []
+    for (const bar of bars) {
+      const item = engine.onClosedCandle(bar)
+      stored.push(item)
+      archive.upsert(item)
+    }
+    expect(stored.length).toBeGreaterThan(0)
+
+    const ranged = archive.range(SYMBOL, TF, {
+      since: stored[2]!.openTime,
+      until: stored[5]!.openTime,
+    })
+    expect(ranged.length).toBeGreaterThan(0)
+    expect(ranged).toEqual(stored.slice(2, 6))
+    expect(ranged.map((item) => item.openTime)).toEqual(
+      [...ranged].map((item) => item.openTime).sort((left, right) => left - right),
+    )
+
+    const limited = archive.range(SYMBOL, TF, { limit: 2 })
+    expect(limited.length).toBeGreaterThan(0)
+    expect(limited).toEqual(stored.slice(0, 2))
+    expect(archive.range(SYMBOL, TF, { since: START + 100 * HOUR })).toEqual([])
+  })
+
+  it('fails loudly instead of treating malformed snapshot JSON as missing data', () => {
+    db.prepare(
+      `INSERT INTO features (symbol, timeframe, open_time, snapshot_json, fingerprint)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run(SYMBOL, TF, START, '{not-json', 'sha256:bad')
+
+    expect(() => archive.range(SYMBOL, TF)).toThrow()
+  })
 })
