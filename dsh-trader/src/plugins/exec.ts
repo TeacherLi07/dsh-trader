@@ -19,6 +19,8 @@ import { applyProxyAwareFetch } from '../market/ccxt-source.js'
 import { CcxtBroker, type CcxtProExchangeLike } from '../exec/ccxt-broker.js'
 import { DecisionJournal } from '../exec/journal.js'
 import { LocalStateReader, runReadOnlyPreflight } from '../exec/preflight.js'
+import { createExecRuntime, type ExecRuntime } from '../exec/runtime.js'
+import type { ExecRuntimeConfig, TradePorts } from '../exec/ports.js'
 
 export const name = 'trade-exec'
 
@@ -43,7 +45,21 @@ export const Config = z.object({
   /** OKX sandbox；HTX 没有该端点，不应打开。 */
   sandbox: z.boolean(),
   /** 读余额的账户类型（HTX 现货与 USDT 永续分离）；跑永续必须是 `swap`。 */
-  accountType: z.string(),
+  accountType: z.string().default('swap'),
+  /** 执行组合根与周期对账；默认关闭以保持旧 profile 不触网。 */
+  reconcileEnabled: z.boolean().default(false),
+  /** 启动对账是否执行孤儿撤单；默认只报告（plan §12.2 A 第①步）。 */
+  liveAckOrphans: z.boolean().default(false),
+  paperInitialEquityQuote: z.number().default(10_000),
+  paperSlippageBps: z.number().default(5),
+  paperFeeBps: z.number().default(5),
+  reconcileMs: z.number().default(60_000),
+  /** 组合根启动所需的运行时参数；未齐全时拒绝启动 runtime，不猜默认值。 */
+  riskPct: z.number(),
+  symbols: z.array(z.string()),
+  timeframes: z.array(z.string()),
+  benchmark: z.string(),
+  venue: z.string().default('htx'),
 })
 
 export interface ExecConfig {
@@ -63,6 +79,17 @@ export interface ExecConfig {
   preflightSymbol?: string
   sandbox?: boolean
   accountType?: string
+  reconcileEnabled?: boolean
+  liveAckOrphans?: boolean
+  paperInitialEquityQuote?: number
+  paperSlippageBps?: number
+  paperFeeBps?: number
+  reconcileMs?: number
+  riskPct?: number
+  symbols?: readonly string[]
+  timeframes?: readonly string[]
+  benchmark?: string
+  venue?: string
 }
 
 export type ExecBrokerKind = 'paper' | 'ccxt'
@@ -129,6 +156,59 @@ export function limitsFromConfig(config: ExecConfig): RiskLimits | null {
   }
 }
 
+let currentExecPorts: TradePorts | undefined
+
+/**
+ * 模块级端口注册是插件间最小依赖面：tools 插件可以直接读取同一组 ports，
+ * 不必依赖 Cordis 的异步 service resolve 顺序；卸载时由持有者按同一引用清理。
+ */
+export function setExecPorts(ports: TradePorts | undefined): void {
+  currentExecPorts = ports
+}
+
+export function getExecPorts(): TradePorts | undefined {
+  return currentExecPorts
+}
+
+function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | undefined {
+  if (
+    config.riskPct === undefined ||
+    config.symbols === undefined ||
+    config.timeframes === undefined ||
+    config.benchmark === undefined
+  ) {
+    return undefined
+  }
+  const limits = limitsFromConfig(config)
+  // 本插件没有 waiver 配置；缺限额时拒绝启动 runtime，避免把配置遗漏当成显式放弃。
+  if (limits === null) return undefined
+  return {
+    mode: config.mode,
+    riskPct: config.riskPct,
+    symbols: config.symbols,
+    timeframes: config.timeframes,
+    benchmark: config.benchmark,
+    venue: (config.venue ?? 'htx') as ExecRuntimeConfig['venue'],
+    accountType: config.accountType ?? 'swap',
+    perOrderCapUsd: limits.perOrderCapUsd,
+    maxExposureUsd: limits.maxExposureUsd,
+    maxLeverage: limits.maxLeverage,
+    dailyLossLimitUsd: limits.dailyLossLimitUsd,
+    maxDrawdownUsd: limits.maxDrawdownUsd,
+    maxConsecutiveLosses: limits.maxConsecutiveLosses,
+    maxSpreadBps: limits.maxSpreadBps,
+    maxOpenOrders: limits.maxOpenOrders,
+    apiKey: config.apiKey,
+    apiSecret: config.apiSecret,
+    sandbox: config.sandbox,
+    reconcileMs: config.reconcileMs ?? 60_000,
+    liveAckOrphans: config.liveAckOrphans ?? false,
+    paperInitialEquityQuote: config.paperInitialEquityQuote ?? 10_000,
+    paperSlippageBps: config.paperSlippageBps ?? 5,
+    paperFeeBps: config.paperFeeBps ?? 5,
+  }
+}
+
 type CcxtModule = Record<string, new (options: unknown) => CcxtProExchangeLike>
 
 /** ccxt 是 CJS：动态导入后取 `.default`。延迟到真正需要时才加载（避免关闭预检时的启动开销）。 */
@@ -152,13 +232,53 @@ export function apply(ctx: Context, config: ExecConfig): void {
   )
 
   let disposed = false
+  let runtime: ExecRuntime | undefined
   ctx.effect(
     () => () => {
       disposed = true
-      /* 组合根持有 broker 时在这里解除用户数据流；本插件本身不拥有网络资源。 */
+      const owned = runtime
+      if (owned !== undefined && getExecPorts() === owned.getPorts()) setExecPorts(undefined)
+      void owned?.dispose()
     },
     'trade.exec.close',
   )
+
+  // 组合根是懒启动的：默认不创建交易所、不触发对账；异步完成后仍检查 disposed，
+  // 防止插件卸载与动态加载竞态把旧 ports 暴露给其它插件。
+  if (config.reconcileEnabled === true) {
+    const runtimeConfig = runtimeConfigFromExecConfig(config)
+    if (runtimeConfig === undefined) {
+      logger.error('执行 runtime 参数不完整：需要 riskPct、symbols、timeframes、benchmark 与完整 limits')
+    } else {
+      void (async () => {
+        try {
+          const created = await createExecRuntime(runtimeConfig, {
+            db: getDatabase(),
+            clock: systemClock(),
+          })
+          if (disposed) {
+            await created.dispose()
+            return
+          }
+          runtime = created
+          setExecPorts(created.getPorts())
+          logger.info(
+            '执行 runtime 已启动：broker=' +
+              created.broker.venue +
+              ' symbols=' +
+              String(runtimeConfig.symbols.length) +
+              ' timeframes=' +
+              String(runtimeConfig.timeframes.length) +
+              ' reconcileMs=' +
+              String(runtimeConfig.reconcileMs),
+          )
+        } catch (error) {
+          // 启动对账失败时不暴露半成品 ports；错误交给运行日志/外部告警处理。
+          if (!disposed) logger.error('执行 runtime 启动失败：' + String(error))
+        }
+      })()
+    }
+  }
 
   // 只读预检：显式打开才打网络；全程只读，不撤单、不下单。
   if (config.preflightEnabled !== true) return
