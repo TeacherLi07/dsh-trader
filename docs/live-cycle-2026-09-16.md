@@ -35,6 +35,15 @@ W1 窗口是否调用 `trade_plan_card` 判出机会，以及承诺是否在下�
 - `mode` 保持 `live_auto`；回滚只需把 `trade-exec.mode` 改回 `paper`；
 - 限额（由 24.914 USDT 推导）：单笔 ≤12、总敞口 ≤24、**1×**、日亏 ≤1.25、回撤 ≤2.5、连亏 3、点差 ≤10bps、≤2 挂单。
 
+## 会话结束后的状态（2026-09-16）
+
+本会话定位是**开发与测试**，因此首轮观测结束后已停止常驻进程并把配置回退到开发默认：
+
+- 交易进程与 watchdog **已停止**（端口 3099 释放，进程表无残留）；
+- `trade-exec.mode` 已回退为 **`paper`**；重新 arm 只需改回 `live_auto` 一行；
+- `heartbeat.halted` 复位为 0（本次从未真正下单，无需人工 `/resume`）；
+- 本地库 `plan_cards`/`order_intents`/`orders`/`fills` 均为 **0**；交易所侧 0 持仓、0 挂单、权益 24.914 USDT。
+
 ## 已知的非阻塞项
 
 - 价目表在该库为空 ⇒ `price_table_stale` 告警反复出现，成本核算退化为 token 上限（不会静默计 0）。
