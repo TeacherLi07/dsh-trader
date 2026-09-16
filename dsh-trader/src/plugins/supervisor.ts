@@ -28,6 +28,7 @@ import type { TradePorts } from '../exec/ports.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
 import { dueWindows, validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
 import { getExecPorts } from './exec.js'
+import { assertWiredSupervisorConfig } from '../supervisor/config-guard.js'
 
 export const name = 'trade-supervisor'
 /** 需要 agents 服务才能唤醒 desk；心跳与行情不依赖它。 */
@@ -107,6 +108,12 @@ export function buildWindowNotice(
 }
 
 export function apply(ctx: Context, config: SupervisorConfig): void {
+  // `l2` / `l3MinIntervalMs` / `dailyBudgetUsd` 目前不生效（W2/W3 未接线）：配了就拒绝启动。
+  assertWiredSupervisorConfig({
+    l2: config.l2,
+    l3MinIntervalMs: config.l3MinIntervalMs,
+    dailyBudgetUsd: config.dailyBudgetUsd,
+  })
   const logger = ctx.logger('trade-supervisor')
   const clock = systemClock()
   const database = getDatabase()
@@ -115,6 +122,19 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     journal.appendAudit(event)
   })
   const heartbeatMs = config.heartbeatMs ?? 15_000
+
+  // 显式声明 W2/W3 的状态（审计 S7）。旧实现是"不接线"的静默状态：配置和纯函数都在，
+  // 看起来逃逸通道在工作，实际 `decideWake`/`claim` 都没有调用方。把关闭写成可审计的事实。
+  logger.info('W2/W3 判断通道未启用（P1.5 判定：关闭；decideWake/claim 未接线）；本进程只驱动 W1 审议窗')
+  journal.appendAudit({
+    actor: 'system',
+    kind: 'w2w3_disabled',
+    payload: {
+      reason: 'P1.5 闸门判定关闭 W2/W3；decideWake 与 TriggerQueue.claim 在生产路径未接线',
+      windows: (config.windows ?? DEFAULT_WINDOWS).map((window) => window.id),
+    },
+    ts: clock.now(),
+  })
 
   // 价目表年龄检查（plan §12 #19）：>90 天 ⇒ P2 告警，**不阻塞**。
   // 按天节流：15s 心跳若每次都写审计会把 append-only 表刷爆，而价目表天级才变化。

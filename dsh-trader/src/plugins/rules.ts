@@ -21,6 +21,7 @@ import {
 } from '../trigger/engine.js'
 import { TriggerQueue } from '../trigger/queue.js'
 import { setTriggerRuntime } from '../trigger/runtime.js'
+import { assertWiredRulesConfig } from '../supervisor/config-guard.js'
 
 export const name = 'trade-rules'
 
@@ -52,6 +53,9 @@ export interface RulesConfig {
 }
 
 export function apply(ctx: Context, config: RulesConfig): void {
+  // `windows` 与 `judgment.provider/model` 目前不生效（W2/W3 未接线）：配了就拒绝启动，
+  // 而不是静默忽略 —— "配了但不生效"比"没配"更危险（会让人误以为在起作用）。
+  assertWiredRulesConfig({ windows: config.windows, judgment: config.judgment })
   const built = buildRules(config.rulePacks, { cooldownMs: config.cooldownMs })
   if (built.unknownPacks.length > 0) {
     throw new Error(
@@ -76,8 +80,4 @@ export function apply(ctx: Context, config: RulesConfig): void {
     },
     'trade.rules.close',
   )
-
-  // TODO(T1.x): `config.windows`（W1 审议窗）由 supervisor 调度；`judgment.provider/model` 是唤醒时的模型路由。
-  void config.windows
-  void config.judgment
 }

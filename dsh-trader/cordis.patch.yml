@@ -33,12 +33,11 @@
         # 只列**已实现**的规则包；写错包名会让插件启动即报错（不静默跳过）
         rulePacks: [mean_reversion_v1, breakout_v1]
         cooldownMs: 900000
-        windows:
-          - { id: pre_session, at: '00:30Z' }
-          - { id: midday, everyMs: 14400000 }
-          - { id: post_session, at: '23:30Z' }
+        # W1 审议窗由 trade-supervisor 调度，rules 里不再重复配置（审计 S7：空读字段会误导）。
         escape: { maxPerHour: 2, maxPerDay: 6 }
-        judgment: { maxPerHour: 3, maxPerDay: 8, provider: deepseek-official, model: deepseek-reasoner }
+        # judgment 只消费数值上限；provider/model 属于 W2/W3 唤醒路由，目前未接线 ——
+        # 配了会被 config-guard **拒绝启动**，而不是静默忽略（审计 S7）。
+        judgment: { maxPerHour: 3, maxPerDay: 8 }
 
     - id: trade-exec
       name: dsh-trader/plugins/exec
@@ -67,6 +66,7 @@
         # 组合根：lazy 启动 broker + ports + 启动/周期对账；paper 模式**不触网**
         reconcileEnabled: true
         reconcileMs: 300000
+        settleMs: 60000          # 结算扫描（plan §5.3）：独立任务扫 reflection_due_at 到期决策
         liveAckOrphans: false     # 第①步语义：只报告不撤单
         paperInitialEquityQuote: 24.914
         paperSlippageBps: 5
@@ -88,8 +88,10 @@
       name: dsh-trader/plugins/supervisor
       config:
         deskSessionId: trade-desk
-        l2: { provider: deepseek-official, model: deepseek-flash }
         l3: { provider: deepseek-official, model: deepseek-flash }
+        # ★ W2/W3 判断通道当前**未接线**（P1.5 判定：关闭；decideWake 与 TriggerQueue.claim
+        #   在生产路径没有调用方）。因此这里不配置 l2 / l3MinIntervalMs / dailyBudgetUsd ——
+        #   配了会被 config-guard 拒绝启动（审计 S7），避免"配了却不生效"的假象。
         # W1 审议窗（plan §2）：00:30Z、每 4h、23:30Z。`at` 为 UTC 时刻，`everyMs` 为间隔。
         windows:
           - { id: pre_session, at: '00:30Z' }
@@ -98,8 +100,6 @@
         windowScanMs: 60000
         wakeTimeoutMs: 300000
         deskCwd: /workspace
-        l3MinIntervalMs: 14400000
-        dailyBudgetUsd: 5
         heartbeatMs: 15000
 
     # 预测市场事件源（plan §4.4）：**只读、永不交易**；默认关闭，打开才会打网络
