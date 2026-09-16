@@ -81,6 +81,12 @@ export interface PmPollResult {
 
 export class PmPoller {
   #timer: Disposer | undefined
+  /**
+   * 正在进行的这一轮。**single-flight**：慢轮询不得与下一次 interval 并发。
+   * 并发会让 watch 过期与读写交错、`onResult` 结果逆序，并在降级时互相覆盖；
+   * plan §4.4 的限流前提正是"同一时刻只有一轮在打 API"。
+   */
+  #running: Promise<void> | undefined
 
   constructor(private readonly options: PmPollerOptions) {}
 
@@ -223,9 +229,36 @@ export class PmPoller {
    * 但这里仍然再兜一层 —— 定时器里抛出的异常会污染整个事件循环。
    */
   start(onResult?: (result: PmPollResult) => void): Disposer {
+    // 重入保护：先停掉旧 timer。否则旧 disposer 的闭包只认 this.#timer，
+    // start 第二次之后调用旧 disposer 会把"新" timer 一起停掉。
+    this.stop()
     const intervalMs = this.options.intervalMs ?? 60_000
-    this.#timer = this.options.clock.setInterval(() => {
-      void this.runOnce()
+    const timer = this.options.clock.setInterval(() => {
+      if (this.#running !== undefined) {
+        // 上一轮还没结束：本轮**跳过**而不是并发。这是正常的信息，但仍要可见 ——
+        // 静默跳过会让人误以为轮询频率正常。degraded 保守置 true：我们并不知道上一轮结论。
+        onResult?.({
+          asOf: this.options.clock.now(),
+          degraded: true,
+          marketsSeen: 0,
+          tokensRefreshed: 0,
+          seriesWritten: 0,
+          quotesWritten: 0,
+          expiredWatches: 0,
+          snapshots: [],
+          alerts: [
+            {
+              level: 'info',
+              code: 'pm_poll_skipped',
+              message: '上一轮预测市场轮询尚未结束，本轮跳过（single-flight，避免并发打 API 与乱序写库）',
+            },
+          ],
+          errors: [],
+        })
+        return
+      }
+      let operation: Promise<void>
+      operation = this.runOnce()
         .then((result) => onResult?.(result))
         .catch((error: unknown) => {
           onResult?.({
@@ -247,8 +280,17 @@ export class PmPoller {
             errors: [String(error)],
           })
         })
+        .finally(() => {
+          if (this.#running === operation) this.#running = undefined
+        })
+      this.#running = operation
     }, intervalMs)
-    return this.stop.bind(this)
+    this.#timer = timer
+    return () => {
+      // 只停"自己那一次"的 timer：start 重入后，旧 disposer 不得停掉新 timer。
+      if (this.#timer === timer) this.stop()
+      else timer()
+    }
   }
 
   stop(): void {

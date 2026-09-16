@@ -13,7 +13,7 @@ import {
   assertPmRuleConfig,
   evaluatePmRules,
 } from '../src/predictions/rules.js'
-import { PmPoller, type PmPollerClients } from '../src/predictions/poller.js'
+import { PmPoller, type PmPollerClients, type PmPollResult } from '../src/predictions/poller.js'
 import { IMPLEMENTED_TOOL_NAMES, toolByName } from '../src/agents/tools.js'
 import {
   PmStore,
@@ -542,6 +542,73 @@ describe('PmPoller：注入时钟、降级不上抛（plan §10 专项 ⑥）', 
     expect(Object.keys(clients().clob)).toEqual(['book'])
     expect(Object.keys(clients().gamma)).toEqual(['markets'])
     expect(Object.keys(clients().dataApi)).toEqual(['pricesHistory'])
+  })
+
+  it('single-flight：上一轮未结束时下一 tick 跳过，绝不并发打 API', async () => {
+    store.registerWatch(watch(), NOW)
+    let inFlight = 0
+    let maxInFlight = 0
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const slow = clients({
+      gamma: {
+        markets: async () => {
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          await gate
+          inFlight -= 1
+          return { items: [market()] }
+        },
+      },
+    })
+    const clock = new ReplayClock(NOW)
+    const poller = new PmPoller({ clients: slow, store, clock, intervalMs: 60_000 })
+    const results: PmPollResult[] = []
+    const stop = poller.start((result) => results.push(result))
+    await Promise.resolve()
+
+    clock.advanceTo(NOW + 60_000)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(inFlight).toBe(1)
+
+    // 第二个 tick 到来时上一轮仍卡在网络上 ⇒ 必须跳过而不是并发
+    clock.advanceTo(NOW + 120_000)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(maxInFlight).toBe(1)
+    const skipped = results.find((result) => result.alerts.some((alert) => alert.code === 'pm_poll_skipped'))
+    expect(skipped).toBeDefined()
+    expect(skipped?.errors).toEqual([])
+
+    // 放行第一轮后，single-flight 锁必须释放，下一轮才能跑
+    release?.()
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(inFlight).toBe(0)
+    stop()
+  })
+
+  it('start() 重入先停旧 timer，且旧 disposer 不会停掉新 timer', async () => {
+    store.registerWatch(watch(), NOW)
+    const clock = new ReplayClock(NOW)
+    const poller = new PmPoller({ clients: clients(), store, clock, intervalMs: 60_000 })
+    const first: number[] = []
+    const second: number[] = []
+    const stopFirst = poller.start((result) => first.push(result.asOf))
+    const stopSecond = poller.start((result) => second.push(result.asOf))
+    await Promise.resolve()
+
+    clock.advanceTo(NOW + 60_000)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(first).toHaveLength(0)
+    expect(second).toEqual([NOW + 60_000])
+
+    // 旧 disposer 只应停自己那一次，不得把新 timer 一并停掉
+    stopFirst()
+    clock.advanceTo(NOW + 120_000)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(second).toEqual([NOW + 60_000, NOW + 120_000])
+    stopSecond()
   })
 })
 
