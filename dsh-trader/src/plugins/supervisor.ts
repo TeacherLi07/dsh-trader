@@ -43,6 +43,8 @@ export const Config = z.object({
   windows: z.array(z.object({ id: z.string(), at: z.string(), everyMs: z.number() })),
   windowScanMs: z.number(),
   wakeTimeoutMs: z.number(),
+  /** desk 会话的 cwd；系统提示的 `{{cwd}}` 变量（persona-suffix）需要它，缺了会直接报错。 */
+  deskCwd: z.string(),
 })
 
 export interface SupervisorConfig {
@@ -56,6 +58,8 @@ export interface SupervisorConfig {
   windows?: readonly WindowSpec[]
   windowScanMs?: number
   wakeTimeoutMs?: number
+  /** 默认取 dsh 进程的 cwd；必须是**绝对路径**（会话元数据会校验）。 */
+  deskCwd?: string
 }
 
 const DEFAULT_WINDOWS: readonly WindowSpec[] = [
@@ -153,12 +157,49 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
   let attaching: Promise<Agent | undefined> | undefined
   let busy = false
 
+  // 诊断：统计 desk 会话上的事件类型。用来回答"followup 到底有没有开出回合"，
+  // 而不是靠"没看到计划卡"反推（实测：idleMs=9ms、会话只有 header）。
+  const deskEventCounts: Record<string, number> = {}
+  ctx.on(
+    'session/event',
+    ((session: { id?: string }, event: { type?: string }): void => {
+      if (session?.id !== config.deskSessionId) return
+      const type = String(event?.type ?? 'unknown')
+      deskEventCounts[type] = (deskEventCounts[type] ?? 0) + 1
+    }) as never,
+  )
+  const resetDeskEvents = (): void => {
+    for (const key of Object.keys(deskEventCounts)) delete deskEventCounts[key]
+  }
+
+  // desk 回合若在模型调用处失败，错误经 `agent/error` 广播并被 kick 吞掉（不落会话）。
+  // 必须显式接住它，否则"回合没产出"将永远不可诊断。
+  ctx.on(
+    'agent/error',
+    ((payload: { agent?: { id?: string }; error?: unknown }): void => {
+      if (payload?.agent?.id !== config.deskSessionId) return
+      const message = String((payload.error as { message?: string } | undefined)?.message ?? payload.error)
+      logger.error(`desk agent error：${message}`)
+      journal.appendAudit({
+        actor: 'system',
+        kind: 'desk_agent_error',
+        payload: { message },
+        ts: clock.now(),
+      })
+    }) as never,
+  )
+
   const ensureDeskAgent = async (): Promise<Agent | undefined> => {
     if (deskAgent !== undefined) return deskAgent
     if (attaching !== undefined) return attaching
     const agentOptions: { provider?: string; model?: string } = {}
     if (config.l3?.provider !== undefined) agentOptions.provider = config.l3.provider
     if (config.l3?.model !== undefined) agentOptions.model = config.l3.model
+    // ★ 必须给 cwd：系统提示的 persona-suffix 段含 `{{cwd}}`，缺值会直接抛
+    // `prompt variable "{{cwd}}" has no value for this assembly`，回合在模型调用前就失败
+    // （实测：turn/start→step/end 6ms、零 assistant/message）。cwd 是**持久会话元数据**，
+    // resume 时沿用会话里的值，因此只有在 create 时必须给对。
+    const deskCwd = config.deskCwd ?? process.cwd()
     attaching = (async () => {
       // 首次 resume 失败（会话还不存在）即 create；两次都失败就本轮放弃并告警，不阻塞心跳。
       try {
@@ -173,6 +214,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
           const handle = await ctx.agents.create({
             sessionId: config.deskSessionId as never,
             agentOptions,
+            meta: { cwd: deskCwd },
           })
           deskAgent = handle.agent
           return handle.agent
@@ -214,23 +256,58 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
         return
       }
       const { summary, text } = buildWindowNotice(fire, getExecPorts())
-      agent.followup(
-        createUserMessage({
-          content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: 'trade-supervisor', form: 'notice', summary },
-        }),
-      )
+      // 诊断：把"followup 到底有没有驱动出回合"变成可读证据，而不是靠猜。
+      // （实测：会话只写了 header，w1_wake 在触发后 39ms 就落库 ⇒ 回合没跑。）
+      const probe = agent as unknown as {
+        readonly id?: string
+        readonly status?: string
+        followup?: (message: unknown) => unknown
+        whenIdle?: () => Promise<void>
+      }
+      const hasFollowup = typeof probe.followup === 'function'
+      const hasWhenIdle = typeof probe.whenIdle === 'function'
+      let followupError: string | null = null
+      // 必须在 followup **之前**清零：wakeDriver 会立刻开跑，事件可能在 followup 返回前就发出。
+      resetDeskEvents()
+      try {
+        probe.followup?.(
+          createUserMessage({
+            content: [{ type: 'text', text }],
+            source: { kind: 'plugin', plugin: 'trade-supervisor', form: 'notice', summary },
+          }),
+        )
+      } catch (error) {
+        followupError = String(error)
+      }
+      const idleStart = clock.now()
       const timeoutMs = config.wakeTimeoutMs ?? 300_000
-      await Promise.race([
-        agent.whenIdle(),
-        new Promise((resolve) => setTimeout(resolve, timeoutMs)),
-      ])
+      if (hasWhenIdle) {
+        await Promise.race([
+          probe.whenIdle?.(),
+          new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+        ])
+      }
       journal.appendAudit({
         actor: 'system',
         kind: 'w1_wake',
-        payload: { windowId: fire.id, fireTs: fire.fireTs, dedupKey: windowDedupKey(fire.id, fire.fireTs) },
+        payload: {
+          windowId: fire.id,
+          fireTs: fire.fireTs,
+          dedupKey: windowDedupKey(fire.id, fire.fireTs),
+          agentId: probe.id ?? null,
+          agentStatus: probe.status ?? null,
+          hasFollowup,
+          hasWhenIdle,
+          followupError,
+          idleMs: clock.now() - idleStart,
+          deskEvents: { ...deskEventCounts },
+        },
         ts: clock.now(),
       })
+      logger.info(
+        `W1 ${fire.id}: agent=${String(probe.id)} followup=${String(hasFollowup)} ` +
+          `whenIdle=${String(hasWhenIdle)} idleMs=${String(clock.now() - idleStart)} err=${String(followupError)}`,
+      )
     } catch (error) {
       logger.error(`W1 唤醒失败：${String(error)}`)
       journal.appendAudit({

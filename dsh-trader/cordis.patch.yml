@@ -87,7 +87,7 @@
       config:
         deskSessionId: trade-desk
         l2: { provider: deepseek-official, model: deepseek-flash }
-        l3: { provider: deepseek-official, model: deepseek-reasoner }
+        l3: { provider: deepseek-official, model: deepseek-flash }
         # W1 审议窗（plan §2）：00:30Z、每 4h、23:30Z。`at` 为 UTC 时刻，`everyMs` 为间隔。
         windows:
           - { id: pre_session, at: '00:30Z' }
@@ -95,6 +95,7 @@
           - { id: post_session, at: '23:30Z' }
         windowScanMs: 60000
         wakeTimeoutMs: 300000
+        deskCwd: /workspace
         l3MinIntervalMs: 14400000
         dailyBudgetUsd: 5
         heartbeatMs: 15000
