@@ -739,7 +739,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |
 | E | `live_auto` 授权 | 人工决定 + 额度 | **2026-09-15 用户明确授权**，以最小仓位（1×、单笔 ≤12 USDT、日亏 ≤1.25）arm；回滚 = 把 `trade-exec.mode` 改回 `paper` |
-| F | **desk agent 回合驱动**（阻塞首单） | DSH `ctx.agents.create/resume` 后的 `followup` 必须真的跑出一个回合 | 实测：arm 后 W1 已触发（`audit: w1_wake`）、desk 会话已创建，但会话日志**只有 header**（无 `user/message`/`assistant/message`/工具调用）⇒ 没有计划卡 ⇒ 零下单。`plugins/probe.ts` 的 P0 ⑤ 验收其实是由 **app 自带 root agent** 驱动的，`followup` 对程序内 `create/resume` 的 agent 未必启动回合。修法方向：用 `dsh-agent-loop` 的声明式 `agents` 配置让 loop 接管该会话，或找到正确的驱动入口；**修好前不要重启 live 进程** |
+| F | **desk agent 回合驱动** | ~~阻塞首单~~ **已关闭** | 根因：`ctx.agents.create` 缺 `meta.cwd` ⇒ 系统提示 persona-suffix 的 `{{cwd}}` 无值，回合在模型调用前抛错（6ms、零 `assistant/message`），错误被 agent-loop 的 `kick()` 吞掉。修法：create 传 `deskCwd`（默认 `process.cwd()`）+ 显式监听 `agent/error` 落审计。**实测修后**：`deskEvents` = `user/message → assistant/message×3–4 → tool/call×10–14 → tool/result → turn/end`，`idleMs≈10–13s`，落了 4 条 `no_trade` 决策（ADA/DOGE）；计划卡与下单取决于模型是否判出机会（commit `0b7b0e6`） |
 | G | 首轮监督实测抓到的真 bug | 记入本表与 commit | ① `/halt` 读未声明的 `ctx.tradePorts` ⇒ cordis 抛错、plugin tree 加载失败；② **W1 永不触发**：supervisor 每轮把扫描边界跟到 `now`，而 `everyMs` 从边界起算 ⇒ 游标必须在**触发后**推进到 `fireTs`；③ 永续 `amount`/`contracts` 是**张数**，必须按 `contractSize` 换算（BTC 差 1000×）；④ 行情失败被 `void error` 静默吞掉 |
 
 ---

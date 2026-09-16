@@ -123,6 +123,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | 永续的 `amount`/`contracts` 是**张数** | ccxt 合约的 `createOrder` 与 `fetchPositions` 都用张数；直接传基础币会差一个 `contractSize`（BTC 1000×、ADA 10×） | `CcxtBroker` 按 `contractSize` 换算并用 `amountToPrecision` 对齐；inverse 直接拒绝 |
 | cordis 的 `ctx.X` 必须已声明 | 读未注册的 `ctx.tradePorts` 会抛 `cannot get property "tradePorts" without inject`，**整个 plugin tree 加载失败**（单测测不到） | 插件间用模块级注册表（`getExecPorts()`）或 `inject`；改完必须真启动一次 `dsh --profile trade` |
 | `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
+| `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
 | 免费 ccxt 无 WS | `has.watchOHLCV === undefined` | v0/v1 只用 REST 轮询（分钟级足够） |
 
 ## 常见改动落点
@@ -148,8 +149,8 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   （`trade_regime` 已由 T2.5 实现。）
 - **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
   `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
-- **P3–P4 未做**：周级复盘/playbook/M3 版本化；`live_auto` 已按用户授权 arm，但**首单被 §12.2 F 阻塞**
-  （W1 已触发、desk 会话已建，但 `followup` 没跑出回合 ⇒ 无计划卡 ⇒ 零下单）。
+- **P3–P4 未做**：周级复盘/playbook/M3 版本化。`live_auto` 已按用户授权 arm，无人值守回路
+  **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
 - **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
   §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
 - **待外部输入**（`plan.md` §12.2）：HTX key 已确认可提供；OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
