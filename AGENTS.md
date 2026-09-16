@@ -157,6 +157,9 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
 - **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
   §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
+- **宏观事件窗口不是硬闸（暂不启用）**：`GatePolicy.tradingWindowOpen` 可选，调用方不传即不拦截；
+  宏观风险只写进 `news` 分析师的提示词提醒（软判断，主动权在 agent）。**不要**再塞一个恒真/恒假的开关
+  假装有这条风控；接入日历前请先读 `plan.md` §12.1 #22 的推翻条件。
 - **待外部输入**（`plan.md` §12.2）：HTX key 已确认可提供；OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
   A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。
 

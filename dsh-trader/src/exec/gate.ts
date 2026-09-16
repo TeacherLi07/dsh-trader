@@ -19,7 +19,14 @@ import type { RiskLimits, RunMode } from '../config.js'
 export interface GatePolicy {
   readonly mode: RunMode
   readonly limits: RiskLimits | null
-  readonly tradingWindowOpen: boolean
+  /**
+   * 宏观事件窗口是否允许开新仓。
+   *
+   * **当前不启用**（plan §12.1 #22）：调用方不传该字段 ⇒ 硬闸不做时间窗拦截。
+   * 宏观风险改为在 `news` 分析师的提示词里提示（软判断，主动权在 agent 与裁决者），
+   * 而不是用一条恒真/恒假的开关假装有风控。保留参数是为了将来接上日历后不必再改硬闸结构。
+   */
+  readonly tradingWindowOpen?: boolean
   /** 该 `decisionId` 是否已经执行过（幂等根）。 */
   readonly duplicateDecision: boolean
   readonly paperVenue: Venue
@@ -99,7 +106,7 @@ export function validateIntent(
   // 降险订单不受风控限额阻挡（可平不可开）
   if (!increasesExposure(intent)) return ALLOW
 
-  if (!policy.tradingWindowOpen) {
+  if (policy.tradingWindowOpen === false) {
     return deny('不在交易窗口内（重大宏观事件前后禁止开仓）')
   }
   if (intent.notionalUsd > limits.perOrderCapUsd) {

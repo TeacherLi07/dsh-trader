@@ -31,7 +31,7 @@ const intent = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 const policy = (over: Partial<GatePolicy> = {}): GatePolicy => ({
   mode: 'paper',
   limits: EXAMPLE_LIMITS,
-  tradingWindowOpen: true,
+  // 宏观时间窗**默认不启用**（plan §12.1 #22）：这里刻意不传 `tradingWindowOpen`。
   duplicateDecision: false,
   paperVenue: 'paper',
   ...over,
@@ -116,5 +116,12 @@ describe('validateIntent (hard gate)', () => {
     expect(
       validateIntent(intent({ notionalUsd: 10_000_000 }), account, policy({ limits: null, frozenSymbols })),
     ).toMatchObject({ kind: 'deny' })
+  })
+
+  it('宏观时间窗默认不启用：不传 tradingWindowOpen ⇒ 不拦截；显式 false 才拦（plan §12.1 #22）', () => {
+    // 默认（省略字段）＝ 该闸未启用，这是**刻意**的，不是漏配
+    expect(validateIntent(intent(), account, policy())).toEqual({ kind: 'allow' })
+    // 机制仍在，将来接上日历后可显式传 false 拦截
+    expect(validateIntent(intent(), account, policy({ tradingWindowOpen: false }))).toMatchObject({ kind: 'deny' })
   })
 })

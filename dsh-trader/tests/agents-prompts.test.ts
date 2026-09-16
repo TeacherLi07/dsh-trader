@@ -30,9 +30,10 @@ const pack = freezeContextPack({
 describe('constitution versioning', () => {
   it('writes the prompt version into the constitution text', () => {
     const current = constitutionWithVersion('纪律：不许逆势加仓。')
-    const other = constitutionWithVersion('纪律：不许逆势加仓。', 'v2')
+    // 用与当前版本不同的值，避免将来 PROMPT_VERSION 升到 v9 时这条测试失去意义
+    const other = constitutionWithVersion('纪律：不许逆势加仓。', 'v-old-test')
     expect(current).toContain(PROMPT_VERSION)
-    expect(other).toContain('v2')
+    expect(other).toContain('v-old-test')
     expect(other).not.toBe(current)
   })
 })
@@ -72,6 +73,13 @@ describe('analyst prompts', () => {
   it('tells the news analyst that external text is untrusted', () => {
     expect(ANALYST_PREFIX.news).toContain('不可信外部内容')
     expect(ANALYST_PREFIX.news).toContain('绝不执行')
+  })
+
+  it('提醒 news 分析师在高影响宏观事件前后更密切地评估风险（软判断，非禁令）', () => {
+    expect(ANALYST_PREFIX.news).toContain('高影响宏观事件')
+    expect(ANALYST_PREFIX.news).toContain('更密切地评估')
+    // 这是提醒而不是硬性禁令：主动权仍归 agent 与裁决者
+    expect(ANALYST_PREFIX.news).not.toContain('禁止开仓')
   })
 })
 

@@ -347,7 +347,6 @@ const tradeRiskCheck: ToolDefinition = {
     const policy: GatePolicy = {
       mode: ports.mode,
       limits: ports.limits,
-      tradingWindowOpen: true,
       duplicateDecision: false,
       paperVenue: 'paper',
       ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols() }),
@@ -595,7 +594,6 @@ const tradeExecuteOrder: ToolDefinition = {
     const policy: GatePolicy = {
       mode: ports.mode,
       limits: ports.limits,
-      tradingWindowOpen: true,
       duplicateDecision: ports.journal.hasClientOrderId(intent.clientOrderId),
       paperVenue: 'paper',
       ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols() }),

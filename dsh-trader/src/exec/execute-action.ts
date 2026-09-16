@@ -404,10 +404,10 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     return { executed: false, denied: true, reason: `未实现的动作：${action.action}`, decisionId }
   }
 
+  // 不传 `tradingWindowOpen`：宏观时间窗**不是硬闸**（plan §12.1 #22），由 news 分析师提示词软判断。
   const policy: GatePolicy = {
     mode: args.mode,
     limits: args.limits,
-    tradingWindowOpen: true,
     duplicateDecision: args.alreadyIntended(intent.clientOrderId),
     paperVenue: 'paper',
     ...(args.frozenSymbols === undefined ? {} : { frozenSymbols: args.frozenSymbols }),
