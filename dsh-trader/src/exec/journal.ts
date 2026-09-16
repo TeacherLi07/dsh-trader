@@ -301,6 +301,8 @@ export class DecisionJournal {
          VALUES
            (@decisionId, @contentHash, @symbol, @planId, @decidedAt, @contextHash, @action,
             @sizeQty, @stopPrice, @takeProfit, @rationale, @modelRoute, @executed, @reflectionDueAt)
+         -- 只兜 content_hash：同一 decision_id 改内容 = 事后改写，必须抛（有测试锁）。
+         -- 程序化的"重跑同一 bar"在 execute-action 层用 hasDecision 提前短路，不依赖这里。
          ON CONFLICT (content_hash) DO NOTHING`,
       )
       .run({

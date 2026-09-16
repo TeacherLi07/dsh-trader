@@ -323,3 +323,38 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     replayDb.close()
   })
 })
+
+describe('★ 决策级幂等：跨引擎重放同一 bar（paper 全链路第二遍暴露）', () => {
+  it('被硬闸拒的决策重放不撞 decisions 主键，也不新增任何记录', async () => {
+    const h = harness({ planId: 'pc-deny' }, START + HOUR)
+    // 用极小的 perOrderCap 让 open 被拒（denied 路径：有 decision、没有 intent）
+    const deps: LiveEngineDeps = { ...h.deps, limits: { ...LIMITS, perOrderCapUsd: 0.01 } }
+    const first = createLiveEngine(deps)
+    const r1 = await first.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    expect(r1.kind).toBe('denied')
+    const decisionsAfterFirst = h.journal.decisionIds().length
+    expect(decisionsAfterFirst).toBeGreaterThan(0) // 非空跑：确实落了一条被拒决策
+    expect(h.journal.intentIds().length).toBe(0)
+
+    // 新引擎（内部 fired 集合为空）重放同一 bar：旧实现会抛 UNIQUE constraint failed: decisions.decision_id
+    const second = createLiveEngine(deps)
+    await expect(
+      second.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START }),
+    ).resolves.toBeDefined()
+    expect(h.journal.decisionIds().length).toBe(decisionsAfterFirst)
+    expect(h.journal.intentIds().length).toBe(0)
+  })
+
+  it('已执行的动作跨引擎重放也不重复下单/不新增决策', async () => {
+    const h = harness()
+    await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    const decisions = h.journal.decisionIds().length
+    const orderCalls = h.broker.orderCalls
+    expect(decisions).toBeGreaterThan(0)
+    expect(orderCalls).toBeGreaterThan(0)
+
+    await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    expect(h.journal.decisionIds().length).toBe(decisions)
+    expect(h.broker.orderCalls).toBe(orderCalls)
+  })
+})

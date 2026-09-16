@@ -1,0 +1,178 @@
+{
+  "ranAt": "2026-09-16T04:00:49.860Z",
+  "symbol": "ADA/USDT:USDT",
+  "timeframe": "1h",
+  "days": 30,
+  "bars": 499,
+  "window": {
+    "start": 1787734800000,
+    "end": 1789531200000
+  },
+  "pass1": {
+    "outcomes": 208,
+    "executed": 3,
+    "counts": {
+      "decisions": 189,
+      "executedDecisions": 3,
+      "settlementRegistered": 3,
+      "intents": 6,
+      "protectiveIntents": 3,
+      "orders": 6,
+      "fills": 3,
+      "duplicateClientOrderIds": 0
+    }
+  },
+  "sameBarReplay": {
+    "before": {
+      "decisions": 189,
+      "executedDecisions": 3,
+      "settlementRegistered": 3,
+      "intents": 6,
+      "protectiveIntents": 3,
+      "orders": 6,
+      "fills": 3,
+      "duplicateClientOrderIds": 0
+    },
+    "after": {
+      "decisions": 189,
+      "executedDecisions": 3,
+      "settlementRegistered": 3,
+      "intents": 6,
+      "protectiveIntents": 3,
+      "orders": 6,
+      "fills": 3,
+      "duplicateClientOrderIds": 0
+    }
+  },
+  "pass2": {
+    "outcomes": 21,
+    "counts": {
+      "decisions": 191,
+      "executedDecisions": 5,
+      "settlementRegistered": 5,
+      "intents": 10,
+      "protectiveIntents": 5,
+      "orders": 6,
+      "fills": 3,
+      "duplicateClientOrderIds": 0
+    }
+  },
+  "openOrdersAtEndOfPass1": 0,
+  "checks": {
+    "real_bars_gt_0": true,
+    "plan_card_valid": true,
+    "executed_at_least_once": true,
+    "intents_gt_0": true,
+    "fills_gt_0": true,
+    "protective_intent_placed": true,
+    "settlement_registered": true,
+    "protective_covers_opens": true,
+    "idempotent_same_bar_no_new_decisions": true,
+    "idempotent_same_bar_no_new_intents": true,
+    "no_duplicate_client_order_ids": true,
+    "per_order_cap_respected": true
+  },
+  "allPassed": true,
+  "outcomesSample": [
+    {
+      "ts": 1787734800000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787738400000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787742000000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787745600000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787749200000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787752800000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787756400000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787760000000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787763600000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787767200000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787770800000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787774400000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787778000000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787781600000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787785200000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787788800000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787792400000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787796000000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787799600000,
+      "kind": "uncovered",
+      "reason": "求值失败：未知取值 ema20"
+    },
+    {
+      "ts": 1787803200000,
+      "kind": "executed",
+      "reason": null
+    }
+  ]
+}

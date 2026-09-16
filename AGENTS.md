@@ -55,6 +55,7 @@ node scripts/ab-gate.mjs htx BTC/USDT 1h 92          # P1.5 通道有效性闸�
 node scripts/watchdog-check.mjs /tmp/p2-watchdog.json # P2 ③ 真实 SIGSTOP → 外部 watchdog 撤单
 node scripts/fault-injection.mjs /tmp/p2-fault.json  # P2 ①②④ kill -9×50 / 幂等×10 / 保护单停摆仍生效
 node scripts/htx-preflight.mjs htx BTC/USDT:USDT      # HTX 只读对账（需 TRADER_API_KEY/SECRET；不下单）
+node scripts/live-paper-e2e.mjs 30 ADA/USDT:USDT     # paper 全链路：真实 bar→计划卡→下单+保护单+幂等
 node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等）
 ```
 

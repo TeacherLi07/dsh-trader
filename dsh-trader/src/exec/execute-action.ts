@@ -160,6 +160,14 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
   })
   const action = args.action
 
+  // ★ 决策级幂等：同一 (plan, condition, symbol, barTs) 只要已经落过决策（无论执行成功、
+  // 被硬闸拒、还是 noop/escalate），重放就必须完全 no-op。只靠 clientOrderId 不够 ——
+  // noop/escalate/halt/cancel_all 没有 clientOrderId，被拒的路径也可能没写 intent，
+  // 于是重放会重复落库甚至撞 decisions 主键（实测：paper 全链路第二遍就抛了）。
+  if (args.journal.hasDecision(decisionId)) {
+    return { executed: false, denied: false, reason: 'already_decided', decisionId, alreadyIntended: true }
+  }
+
   const record = (
     executed: boolean,
     extra: { sizeQty?: number; stopPrice?: number; takeProfit?: number; rationale?: string } = {},
