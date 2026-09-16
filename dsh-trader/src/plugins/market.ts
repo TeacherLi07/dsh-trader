@@ -27,6 +27,7 @@ import type { Candle } from '../market/types.js'
 import { createLiveEngine, type LiveEngine } from '../exec/live-engine.js'
 import { getTriggerRuntime } from '../trigger/runtime.js'
 import { getExecPorts } from './exec.js'
+import { DecisionJournal } from '../exec/journal.js'
 
 export const name = 'trade-market'
 
@@ -157,9 +158,26 @@ export function apply(ctx: Context, config: MarketConfig): void {
               logger.error(`live-engine 执行失败：${String(error)}`)
             })
         },
-        onError: () => {
-          // TODO(OBS/T1.6): 写 audit_events + 接告警通道（plan §10.3）。
-          // 数据源失败只跳过本轮，绝不让主循环崩溃（plan §4.3）。
+        onError: (error, info) => {
+          // 数据源失败只跳过本轮，绝不让主循环崩溃（plan §4.3）——但**绝不静默**：
+          // 失败要能被看见（审计优先）。落审计 + 日志，便于事后回答"为什么没有行情"。
+          logger.error(`行情源失败 ${info.symbol}/${info.timeframe} kind=${info.kind}：${String(error)}`)
+          try {
+            new DecisionJournal(getDatabase()).appendAudit({
+              actor: 'system',
+              kind: 'market_source_error',
+              payload: {
+                symbol: info.symbol,
+                timeframe: info.timeframe,
+                kind: info.kind,
+                attempt: info.attempt,
+                error: String(error),
+              },
+              ts: systemClock().now(),
+            })
+          } catch (auditError) {
+            logger.error(`行情错误落审计失败：${String(auditError)}`)
+          }
         },
       })
 
@@ -169,9 +187,19 @@ export function apply(ctx: Context, config: MarketConfig): void {
       }
       runtime.start()
     } catch (error) {
-      // 数据源不可达或配置错误不应让 profile 启动失败；按 plan §4.3 跳过并告警
-      // TODO(OBS): 落 audit_events + 告警
-      void error
+      // 数据源不可达或配置错误不应让 profile 启动失败；按 plan §4.3 跳过并告警。
+      // 但必须**如实记录**：静默 catch 会让"没行情"变成不可诊断的空白（实测踩过）。
+      logger.error(`行情运行时启动失败：${String(error)}`)
+      try {
+        new DecisionJournal(getDatabase()).appendAudit({
+          actor: 'system',
+          kind: 'market_runtime_start_failed',
+          payload: { error: String(error) },
+          ts: systemClock().now(),
+        })
+      } catch (auditError) {
+        logger.error(`行情启动失败落审计失败：${String(auditError)}`)
+      }
     }
   })()
 }

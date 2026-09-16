@@ -13,6 +13,7 @@ import { Statements } from '../db/statements.js'
 import type { Broker } from '../exec/broker.js'
 import { DecisionJournal } from '../exec/journal.js'
 import { HeartbeatStore, type HeartbeatAuditEvent } from '../supervisor/heartbeat.js'
+import { getExecPorts } from './exec.js'
 
 export const name = 'trade-commands'
 export const inject = ['commands']
@@ -149,12 +150,6 @@ export function makeResumeHandler(deps: ResumeHandlerDeps): CommandHandler {
   }
 }
 
-interface ContextWithBrokerPort extends Context {
-  readonly broker?: Pick<Broker, 'cancelAll'>
-  readonly tradeBroker?: Pick<Broker, 'cancelAll'>
-  readonly tradePorts?: CommandBrokerPort
-}
-
 interface CommandsContext extends Context {
   readonly commands: {
     register(definition: {
@@ -165,11 +160,15 @@ interface CommandsContext extends Context {
   }
 }
 
-function brokerFromContext(ctx: Context): Pick<Broker, 'cancelAll'> | undefined {
-  const candidate = ctx as ContextWithBrokerPort
-  if (candidate.tradePorts?.broker !== undefined) return candidate.tradePorts.broker
-  if (candidate.broker !== undefined) return candidate.broker
-  return candidate.tradeBroker
+/**
+ * 取撤单用的 broker：优先显式注入的 port，其次组合根暴露的 `TradePorts`。
+ *
+ * ⚠️ 不能读 `ctx.tradePorts`/`ctx.broker` 这类**未声明的上下文属性**：cordis 会直接抛
+ * `cannot get property "tradePorts" without inject`，把整个 profile 启动打挂（真启动时实测）。
+ * 组合根用的是模块级注册表，因此这里只读同一个引用即可。
+ */
+function brokerFromContext(): Pick<Broker, 'cancelAll'> | undefined {
+  return getExecPorts()?.broker
 }
 
 export function apply(ctx: Context): void {
@@ -180,7 +179,7 @@ export function apply(ctx: Context): void {
     journal.appendAudit(event)
   }
   const clock = systemClock()
-  const broker = commandPort?.broker ?? brokerFromContext(ctx)
+  const broker = commandPort?.broker ?? brokerFromContext()
   const halt = makeHaltHandler({ heartbeat, clock, ...(broker === undefined ? {} : { broker }), audit })
   const resume = makeResumeHandler({ heartbeat, clock, audit })
 
