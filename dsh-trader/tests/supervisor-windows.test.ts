@@ -146,3 +146,29 @@ describe('window validation', () => {
     for (const spec of invalid) expect(() => nextFireAt(spec, 0)).toThrow(/非法窗口/)
   })
 })
+
+describe('★ 监督循环的游标语义（真跑才暴露的 bug）', () => {
+  const spec = [{ id: 'arm', everyMs: 600_000 }]
+  const start = 1_000_000
+
+  it('错误用法：每轮把 since 跟到 now ⇒ everyMs 永不触发（这正是实测到的 W1 不触发）', () => {
+    let wrongCursor = start
+    let wrongFires = 0
+    for (let t = start + 60_000; t <= start + 3 * 600_000; t += 60_000) {
+      wrongFires += dueWindows(spec, wrongCursor, t).length
+      wrongCursor = t
+    }
+    expect(wrongFires).toBe(0)
+  })
+
+  it('正确用法：只在触发后把游标推进到 fireTs ⇒ 每 everyMs 稳定触发一次', () => {
+    let cursor = start
+    const fireTimes: number[] = []
+    for (let t = start + 60_000; t <= start + 3 * 600_000; t += 60_000) {
+      const fires = dueWindows(spec, cursor, t)
+      if (fires.length > 0) cursor = Math.max(...fires.map((fire) => fire.fireTs))
+      fireTimes.push(...fires.map((fire) => fire.fireTs))
+    }
+    expect(fireTimes).toEqual([start + 600_000, start + 1_200_000, start + 1_800_000])
+  })
+})

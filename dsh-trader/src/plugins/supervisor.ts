@@ -244,14 +244,23 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     }
   }
 
-  // 扫描边界持久化在内存即可：重启后的第一轮以"启动时刻"为起点，历史窗口不补跑
-  // （补跑会一口气唤醒多次，且那些时刻的市场早已不存在 —— 判断必须发生在敞口打开之前）。
-  let lastScanAt = clock.now()
+  // 游标 = **上一次已触发的窗口时刻**（不是"上一次扫描时刻"）。
+  //
+  // ★ 这是一个只有真跑才会暴露的 bug：`dueWindows(specs, since, now)` 的 `everyMs` 语义是
+  // "从 since 起算下一发"，因此若每轮把 since 更新成 now，`since + everyMs` 永远在未来 ⇒
+  // W1 **永远不会触发**（agent 永远不被唤醒，看起来在跑、实际零判断）。实测：启动 11 分钟
+  // 无任何 w1_wake 审计。正确做法是只在**真的触发**之后把游标推进到该 fireTs；
+  // 重启后以启动时刻为起点、历史窗口不补跑（判断必须发生在敞口打开之前）。
+  let windowCursor = clock.now()
   const windowScanMs = config.windowScanMs ?? 60_000
   const stopWindows = clock.setInterval(() => {
     const now = clock.now()
-    const fires = dueWindows([...specs], lastScanAt, now)
-    lastScanAt = now
+    const fires = dueWindows([...specs], windowCursor, now)
+    if (fires.length > 0) {
+      let latest = windowCursor
+      for (const fire of fires) if (fire.fireTs > latest) latest = fire.fireTs
+      windowCursor = latest
+    }
     for (const fire of fires) void driveWindow(fire)
   }, windowScanMs)
 

@@ -43,7 +43,8 @@
     - id: trade-exec
       name: dsh-trader/plugins/exec
       config:
-        mode: paper
+        # ★ 用户已明确授权（plan §12.2 E）：最小仓位 live_auto。回滚只需把 mode 改回 paper。
+        mode: live_auto
         # ── 风险限额：由**实测权益 24.914 USDT** 推导，不写死"安全数"（plan §6.5 / §12 #17）──
         # 单笔风险 0.2% → 0.05 USDT；BTC 1h 2×ATR 止损约 0.5% → 名义 ≈10 USDT。
         # 自洽校验：maxNotionalAtMinStop = 24.914 × 0.002 ÷ 0.005 ≈ 9.97 ≤ perOrderCapUsd=12 ✓
