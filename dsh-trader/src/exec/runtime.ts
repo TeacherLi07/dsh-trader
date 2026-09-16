@@ -323,6 +323,7 @@ export async function createExecRuntime(
       apiKey: config.apiKey as string,
       apiSecret: config.apiSecret as string,
       accountType: config.accountType,
+      positionSide: config.positionSide ?? 'both',
       spreadSymbol: config.symbols[0],
       sandbox: config.sandbox === true,
       riskStateProvider,

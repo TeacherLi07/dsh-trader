@@ -82,6 +82,7 @@
         preflightSymbol: ADA/USDT:USDT
         sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
         accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑永续必须读 swap 账户
+        positionSide: both      # ★ HTX 算法保护单必需（单向持仓模式 both）
 
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor

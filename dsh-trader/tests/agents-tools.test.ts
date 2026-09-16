@@ -230,7 +230,8 @@ describe('trade_execute_order (double-checked, then executed)', () => {
 
     expect(result.executed).toBe(true)
     expect(result.state).toBe('filled')
-    expect(result.clientOrderId).toBe('co:dec-1:open:BTC/USDT')
+    // 交易所只认数字 clientOrderId（HTX/ccxt 实测），本地与交易所共用同一个确定性数字 id
+    expect(result.clientOrderId).toMatch(/^\d{15}$/)
 
     const positions = await broker.getPositions()
     expect(positions).toHaveLength(1)

@@ -16,7 +16,7 @@ import {
   type ReduceAction,
   type TrailingAction,
 } from '../plan/schema.js'
-import { fingerprint } from '../util/canonical.js'
+import { fingerprint, numericClientOrderId } from '../util/canonical.js'
 import { ALLOW, validateIntent, type GatePolicy } from './gate.js'
 import type {
   AccountSnapshot,
@@ -63,12 +63,24 @@ export interface ExecuteActionResult {
 /** 会改变仓位、因而需要结算的动作。 */
 const SLOT_FILLING_ACTIONS = new Set(['open', 'reduce', 'close'])
 
+/**
+ * 主单 / 保护单的 clientOrderId —— **数字**且确定性（交易所必须能按它查回来）。
+ * 语义种子保持可读（co/pco + plan + condition + bar），交易所只看到数字串。
+ */
+export function primaryClientOrderId(planId: string, conditionId: string, barTs: number): string {
+  return numericClientOrderId(`co:${planId}:${conditionId}:${barTs}`)
+}
+
+export function protectiveClientOrderId(planId: string, conditionId: string, barTs: number): string {
+  return numericClientOrderId(`pco:${planId}:${conditionId}:${barTs}`)
+}
+
 function actionClientOrderId(plan: PlanCard, conditionId: string, barTs: number, action: PlanAction): string | undefined {
   if (action.action === 'open' || action.action === 'reduce' || action.action === 'close') {
-    return `co:${plan.planId}:${conditionId}:${barTs}`
+    return primaryClientOrderId(plan.planId, conditionId, barTs)
   }
   if (action.action === 'set_stop' || action.action === 'set_target' || action.action === 'set_trailing') {
-    return `pco:${plan.planId}:${conditionId}:${barTs}`
+    return protectiveClientOrderId(plan.planId, conditionId, barTs)
   }
   return undefined
 }
@@ -151,7 +163,7 @@ function auditDenied(args: ExecuteActionArgs, decisionId: string, reason: string
 export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteActionResult> {
   const now = args.clock.now()
   const decisionId = `dec:${args.plan.planId}:${args.conditionId}:${args.symbol}:${args.barTs}`
-  const clientOrderId = `co:${args.plan.planId}:${args.conditionId}:${args.barTs}`
+  const clientOrderId = primaryClientOrderId(args.plan.planId, args.conditionId, args.barTs)
   const contextHash = fingerprint({
     planId: args.plan.planId,
     conditionId: args.conditionId,
@@ -219,7 +231,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
         : action.action === 'set_target'
           ? { takeProfitPrice: (action as LevelAction).price }
           : { trailingPercent: (action as TrailingAction).percent }
-    const protectiveClientId = `pco:${args.plan.planId}:${args.conditionId}:${args.barTs}`
+    const protectiveClientId = protectiveClientOrderId(args.plan.planId, args.conditionId, args.barTs)
 
     // order_intents.decision_id 有外键，所以决策必须先写；保护单也必须有本地意图。
     record(true)

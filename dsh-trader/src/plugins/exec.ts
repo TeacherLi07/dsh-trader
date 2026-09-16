@@ -46,6 +46,8 @@ export const Config = z.object({
   sandbox: z.boolean(),
   /** 读余额的账户类型（HTX 现货与 USDT 永续分离）；跑永续必须是 `swap`。 */
   accountType: z.string().default('swap'),
+  /** HTX 线性永续算法保护单必需（单向模式 both）。 */
+  positionSide: z.string().default('both'),
   /** 执行组合根与周期对账；默认关闭以保持旧 profile 不触网。 */
   reconcileEnabled: z.boolean().default(false),
   /** 启动对账是否执行孤儿撤单；默认只报告（plan §12.2 A 第①步）。 */
@@ -79,6 +81,7 @@ export interface ExecConfig {
   preflightSymbol?: string
   sandbox?: boolean
   accountType?: string
+  positionSide?: string
   reconcileEnabled?: boolean
   liveAckOrphans?: boolean
   paperInitialEquityQuote?: number
@@ -190,6 +193,7 @@ function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | un
     benchmark: config.benchmark,
     venue: (config.venue ?? 'htx') as ExecRuntimeConfig['venue'],
     accountType: config.accountType ?? 'swap',
+    positionSide: config.positionSide ?? 'both',
     perOrderCapUsd: limits.perOrderCapUsd,
     maxExposureUsd: limits.maxExposureUsd,
     maxLeverage: limits.maxLeverage,

@@ -22,3 +22,20 @@ export function sha256Hex(value: string): string {
 export function fingerprint(value: unknown): string {
   return `sha256:${sha256Hex(canonicalJson(value))}`
 }
+
+/**
+ * 交易所可接受的 **数字** clientOrderId（plan §4.2 幂等键）。
+ *
+ * ★ 实测（HTX）：ccxt 用 `safeIntegerN` 解析 `clientOrderId`，即交易所只认**数字** id；
+ * 我们原来的 `co:plan:cond:barTs` 会被**静默丢弃**（订单能成，但交易所侧没有这个 client id）——
+ * 于是"按 clientOrderId 查询/恢复/对账"全部失效，交易所侧幂等也没了。
+ *
+ * 因此本地与交易所共用同一个**确定性数字 id**：同一语义种子永远得到同一个 15 位数字串。
+ * 为什么是 **15 位**：ccxt 用 `safeIntegerN` 解析 clientOrderId（即先转成 JS Number），
+ * 超过 2^53 的 18 位数字会**丢精度**，交易所存下来的 id 与我们算的对不上 —— 实测查询全部落空。
+ * 同时首位固定为 1–9，避免前导零被 `Number()` 吃掉后变成另一个 id。
+ */
+export function numericClientOrderId(seed: string): string {
+  const value = 100_000_000_000_000n + (BigInt(`0x${sha256Hex(seed).slice(0, 16)}`) % 900_000_000_000_000n)
+  return value.toString()
+}

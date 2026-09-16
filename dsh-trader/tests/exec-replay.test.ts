@@ -366,7 +366,8 @@ describe('回放审计修复', () => {
     )
     await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + H })
     const row = h.db
-      .prepare("SELECT side, price FROM order_intents WHERE client_order_id LIKE 'co:%' LIMIT 1")
+      // clientOrderId 现在是确定性数字串（交易所要求），不能再按 'co:' 前缀过滤
+      .prepare("SELECT side, price FROM order_intents WHERE type = 'limit' LIMIT 1")
       .get() as { side: string; price: number } | undefined
     expect(row?.side).toBe('sell')
     expect(row?.price).toBeGreaterThan(100) // 100 × (1 + 50bps)

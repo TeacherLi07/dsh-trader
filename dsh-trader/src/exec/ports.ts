@@ -34,6 +34,8 @@ export interface ExecRuntimeConfig {
   readonly venue: Venue
   /** HTX 现货与永续分账户；实盘路径必须显式提供。 */
   readonly accountType: string
+  /** HTX 线性永续算法保护单必需（单向模式 'both'）。 */
+  readonly positionSide?: string
 
   readonly perOrderCapUsd?: number
   readonly maxExposureUsd?: number

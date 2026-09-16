@@ -8,6 +8,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { numericClientOrderId } from '../util/canonical.js'
 import type { Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
 import type { Broker, OrderRequest, OrderType } from '../exec/broker.js'
@@ -545,7 +546,7 @@ const tradeExecuteOrder: ToolDefinition = {
       sizeQty = sizing.qty
       intent = {
         intentId: `oi:${effectiveDecisionId}`,
-        clientOrderId: `co:${effectiveDecisionId}`,
+        clientOrderId: numericClientOrderId(`co:${effectiveDecisionId}`),
         decisionId,
         symbol,
         type: method as OrderType,
@@ -570,7 +571,7 @@ const tradeExecuteOrder: ToolDefinition = {
       sizeQty = qty
       intent = {
         intentId: `oi:${effectiveDecisionId}`,
-        clientOrderId: `co:${effectiveDecisionId}`,
+        clientOrderId: numericClientOrderId(`co:${effectiveDecisionId}`),
         decisionId,
         symbol,
         type: 'market',
@@ -678,7 +679,7 @@ const tradeExecuteOrder: ToolDefinition = {
     // ⑤ 成交后**立即**挂保护单（HTX 无原子括号单 ⇒ 已知暴露窗口）
     let protectiveAck: unknown = null
     if (action === 'open' && executed && stopPrice !== undefined) {
-      const protectiveClientId = `pco:${effectiveDecisionId}`
+      const protectiveClientId = numericClientOrderId(`pco:${effectiveDecisionId}`)
       // 保护单同样要进审计链：否则恢复流程会把它当成"交易所挂着、本地无记录"的孤儿单
       ports.journal.recordIntent({
         intentId: `pi:${effectiveDecisionId}`,

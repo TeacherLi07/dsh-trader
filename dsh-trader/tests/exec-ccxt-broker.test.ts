@@ -142,6 +142,8 @@ function makeBroker(exchange: FakeExchange, over: Partial<ConstructorParameters<
     apiSecret: API_SECRET,
     riskStateProvider: () => ({ dailyLossUsd: 12, drawdownUsd: 34, consecutiveLosses: 2 }),
     spreadSymbol: SYMBOL,
+    // 默认关闭成交轮询：绝大多数用例只测映射，不想等真实 sleep；需要测轮询的用例自行覆盖。
+    fillPollAttempts: 0,
     ...over,
   })
 }
@@ -424,5 +426,37 @@ describe('exec plugin broker routing', () => {
     expect(resolveExecBroker({ ...base, apiKey: API_KEY })).toBe('paper')
     expect(resolveExecBroker({ mode: 'paper', apiKey: API_KEY, apiSecret: API_SECRET })).toBe('paper')
     expect(resolveExecBroker({ ...base, apiKey: ' ', apiSecret: API_SECRET })).toBe('paper')
+  })
+})
+
+describe('HTX 实盘冒烟暴露的修复（position_side / 市价单成交 / clientOrderId 查询）', () => {
+  it('★ 算法保护单必须带 position_side（HTX 缺它直接报 code 1067）', async () => {
+    const exchange = new FakeExchange()
+    const broker = makeBroker(exchange, { positionSide: 'both' })
+    // 先造一个持仓，placeProtective 才有量可挂
+    exchange.positions = [
+      { symbol: SYMBOL, contracts: 1, side: 'long', entryPrice: 100, markPrice: 100 },
+    ]
+    await broker.placeProtective({ symbol: SYMBOL, stopLossPrice: 90 })
+    expect(exchange.createCalls.at(-1)?.params?.['position_side']).toBe('both')
+  })
+
+  it('★ 市价单 create 返回 open 时，轮询 fetchOrder 成交后回填 filled + avgPrice', async () => {
+    const exchange = new FakeExchange()
+    exchange.createStatus = 'open'
+    // fetchOrder 返回已成交
+    exchange.directOrder = {
+      id: 'o-1',
+      symbol: SYMBOL,
+      status: 'closed',
+      amount: 2,
+      filled: 2,
+      average: 101,
+      clientOrderId: 'client-1',
+    }
+    const broker = makeBroker(exchange, { fillPollAttempts: 2, fillPollMs: 1 })
+    const ack = await broker.placeOrder(orderRequest())
+    expect(ack.state).toBe('filled')
+    expect(ack.avgPrice).toBe(101)
   })
 })

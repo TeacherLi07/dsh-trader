@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 55 文件 / 605 测试
+pnpm test                        # vitest run，当前 56 文件 / 611 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -55,6 +55,7 @@ node scripts/ab-gate.mjs htx BTC/USDT 1h 92          # P1.5 通道有效性闸�
 node scripts/watchdog-check.mjs /tmp/p2-watchdog.json # P2 ③ 真实 SIGSTOP → 外部 watchdog 撤单
 node scripts/fault-injection.mjs /tmp/p2-fault.json  # P2 ①②④ kill -9×50 / 幂等×10 / 保护单停摆仍生效
 node scripts/htx-preflight.mjs htx BTC/USDT:USDT      # HTX 只读对账（需 TRADER_API_KEY/SECRET；不下单）
+node scripts/htx-live-smoke.mjs --execute ADA/USDT:USDT  # ★ 真实首单全链路冒烟（下单/保护单/撤单/平仓；带强制清理）
 node scripts/live-paper-e2e.mjs 30 ADA/USDT:USDT     # paper 全链路：真实 bar→计划卡→下单+保护单+幂等
 node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等）
 ```
@@ -125,6 +126,8 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | cordis 的 `ctx.X` 必须已声明 | 读未注册的 `ctx.tradePorts` 会抛 `cannot get property "tradePorts" without inject`，**整个 plugin tree 加载失败**（单测测不到） | 插件间用模块级注册表（`getExecPorts()`）或 `inject`；改完必须真启动一次 `dsh --profile trade` |
 | `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
 | `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
+| HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |
+| HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 实测 `client_order_id` 由交易所生成=订单号，**不采用我们传的 id** | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()` + `cancelOrder` 逐个标志尝试；恢复对"未 ack 意图"只能判 unknown+冻结（fail-closed） |
 | 免费 ccxt 无 WS | `has.watchOHLCV === undefined` | v0/v1 只用 REST 轮询（分钟级足够） |
 
 ## 常见改动落点

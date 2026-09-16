@@ -15,7 +15,12 @@ import type { TriggerQueue } from '../trigger/queue.js'
 import type { Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
 import type { Broker } from './broker.js'
-import { executeAction, type ExecuteActionResult } from './execute-action.js'
+import {
+  executeAction,
+  primaryClientOrderId,
+  protectiveClientOrderId,
+  type ExecuteActionResult,
+} from './execute-action.js'
 import { DecisionJournal } from './journal.js'
 import { BarArchive } from '../market/archive.js'
 import { PlanStore } from '../plan/store.js'
@@ -72,9 +77,10 @@ function barKey(symbol: string, timeframe: string, barTs: number): string {
 }
 
 function actionClientOrderIds(plan: PlanCard, conditionId: string, barTs: number): readonly string[] {
+  // 与 execute-action 用同一套确定性**数字** id，否则 #alreadyFired 的对账会与真实下单键不一致。
   return [
-    `co:${plan.planId}:${conditionId}:${barTs}`,
-    `pco:${plan.planId}:${conditionId}:${barTs}`,
+    primaryClientOrderId(plan.planId, conditionId, barTs),
+    protectiveClientOrderId(plan.planId, conditionId, barTs),
   ]
 }
 

@@ -1,0 +1,158 @@
+{
+  "ranAt": "2026-09-16T11:18:58.208Z",
+  "execute": true,
+  "symbol": "ADA/USDT:USDT",
+  "contractSize": 10,
+  "oneContractBase": 10,
+  "referencePrice": 0.19445,
+  "oneContractNotionalUsd": 1.9445000000000001,
+  "riskStateSource": "smoke-placeholder(空库，仅本脚本；不参与下单裁决)",
+  "steps": [
+    {
+      "name": "preflight_getAccount",
+      "ok": true,
+      "detail": {
+        "venue": "htx",
+        "equityQuote": 24.905474352514755,
+        "openOrders": 0
+      }
+    },
+    {
+      "name": "preflight_getPositions",
+      "ok": true,
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "name": "preflight_getOpenOrders",
+      "ok": true,
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "name": "preflight_flat_required",
+      "ok": true
+    },
+    {
+      "name": "entry_placeOrder",
+      "ok": true,
+      "detail": {
+        "state": "filled",
+        "exchangeOrderId": "1549862221800288256",
+        "avgPrice": 0.194456,
+        "fee": 0.001166736
+      }
+    },
+    {
+      "name": "query_findOrderByClientOrderId(entry, by exchange id)",
+      "ok": true,
+      "detail": {
+        "state": "filled",
+        "exchangeOrderId": "1549862221800288256"
+      }
+    },
+    {
+      "name": "known_limitation:htx_client_order_id_not_honored",
+      "ok": true,
+      "detail": {
+        "note": "HTX 生成的 client_order_id = 订单号，我们传的 clientOrderId 查不回来（不影响本地幂等：journal 唯一键仍在）",
+        "queriedWith": "smoke-entry-1789557538208",
+        "found": false
+      }
+    },
+    {
+      "name": "query_getPositions(after_entry)",
+      "ok": true,
+      "detail": {
+        "qty": 10
+      }
+    },
+    {
+      "name": "query_getOpenOrders(after_entry)",
+      "ok": true,
+      "detail": {
+        "count": 0
+      }
+    },
+    {
+      "name": "protective_place_stop",
+      "ok": true,
+      "detail": {
+        "state": "acked",
+        "exchangeOrderId": "1549862278635917312",
+        "stopLossPrice": 0.18862231999999998
+      }
+    },
+    {
+      "name": "query_getOpenOrders(after_protective)",
+      "ok": true,
+      "detail": {
+        "count": 0,
+        "note": "已知限制：ccxt 的 HTX fetchOpenOrders 不返回算法单（sl/tp）；撤单仍可用 algo 标志成功"
+      }
+    },
+    {
+      "name": "query_findOrderByClientOrderId(protective, by exchange id)",
+      "ok": true,
+      "detail": {
+        "found": false,
+        "state": null,
+        "note": "该部署的算法单查询端点不按 algo_id 返回；撤单/平仓不受影响"
+      }
+    },
+    {
+      "name": "cancel_cancelOrder(protective)",
+      "ok": true,
+      "detail": {
+        "remaining": 0,
+        "remainingIds": []
+      }
+    },
+    {
+      "name": "protective_place_takeProfit",
+      "ok": true,
+      "detail": {
+        "exchangeOrderId": "1549862337208471552",
+        "takeProfitPrice": 0.20028968
+      }
+    },
+    {
+      "name": "cancel_cancelAll",
+      "ok": true,
+      "detail": {
+        "remaining": 0,
+        "remainingIds": []
+      }
+    },
+    {
+      "name": "close_placeOrder(reduceOnly)",
+      "ok": true,
+      "detail": {
+        "state": "filled",
+        "exchangeOrderId": "1549862373864046592"
+      }
+    },
+    {
+      "name": "close_position_flat",
+      "ok": true,
+      "detail": {
+        "qty": 0
+      }
+    },
+    {
+      "name": "final_no_open_orders",
+      "ok": true,
+      "detail": {
+        "count": 0
+      }
+    }
+  ],
+  "cleanup": {
+    "cancelAll": true,
+    "flattened": true,
+    "note": null
+  },
+  "allPassed": true
+}

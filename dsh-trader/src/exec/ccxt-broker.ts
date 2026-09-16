@@ -7,6 +7,7 @@
  */
 
 import type { Clock } from '../clock.js'
+import { numericClientOrderId } from '../util/canonical.js'
 import type {
   AccountSnapshot,
   Broker,
@@ -202,6 +203,16 @@ export interface CcxtBrokerOptions {
    * 省略 = 沿用 ccxt 默认（现货）。
    */
   readonly accountType?: string
+  /**
+   * HTX 线性永续的 `position_side`：`'long'|'short'|'both'`，单向持仓模式用 `'both'`（默认）。
+   *
+   * ★ 实测：**算法触发单（sl/tp）不带这个字段会被 HTX 直接拒**（code 1067
+   * "The position_side field is invalid"），于是保护单永远挂不上 —— 而"有持仓无保护单"是 P0 不一致。
+   */
+  readonly positionSide?: string
+  /** 市价单成交轮询次数/间隔（默认 6×700ms）；测试可设 0 关闭，避免无谓等待。 */
+  readonly fillPollAttempts?: number
+  readonly fillPollMs?: number
 }
 
 interface PositionReading {
@@ -416,6 +427,9 @@ export class CcxtBroker implements Broker {
   readonly #spreadSymbol: string | undefined
   readonly #protectiveOrderType: string
   readonly #accountType: string | undefined
+  readonly #positionSide: string
+  readonly #fillPollAttempts: number
+  readonly #fillPollMs: number
   #marketsLoaded = false
   #marketsLoading: Promise<void> | undefined
   readonly #inFlight = new Map<string, Promise<OrderAck>>()
@@ -431,6 +445,9 @@ export class CcxtBroker implements Broker {
     this.#spreadSymbol = options.spreadSymbol ?? options.symbol
     this.#protectiveOrderType = options.protectiveOrderType ?? 'stop'
     this.#accountType = options.accountType
+    this.#positionSide = options.positionSide ?? 'both'
+    this.#fillPollAttempts = options.fillPollAttempts ?? 6
+    this.#fillPollMs = options.fillPollMs ?? 700
 
     // ★ ccxt 的私有端点（fetchBalance/fetchPositions/createOrder…）要求凭据挂在 **exchange 实例**上，
     // 只传给本 broker 是不够的；而且字段名必须是 ccxt 的 `apiKey`/`secret`（不是 `apiSecret`）。
@@ -501,7 +518,7 @@ export class CcxtBroker implements Broker {
     await this.#ensureMarketsLoaded()
     const [positions, openOrders] = await Promise.all([
       this.#call(() => this.#exchange.fetchPositions()),
-      this.#call(() => this.#exchange.fetchOpenOrders()),
+      this.#fetchOpenOrdersMerged(),
     ])
     const stops = new Map<string, number>()
     for (const order of openOrders) {
@@ -526,7 +543,7 @@ export class CcxtBroker implements Broker {
 
   async getOpenOrders(symbol?: string): Promise<readonly OrderAck[]> {
     await this.#ensureMarketsLoaded()
-    const orders = await this.#call(() => this.#exchange.fetchOpenOrders(symbol))
+    const orders = await this.#fetchOpenOrdersMerged(symbol)
     const acks: OrderAck[] = []
     for (const order of orders) {
       if (symbol !== undefined && order['symbol'] !== symbol) continue
@@ -573,6 +590,8 @@ export class CcxtBroker implements Broker {
     }
 
     const params: CcxtParams = { clientOrderId, reduceOnly: true }
+    // HTX 线性永续的算法触发单必须显式带 position_side（实测 code 1067）；其它 venue 不传。
+    if (this.venue === 'htx') params['position_side'] = this.#positionSide
     addParam(params, 'stopLossPrice', request.stopLossPrice)
     addParam(params, 'takeProfitPrice', request.takeProfitPrice)
     addParam(params, 'trailingPercent', request.trailingPercent)
@@ -595,7 +614,27 @@ export class CcxtBroker implements Broker {
 
   async cancelOrder(exchangeOrderId: string): Promise<void> {
     await this.#ensureMarketsLoaded()
-    await this.#call(() => this.#exchange.cancelOrder(exchangeOrderId))
+    // ★ HTX 的**算法单（sl/tp/trigger/trailing）**在普通撤单端点查不到（实测 `not.found`），
+    // 必须带对应标志走 `v5/algo/cancel_orders`。逐个尝试，全 miss 才报错。
+    const attempts: readonly CcxtParams[] = [
+      {},
+      { stopLossTakeProfit: true },
+      { trigger: true },
+      { trailing: true },
+    ]
+    let lastError: unknown
+    for (const params of attempts) {
+      try {
+        await this.#exchange.cancelOrder(exchangeOrderId, this.#spreadSymbol, params)
+        return
+      } catch (error) {
+        lastError = error
+        if (!lookupMiss(error)) throw this.#safeError(error)
+      }
+    }
+    if (lastError === undefined) return
+    // 全部尝试都"查不到"：说明这个 id 不属于本账户/本 venue，必须报错而不是静默成功。
+    throw this.#safeError(lastError)
   }
 
   async cancelAll(symbol?: string): Promise<void> {
@@ -617,17 +656,34 @@ export class CcxtBroker implements Broker {
     }
   }
 
-  async findOrderByClientOrderId(clientOrderId: string): Promise<OrderAck | undefined> {
+  async findOrderByClientOrderId(clientOrderId: string, symbol?: string): Promise<OrderAck | undefined> {
     await this.#ensureMarketsLoaded()
+    const marketSymbol = symbol ?? this.#spreadSymbol
 
     if (this.#can('fetchOrder')) {
-      try {
-        const order = await this.#exchange.fetchOrder(clientOrderId, undefined, { clientOrderId })
-        if (order !== undefined && clientOrderIdFrom(order) === clientOrderId) {
-          return this.#orderAck(order, { clientOrderId }, 'acked')
+      // ★ HTX 线性永续：**普通单与算法单（sl/tp/trigger/trailing）在不同端点**，而且普通单查询
+      // **必须带 symbol**（否则 ccxt 抛 ArgumentsRequired）。旧实现传 undefined + 不带 algo 标志，
+      // 两条路都查不到 —— 实测开仓成交后 `findOrderByClientOrderId` 返回 undefined。
+      // 顺序：先普通单，再逐个算法类型；查不到不猜。
+      const attempts: readonly { readonly params: CcxtParams; readonly algo: boolean }[] = [
+        { params: { clientOrderId }, algo: false },
+        { params: { clientOrderId, stopLoss: true }, algo: true },
+        { params: { clientOrderId, takeProfit: true }, algo: true },
+        { params: { clientOrderId, trigger: true }, algo: true },
+        { params: { clientOrderId, trailing: true }, algo: true },
+        { params: { clientOrderId, stopLossTakeProfit: true }, algo: true },
+      ]
+      for (const attempt of attempts) {
+        // 普通单没有 symbol 就无法查询（ccxt 会抛）；算法单不强制，但也尽量带上。
+        if (!attempt.algo && marketSymbol === undefined) continue
+        try {
+          const order = await this.#exchange.fetchOrder(clientOrderId, marketSymbol, attempt.params)
+          if (order !== undefined && clientOrderIdFrom(order) === clientOrderId) {
+            return this.#orderAck(order, { clientOrderId }, 'acked')
+          }
+        } catch (error) {
+          if (!lookupMiss(error)) throw this.#safeError(error)
         }
-      } catch (error) {
-        if (!lookupMiss(error)) throw this.#safeError(error)
       }
     }
 
@@ -676,10 +732,46 @@ export class CcxtBroker implements Broker {
     const created = await this.#call(() =>
       this.#exchange.createOrder(request.symbol, request.type, request.side, amount, request.price, params),
     )
-    return this.#requirePlacedAck(
+    const ack = this.#requirePlacedAck(
       created,
       { clientOrderId: request.clientOrderId, intentId: request.intentId },
     )
+    // ★ HTX 市价单的 create 响应常是 open/new，成交要再查一次。不回填的后果不是"显示问题"：
+    // execute-action 只在 `state==='filled'` 时记 fill / 登记结算 / 挂保护单 —— 于是一笔真实成交
+    // 会被当成"没成交"，既没有保护单也没有结算（实测冒烟第一步就撞到）。
+    if (request.type === 'market' && ack.state !== 'filled' && ack.exchangeOrderId !== undefined) {
+      return this.#awaitFill(request.symbol, ack)
+    }
+    return ack
+  }
+
+  /** 轮询确认市价单成交（有界）；查不到就返回原 ack，绝不编造 avgPrice。 */
+  async #awaitFill(symbol: string, ack: OrderAck): Promise<OrderAck> {
+    if (!this.#can('fetchOrder') || ack.exchangeOrderId === undefined) return ack
+    let current = ack
+    for (let attempt = 0; attempt < this.#fillPollAttempts; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, this.#fillPollMs))
+      try {
+        const order = await this.#call(() =>
+          this.#exchange.fetchOrder(ack.exchangeOrderId as string, symbol),
+        )
+        if (order === undefined) continue
+        const refreshed = this.#orderAck(
+          order,
+          { clientOrderId: ack.clientOrderId, intentId: ack.intentId },
+          'acked',
+        )
+        if (refreshed !== undefined) {
+          current = refreshed
+          if (refreshed.state === 'filled' || refreshed.state === 'rejected' || refreshed.state === 'canceled') {
+            return refreshed
+          }
+        }
+      } catch {
+        // 单次查询失败继续轮询；到点仍未确认则返回原 ack（由恢复流程兜底）
+      }
+    }
+    return current
   }
 
   #requirePlacedAck(
@@ -698,6 +790,39 @@ export class CcxtBroker implements Broker {
    * `fetchBalance` 的账户类型参数。HTX 现货/永续账户分离，不指定就会读到另一个账户的 0。
    * 只影响**读取**；下单走 symbol 对应的市场，不受这个参数影响。
    */
+  /**
+   * 合并"普通挂单 + 算法挂单"。
+   *
+   * ★ HTX 把 sl/tp/trigger/trailing 放在 `/v5/algo/*`，普通 `fetchOpenOrders()` **看不到它们**。
+   * 不合并的后果："有持仓但无保护单"会被误判成 P0 不一致，或反过来把真实的保护单当不存在。
+   * 非 HTX venue 只取普通挂单（其它 venue 的算法单语义不同，不能照搬）。
+   */
+  async #fetchOpenOrdersMerged(symbol?: string): Promise<readonly CcxtOrderLike[]> {
+    const collected: CcxtOrderLike[] = []
+    const seen = new Set<string>()
+    const push = (orders: readonly CcxtOrderLike[]): void => {
+      for (const order of orders) {
+        const key = exchangeOrderIdFrom(order) ?? clientOrderIdFrom(order) ?? JSON.stringify(order).slice(0, 60)
+        if (seen.has(key)) continue
+        seen.add(key)
+        collected.push(order)
+      }
+    }
+    push(await this.#call(() => this.#exchange.fetchOpenOrders(symbol)))
+    if (this.venue === 'htx') {
+      for (const flag of ['stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
+        try {
+          const algo = await this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true })
+          if (Array.isArray(algo)) push(algo)
+        } catch (error) {
+          // 没有该类型算法单时 HTX 可能返回 not-found；这不是故障。其它错误照旧抛。
+          if (!lookupMiss(error)) throw this.#safeError(error)
+        }
+      }
+    }
+    return collected
+  }
+
   #balanceParams(): CcxtParams {
     return this.#accountType === undefined ? {} : { type: this.#accountType }
   }
@@ -941,13 +1066,16 @@ export class CcxtBroker implements Broker {
 
   #protectiveClientOrderId(request: ProtectiveRequest): string {
     // ProtectiveRequest 允许省略 id；用请求内容形成稳定键，避免用墙钟生成不可恢复的 id。
-    return [
-      'protect',
-      request.symbol,
-      request.stopLossPrice ?? '',
-      request.takeProfitPrice ?? '',
-      request.trailingPercent ?? '',
-      request.trailingTriggerPrice ?? '',
-    ].join(':')
+    // 但交易所只认**数字** id（实测 HTX/ccxt 会静默丢弃非数字 id），所以这里也走 numeric。
+    return numericClientOrderId(
+      [
+        'protect',
+        request.symbol,
+        request.stopLossPrice ?? '',
+        request.takeProfitPrice ?? '',
+        request.trailingPercent ?? '',
+        request.trailingTriggerPrice ?? '',
+      ].join(':'),
+    )
   }
 }
