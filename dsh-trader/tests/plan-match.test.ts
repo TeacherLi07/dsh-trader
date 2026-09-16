@@ -87,7 +87,7 @@ describe('matchPlan', () => {
     expect(outcome).toMatchObject({ kind: 'commitment', id: 'c-early' })
   })
 
-  it('skips conditions that already fired for this bar (edge semantics)', () => {
+  it('skips conditions that already fired for this bar (per-bar dedup)', () => {
     const plan = makeCard()
     const fired = planDedupKey('pc-btc-1', 'c-1', 'BTC/USDT', BAR_TS)
     const outcome = matchPlan({
@@ -99,6 +99,39 @@ describe('matchPlan', () => {
       alreadyFired: (key) => key === fired,
     })
     expect(outcome).toEqual({ kind: 'none' })
+  })
+
+  it('电平语义：条件持续为真 ⇒ 每根新 bar 都会再触发（plan §12.1 #23）', () => {
+    const plan = makeCard()
+    const fireOn = (barTs: number) =>
+      matchPlan({ plan, timeframe: '15m', barTs, now: NOW, context: context({ 'bar.close': 120 }) })
+    // 同一条件（bar.close > 110）在连续两根 bar 都为真
+    expect(fireOn(BAR_TS)).toMatchObject({ kind: 'commitment', id: 'c-1' })
+    expect(fireOn(BAR_TS + 900_000)).toMatchObject({ kind: 'commitment', id: 'c-1' })
+  })
+
+  it('cross* 尚未实现：写它会让求值失败 ⇒ 永久 UNCOVERED，不会静默当成未命中（plan §12.2 I）', () => {
+    const plan = makeCard({
+      invalidation: [],
+      commitments: [
+        {
+          id: 'c-cross',
+          seq: 1,
+          tf: '15m',
+          when: 'crossBelow(bar.close, 100)',
+          then: { action: 'reduce', fraction: 0.5 },
+        },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 95 }),
+    })
+    // fail-closed：不是 none、不是 commitment，而是显式的 uncovered
+    expect(outcome.kind).toBe('uncovered')
   })
 
   it('fails closed: an unevaluable condition becomes uncovered, never silently "no match"', () => {

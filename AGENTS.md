@@ -157,6 +157,10 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
 - **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
   §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
+- **`crossAbove`/`crossBelow` 未实现**：`plan §3.2` 的函数表与 `tests/plan-card.test.ts` 的示例卡里都写了
+  `crossBelow(...)`，但 `src/plan/dsl.ts` 的 `defaultFunctions` **刻意不提供**它，也没有任何调用方注入。
+  用它们的条件求值 `ok:false` ⇒ **永久 UNCOVERED**（fail-closed 不会乱下单，但计划卡永不触发且很难发现）。
+  详见 `plan.md` §12.2 I；在实现之前**不要**在计划卡里写 `cross*`。
 - **宏观事件窗口不是硬闸（暂不启用）**：`GatePolicy.tradingWindowOpen` 可选，调用方不传即不拦截；
   宏观风险只写进 `news` 分析师的提示词提醒（软判断，主动权在 agent）。**不要**再塞一个恒真/恒假的开关
   假装有这条风控；接入日历前请先读 `plan.md` §12.1 #22 的推翻条件。
