@@ -11,10 +11,12 @@
  * markdown 只作只读审计产物；权威数据只在这里。
  */
 
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 export interface SqliteLike {
   exec(sql: string): unknown
+  /** 仅增量迁移探测列时用到；测试用的假实现可以不给。 */
+  prepare?(sql: string): { all(...params: unknown[]): unknown[] }
 }
 
 export const SCHEMA_SQL = `
@@ -60,6 +62,9 @@ CREATE TABLE IF NOT EXISTS decisions (
   decision_id TEXT PRIMARY KEY,
   content_hash TEXT NOT NULL UNIQUE,
   symbol TEXT NOT NULL,
+  -- 决策所属时间框：结算要按它取 bar 窗口。没有它就无法在多 tf 下正确结算
+  --（旧实现只有一个全局 tf，会把 1h 决策用 4h 的窗口结算）。
+  timeframe TEXT,
   plan_id TEXT,
   decided_at INTEGER NOT NULL,
   context_hash TEXT NOT NULL,
@@ -316,5 +321,17 @@ export function migrate(db: SqliteLike): void {
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec('PRAGMA foreign_keys = ON;')
   db.exec(SCHEMA_SQL)
+  // 增量迁移：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表补列。
+  // 用 PRAGMA table_info 探测而不是 user_version，是为了让迁移本身幂等且可重复执行。
+  if (!hasColumn(db, 'decisions', 'timeframe')) {
+    db.exec('ALTER TABLE decisions ADD COLUMN timeframe TEXT;')
+  }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+}
+
+/** 列探测；假实现没有 `prepare` 时保守返回 true（不冒险 ALTER）。 */
+function hasColumn(db: SqliteLike, table: string, column: string): boolean {
+  if (db.prepare === undefined) return true
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name?: unknown }[]
+  return rows.some((row) => row.name === column)
 }

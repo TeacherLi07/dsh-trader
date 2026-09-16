@@ -166,6 +166,7 @@ export class LiveEngine {
       conditionId: outcome.id,
       action: outcome.action,
       symbol: input.symbol,
+      timeframe: input.timeframe,
       barTs: input.barTs,
       referencePrice: bar.close,
       atr: snapshot.values.atr14,

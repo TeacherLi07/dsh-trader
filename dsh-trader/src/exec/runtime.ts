@@ -27,6 +27,7 @@ import {
 } from './reconcile.js'
 import type { ExecRuntimeConfig, ExecRuntimeDeps, TradePorts } from './ports.js'
 import { CrashRecovery, type ClientOrderLookup } from './recovery.js'
+import { SettlementScheduler } from '../memory/settle.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx', 'okx']
@@ -373,6 +374,7 @@ export async function createExecRuntime(
 
   let disposed = false
   let timer: Disposer | undefined
+  let settleTimer: Disposer | undefined
   let running: Promise<ExecReconciliationReport> | undefined
 
   const updateFrozen = (actions: readonly ReconciliationAction[]): void => {
@@ -385,7 +387,10 @@ export async function createExecRuntime(
       const [remoteOrders, remotePositions] = await Promise.all([broker.getOpenOrders(), broker.getPositions()])
       const result = reconcile({
         localOrders: local.orders(),
-        remoteOrders: remoteOrders.map((order) => ({ clientOrderId: order.clientOrderId })),
+        remoteOrders: remoteOrders.map((order) => ({
+          clientOrderId: order.clientOrderId,
+          ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
+        })),
         localPositions: local.positions(),
         remotePositions: remotePositions.map((position) => ({ symbol: position.symbol, qty: position.qty })),
       })
@@ -469,6 +474,57 @@ export async function createExecRuntime(
     })
   }
 
+  // ── 结算调度（plan §5.3）────────────────────────────────────────────────────
+  // 旧实现里 `SettlementScheduler` 只在验收脚本被 new 出来，常驻进程从不扫描
+  // `reflection_due_at` ⇒ 决策永远不结算、无 outcomes/lessons，闭环静默断掉。
+  // 每个配置时间框各一个 scheduler：结算窗口 `decidedAt + horizonMs(tf)` 依赖 tf，
+  // 混用会把 1h 决策用 4h 窗口结算（journal 已按 tf 过滤，各 scheduler 只看自己的）。
+  const settlers = config.timeframes.map((timeframe) => ({
+    timeframe,
+    scheduler: new SettlementScheduler({
+      journal,
+      bars,
+      clock: deps.clock,
+      timeframe,
+      benchmarkSymbol: config.benchmark,
+      slippageBps: config.paperSlippageBps ?? 5,
+    }),
+  }))
+
+  const runSettlements = async (): Promise<void> => {
+    const now = deps.clock.now()
+    for (const { timeframe, scheduler } of settlers) {
+      const result = await scheduler.runOnce(now)
+      // 缺数据 deferred 是正常状态（下一轮重试），不落审计以免噪声；
+      // 只有真的结算/写反思/出错才留痕。
+      if (result.settled > 0 || result.reflectionsWritten > 0 || result.errors.length > 0) {
+        journal.appendAudit({
+          actor: 'system',
+          kind: 'settle_run',
+          payload: {
+            timeframe,
+            scanned: result.scanned,
+            settled: result.settled,
+            deferred: result.deferred,
+            deferredIds: result.deferredIds,
+            reflectionsWritten: result.reflectionsWritten,
+            errors: result.errors,
+          },
+          ts: now,
+        })
+      }
+    }
+  }
+
+  const onSettlementError = (error: unknown): void => {
+    journal.appendAudit({
+      actor: 'system',
+      kind: 'settle_failed',
+      payload: { error: String(error) },
+      ts: deps.clock.now(),
+    })
+  }
+
   // ── 崩溃恢复必须在普通对账**之前**跑（plan §4.2 / §10 P1 ⑤）──────────────────
   // `order_intents` 里 `created` 且无 ack 的在途意图是"请求可能已发出甚至已成交"的唯一线索，
   // 普通 Reconciler 只看 orders/positions，覆盖不到它。旧实现里 CrashRecovery 只在验收脚本
@@ -509,9 +565,16 @@ export async function createExecRuntime(
     // 启动先对账，再注册周期任务；启动报告失败就不返回看似可用的 runtime。
     await reconcileOnce()
     if (!disposed) timer = deps.clock.setInterval(() => void reconcileOnce().catch(onPeriodicError), config.reconcileMs)
+    if (!disposed) {
+      settleTimer = deps.clock.setInterval(
+        () => void runSettlements().catch(onSettlementError),
+        config.settleMs ?? 60_000,
+      )
+    }
   } catch (error) {
     disposed = true
     timer?.()
+    settleTimer?.()
     unsubscribe()
     await closeExchange?.()
     throw error
@@ -527,6 +590,8 @@ export async function createExecRuntime(
       disposed = true
       timer?.()
       timer = undefined
+      settleTimer?.()
+      settleTimer = undefined
       unsubscribe()
       await closeExchange?.()
     },

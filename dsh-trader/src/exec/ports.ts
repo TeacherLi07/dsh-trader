@@ -51,6 +51,11 @@ export interface ExecRuntimeConfig {
   readonly apiSecret?: string
   readonly sandbox?: boolean
   readonly reconcileMs: number
+  /**
+   * 结算扫描周期（plan §5.3）：独立任务扫 `reflection_due_at` 到期的决策。
+   * 缺省 60s；不配也有默认值，避免"结算闭环没接起来"这种静默缺口。
+   */
+  readonly settleMs?: number
   /** true 时才执行孤儿撤单；默认只报告，启动第①步不能改变远端状态。 */
   readonly liveAckOrphans?: boolean
   /** 语义别名，便于非插件调用方表达 §4.2 的 acknowledgeOrphans。 */

@@ -76,6 +76,8 @@ function executedDecision(
 ): void {
   const decision: DecisionRecord = {
     symbol: 'BTC/USDT',
+    // 结算按 tf 过滤：fixture 必须给出与 scheduler 一致的 tf，否则会被跳过（这本身就是新语义）。
+    timeframe: TF,
     decidedAt: T0,
     contextHash: `ctx:${over.decisionId}`,
     action: 'open',
@@ -167,6 +169,7 @@ describe('computeSettlement', () => {
   const decision = {
     decisionId: 'd1',
     symbol: 'BTC/USDT',
+    timeframe: TF,
     action: 'open',
     decidedAt: T0,
     sizeQty: 1,
@@ -366,6 +369,7 @@ describe('SettlementScheduler', () => {
       journal.recordDecision({
         decisionId: 'd-refused',
         symbol: 'BTC/USDT',
+        timeframe: TF,
         decidedAt: T0,
         contextHash: 'ctx:refused',
         action: 'open',
@@ -432,6 +436,7 @@ describe('SettlementScheduler', () => {
     journal.recordDecision({
       decisionId: 'd-hold',
       symbol: 'BTC/USDT',
+      timeframe: TF,
       decidedAt: T0,
       contextHash: 'ctx:hold',
       action: 'open',
@@ -450,6 +455,7 @@ describe('结算的数据可用性（P1 ④）', () => {
     journal.recordDecision({
       decisionId: 'd-nodata',
       symbol: 'BTC/USDT',
+      timeframe: TF,
       decidedAt: T0,
       contextHash: 'ctx:nodata',
       action: 'open',
@@ -471,6 +477,7 @@ describe('结算的数据可用性（P1 ④）', () => {
     journal.recordDecision({
       decisionId: 'd-retry',
       symbol: 'BTC/USDT',
+      timeframe: TF,
       decidedAt: T0,
       contextHash: 'ctx:retry',
       action: 'open',
@@ -507,6 +514,7 @@ describe('结算的数据可用性（P1 ④）', () => {
       journal.recordDecision({
         decisionId: `d-missing-${symbol}`,
         symbol,
+        timeframe: TF,
         decidedAt: T0,
         contextHash: `ctx:${symbol}`,
         action: 'open',
@@ -543,6 +551,7 @@ describe('结算 PIT 与交易级净额（审计修复）', () => {
     journal.recordDecision({
       decisionId: id,
       symbol: 'BTC/USDT',
+      timeframe: TF,
       decidedAt: ts,
       contextHash: `ctx:${id}`,
       action,
@@ -594,6 +603,7 @@ describe('结算 PIT 与交易级净额（审计修复）', () => {
     journal.recordDecision({
       decisionId: 'd-hold2',
       symbol: 'BTC/USDT',
+      timeframe: TF,
       decidedAt: T0,
       contextHash: 'ctx:hold2',
       action: 'open',

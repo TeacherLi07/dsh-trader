@@ -195,7 +195,7 @@ CREATE UNIQUE INDEX plan_one_active_per_symbol ON plan_cards(symbol) WHERE statu
 
 CREATE TABLE decisions(
   decision_id TEXT PRIMARY KEY, content_hash TEXT NOT NULL UNIQUE,   -- 幂等根
-  symbol TEXT NOT NULL, plan_id TEXT, decided_at INTEGER NOT NULL,
+  symbol TEXT NOT NULL, timeframe TEXT, plan_id TEXT, decided_at INTEGER NOT NULL,
   context_hash TEXT NOT NULL, data_fingerprint TEXT, model_route TEXT,
   action TEXT NOT NULL CHECK(action IN('open','reduce','close','set_stop','set_target',
         'set_trailing','cancel_all','halt','noop','no_trade','review')),
@@ -741,6 +741,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | E | `live_auto` 授权 | 人工决定 + 额度 | **2026-09-15 用户明确授权**，以最小仓位（1×、单笔 ≤12 USDT、日亏 ≤1.25）arm 并完成首轮观测（W1→desk 回合→`no_trade`，**零下单**）。**会话结束已回退 `paper`**（本会话定位=开发/测试，避免误触真实下单）；重新 arm = 把 `trade-exec.mode` 改成 `live_auto`（一行）。证据见 `docs/live-cycle-2026-09-16.md` |
 | F | **desk agent 回合驱动** | ~~阻塞首单~~ **已关闭** | 根因：`ctx.agents.create` 缺 `meta.cwd` ⇒ 系统提示 persona-suffix 的 `{{cwd}}` 无值，回合在模型调用前抛错（6ms、零 `assistant/message`），错误被 agent-loop 的 `kick()` 吞掉。修法：create 传 `deskCwd`（默认 `process.cwd()`）+ 显式监听 `agent/error` 落审计。**实测修后**：`deskEvents` = `user/message → assistant/message×3–4 → tool/call×10–14 → tool/result → turn/end`，`idleMs≈10–13s`，落了 4 条 `no_trade` 决策（ADA/DOGE）；计划卡与下单取决于模型是否判出机会（commit `0b7b0e6`） |
 | G | 首轮监督实测抓到的真 bug | 记入本表与 commit | ① `/halt` 读未声明的 `ctx.tradePorts` ⇒ cordis 抛错、plugin tree 加载失败；② **W1 永不触发**：supervisor 每轮把扫描边界跟到 `now`，而 `everyMs` 从边界起算 ⇒ 游标必须在**触发后**推进到 `fireTs`；③ 永续 `amount`/`contracts` 是**张数**，必须按 `contractSize` 换算（BTC 差 1000×）；④ 行情失败被 `void error` 静默吞掉 |
+| H | 计划卡 `when` 的 **edge vs 电平** 语义（规格自相矛盾） | **人工裁决**；若改语义需按 §12 #4 走 ADR 与人审 | `§3.2` 写"默认 **edge** 触发（false→true 各触发一次）"，但 `§3.5` 的 fired 键 `hash(planId, commitmentId, symbol, barTs)` **含 `barTs`**，等于每根收盘 bar 都可再触发（电平）；`src/plan/match.ts` 与 `live-engine.#alreadyFired` 跟的是 §3.5。后果：**持续为真**的承诺（如"跌破 X 减半仓"）会每根 bar 各减一次，可能把仓位减光。裁决前**不改代码**（改语义会改变所有计划卡行为，属"改宪法"级）。附属项：dedup 键用明文而非 `hash(...)` 只是形式差异，不构成缺陷 |
 
 ---
 

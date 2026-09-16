@@ -18,6 +18,8 @@ import type { DecisionAction } from '../plan/schema.js'
 export interface DecisionRecord {
   readonly decisionId: string
   readonly symbol: string
+  /** 决策所属时间框（结算按它取 bar 窗口；缺省说明调用方没提供，结算侧会跳过）。 */
+  readonly timeframe?: string
   readonly planId?: string
   readonly decidedAt: number
   readonly contextHash: string
@@ -179,6 +181,8 @@ interface LessonRow {
 export interface PendingSettlement {
   readonly decisionId: string
   readonly symbol: string
+  /** 结算按它取 bar 窗口；`null` = 该决策未记录时间框（结算侧不猜、跳过）。 */
+  readonly timeframe: string | null
   readonly action: string
   readonly decidedAt: number
   readonly sizeQty: number | null
@@ -212,6 +216,7 @@ export interface OutcomeRecord {
 interface PendingRow {
   decision_id: string
   symbol: string
+  timeframe: string | null
   action: string
   decided_at: number
   size_qty: number | null
@@ -283,6 +288,7 @@ export class DecisionJournal {
     return fingerprint({
       decisionId: record.decisionId,
       symbol: record.symbol,
+      timeframe: record.timeframe ?? null,
       planId: record.planId ?? null,
       decidedAt: record.decidedAt,
       contextHash: record.contextHash,
@@ -296,10 +302,10 @@ export class DecisionJournal {
   recordDecision(record: DecisionRecord): boolean {
     const result = this.#statements.get(
         `INSERT INTO decisions
-           (decision_id, content_hash, symbol, plan_id, decided_at, context_hash, action,
+           (decision_id, content_hash, symbol, timeframe, plan_id, decided_at, context_hash, action,
             size_qty, stop_price, take_profit, rationale, model_route, executed, reflection_due_at)
          VALUES
-           (@decisionId, @contentHash, @symbol, @planId, @decidedAt, @contextHash, @action,
+           (@decisionId, @contentHash, @symbol, @timeframe, @planId, @decidedAt, @contextHash, @action,
             @sizeQty, @stopPrice, @takeProfit, @rationale, @modelRoute, @executed, @reflectionDueAt)
          -- 只兜 content_hash：同一 decision_id 改内容 = 事后改写，必须抛（有测试锁）。
          -- 程序化的"重跑同一 bar"在 execute-action 层用 hasDecision 提前短路，不依赖这里。
@@ -309,6 +315,7 @@ export class DecisionJournal {
         decisionId: record.decisionId,
         contentHash: DecisionJournal.contentHash(record),
         symbol: record.symbol,
+        timeframe: record.timeframe ?? null,
         planId: record.planId ?? null,
         decidedAt: record.decidedAt,
         contextHash: record.contextHash,
@@ -330,18 +337,21 @@ export class DecisionJournal {
    * 到期待结算的决策 —— **扫描全部标的**，而不是"只结算当前正在分析的标的"
    * （TradingAgents 的 `_resolve_pending_entries` 因此让一次性标的的条目永远悬空）。
    */
-  pendingSettlements(now: number, limit = 20): readonly PendingSettlement[] {
+  pendingSettlements(now: number, limit = 20, timeframe?: string): readonly PendingSettlement[] {
     const rows = this.#statements
       .get(
-        `SELECT decision_id, symbol, action, decided_at, size_qty, stop_price, take_profit, confidence, rationale
+        `SELECT decision_id, symbol, timeframe, action, decided_at, size_qty, stop_price, take_profit, confidence, rationale
          FROM decisions
          WHERE outcome_id IS NULL AND reflection_due_at IS NOT NULL AND reflection_due_at <= ?
+           -- 每个 tf 的 scheduler 只认自己的决策；? IS NULL 表示不过滤（旧调用方/测试）
+           AND (? IS NULL OR timeframe = ?)
          ORDER BY reflection_due_at ASC LIMIT ?`,
       )
-      .all(now, limit) as PendingRow[]
+      .all(now, timeframe ?? null, timeframe ?? null, limit) as PendingRow[]
     return rows.map((row) => ({
       decisionId: row.decision_id,
       symbol: row.symbol,
+      timeframe: row.timeframe,
       action: row.action,
       decidedAt: row.decided_at,
       sizeQty: row.size_qty,

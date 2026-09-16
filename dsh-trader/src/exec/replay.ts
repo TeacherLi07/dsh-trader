@@ -258,6 +258,7 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
               conditionId: outcome.id,
               action: outcome.action,
               symbol: request.symbol,
+              timeframe: request.timeframe,
               barTs: bar.openTime,
               referencePrice: bar.close,
               atr: snapshot.values.atr14,

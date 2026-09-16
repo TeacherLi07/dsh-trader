@@ -500,6 +500,7 @@ const tradeExecuteOrder: ToolDefinition = {
         ports.journal.recordDecision({
           decisionId: effectiveDecisionId,
           symbol,
+          timeframe,
           decidedAt: ports.clock.now(),
           contextHash: `refused:${reason}`,
           action,
@@ -608,6 +609,7 @@ const tradeExecuteOrder: ToolDefinition = {
     ports.journal.recordDecision({
       decisionId: effectiveDecisionId,
       symbol,
+      timeframe,
       decidedAt: ports.clock.now(),
       contextHash: ports.contextHash ?? `unassembled-exec:${decisionId}`,
       action,
@@ -834,6 +836,7 @@ const tradeRecordDecision: ToolDefinition = {
   parameters: {
     decisionId: { type: 'string', required: true },
     symbol: { type: 'string', required: true },
+    timeframe: { type: 'string', enum: TIMEFRAMES },
     action: { type: 'string', required: true },
     sizeQty: { type: 'number' },
     stopPrice: { type: 'number' },
@@ -849,6 +852,7 @@ const tradeRecordDecision: ToolDefinition = {
       throw new ToolArgumentError(`action 必须是 ${DECISION_ACTIONS.join('|')} 之一，收到 ${rawAction}`)
     }
     const action = rawAction as DecisionAction
+    const timeframe = optionalString(args, 'timeframe')
     // `contextHash` **不接受模型入参**：哈希由代码给出，模型无法伪造"我看到过什么"
     const contextHash = ports.contextHash ?? `unassembled-manual:${decisionId}`
     const sizeQty = optionalNumber(args, 'sizeQty')
@@ -858,6 +862,7 @@ const tradeRecordDecision: ToolDefinition = {
     const inserted = ports.journal.recordDecision({
       decisionId,
       symbol,
+      ...(timeframe === undefined ? {} : { timeframe }),
       decidedAt: ports.clock.now(),
       contextHash,
       action,

@@ -142,10 +142,11 @@ describe('ExecRuntime 组合根', () => {
     const first = runtime.reconcileOnce()
     const second = runtime.reconcileOnce()
     expect(await first).toEqual(await second)
-    expect(clock.pendingTimers()).toBe(1)
+    // 组合根现在有两个周期任务：对账 + 结算扫描（plan §5.3）
+    expect(clock.pendingTimers()).toBe(2)
     clock.advanceTo(NOW + 100)
     await Promise.resolve()
-    expect(clock.pendingTimers()).toBe(1)
+    expect(clock.pendingTimers()).toBe(2)
 
     await runtime.dispose()
     expect(clock.pendingTimers()).toBe(0)

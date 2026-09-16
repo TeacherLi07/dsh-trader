@@ -36,6 +36,8 @@ export interface ExecuteActionArgs {
   readonly conditionId: string
   readonly action: PlanAction
   readonly symbol: string
+  /** 该条件所在的时间框；写入 decisions.timeframe，供结算按正确的 bar 窗口结算。 */
+  readonly timeframe?: string
   /** 计划卡匹配所对应 bar 的 openTime；它是幂等根的一部分。 */
   readonly barTs: number
   readonly referencePrice: number
@@ -234,6 +236,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     args.journal.recordDecision({
       decisionId,
       symbol: args.symbol,
+      ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
       planId: args.plan.planId,
       decidedAt: now,
       contextHash,
@@ -430,6 +433,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
   args.journal.recordDecision({
     decisionId,
     symbol: args.symbol,
+    ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
     planId: args.plan.planId,
     decidedAt: now,
     contextHash,

@@ -67,6 +67,19 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
   })
 
+  it('给已有库补 decisions.timeframe（增量迁移），且可重复执行', () => {
+    const columns = (): string[] =>
+      (db.prepare('PRAGMA table_info(decisions)').all() as { name: string }[]).map((row) => row.name)
+    // 模拟"旧库"：建表时还没有 timeframe 列
+    db.exec('ALTER TABLE decisions DROP COLUMN timeframe')
+    expect(columns()).not.toContain('timeframe')
+
+    migrate(db)
+    expect(columns()).toContain('timeframe')
+    // 迁移必须幂等：再跑一次不能因为列已存在而抛错
+    expect(() => migrate(db)).not.toThrow()
+  })
+
   it('allows at most one active plan card per symbol, across symbols independently', () => {
     insertPlan('p1', 'BTC/USDT:USDT')
     expect(() => insertPlan('p2', 'BTC/USDT:USDT')).toThrow()

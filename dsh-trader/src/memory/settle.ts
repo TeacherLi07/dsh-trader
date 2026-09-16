@@ -281,7 +281,9 @@ export class SettlementScheduler {
   async runOnce(now: number, limit = 20): Promise<SettlementRunResult> {
     const gates = this.deps.gates ?? DEFAULT_REFLECTION_GATES
     const horizonMs = this.deps.horizonMs ?? horizonMsForTimeframe(this.deps.timeframe)
-    const pending = this.deps.journal.pendingSettlements(now, limit)
+    // 按 tf 过滤：每个 scheduler 只结算自己时间框的决策。否则多 tf 下会用错 bar 窗口
+    //（`horizonEnd = decidedAt + horizonMs(this.deps.timeframe)` 对别的 tf 是错的）。
+    const pending = this.deps.journal.pendingSettlements(now, limit, this.deps.timeframe)
 
     let settled = 0
     let skipped = 0

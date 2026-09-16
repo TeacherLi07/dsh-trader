@@ -37,6 +37,24 @@ describe('DecisionJournal', () => {
     expect(journal.decisionIds()).toEqual(['d1'])
   })
 
+  it('pendingSettlements 按 tf 过滤；缺 tf 的决策不会被任何 scheduler 误领（plan §5.3）', () => {
+    journal.recordDecision(decision({ decisionId: 'd-1h', timeframe: '1h', reflectionDueAt: NOW }))
+    journal.recordDecision(decision({ decisionId: 'd-4h', timeframe: '4h', reflectionDueAt: NOW }))
+    journal.recordDecision(decision({ decisionId: 'd-null', reflectionDueAt: NOW }))
+
+    expect(journal.pendingSettlements(NOW, 10, '1h').map((row) => row.decisionId)).toEqual(['d-1h'])
+    expect(journal.pendingSettlements(NOW, 10, '4h').map((row) => row.decisionId)).toEqual(['d-4h'])
+    // 不传 tf = 不过滤（旧调用方/运维排查用）
+    expect(
+      journal
+        .pendingSettlements(NOW, 10)
+        .map((row) => row.decisionId)
+        .sort(),
+    ).toEqual(['d-1h', 'd-4h', 'd-null'])
+    // 缺 tf 的决策不会被"猜"成某个 tf：宁可不结算，也不用错的 bar 窗口结算
+    expect(journal.pendingSettlements(NOW, 10, '1h').some((row) => row.decisionId === 'd-null')).toBe(false)
+  })
+
   it('dedupes identical content and refuses to rewrite the same decision id', () => {
     expect(journal.recordDecision(decision())).toBe(true)
     expect(journal.recordDecision(decision())).toBe(false)
