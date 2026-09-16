@@ -139,6 +139,7 @@ export function apply(ctx: Context, config: MarketConfig): void {
             mode: ports.mode,
             limits: ports.limits,
             riskPct: ports.riskPct,
+            ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols }),
           })
           void liveEngine
             .onClosedBar({

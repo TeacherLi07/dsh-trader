@@ -100,4 +100,21 @@ describe('validateIntent (hard gate)', () => {
       kind: 'deny',
     })
   })
+
+  it('冻结标的禁止增加敞口，但平/减仓永远放行（plan §4.2/§6.3）', () => {
+    const frozenSymbols = new Set(['BTC/USDT:USDT'])
+
+    // 增加敞口 ⇒ 拒绝（旧实现把冻结算进 Set 却无人消费，冻结形同虚设）
+    expect(validateIntent(intent(), account, policy({ frozenSymbols }))).toMatchObject({ kind: 'deny' })
+    // 只影响被冻结的标的
+    expect(validateIntent(intent({ symbol: 'ETH/USDT:USDT' }), account, policy({ frozenSymbols }))).toEqual({
+      kind: 'allow',
+    })
+    // 能平仓永远比不能平仓安全
+    expect(validateIntent(intent({ reduceOnly: true }), account, policy({ frozenSymbols }))).toEqual({ kind: 'allow' })
+    // "永远生效"：用户放弃风控参数不等于放弃冻结
+    expect(
+      validateIntent(intent({ notionalUsd: 10_000_000 }), account, policy({ limits: null, frozenSymbols })),
+    ).toMatchObject({ kind: 'deny' })
+  })
 })

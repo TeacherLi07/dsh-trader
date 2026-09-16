@@ -64,6 +64,11 @@ export interface ToolPorts {
    * 默认 **false** —— 该问题由 P1.5 A/B 闸门判定；未判定前一律拒绝，绝不默认放行。
    */
   readonly allowPmCommitment?: boolean
+  /**
+   * 冻结标的（对账/恢复存在未决状态 ⇒ 禁止增加敞口，plan §4.2/§6.3）。
+   * 只读；未提供视为空集。平/减仓不受影响。
+   */
+  readonly frozenSymbols?: () => ReadonlySet<string>
 }
 
 /** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
@@ -345,6 +350,7 @@ const tradeRiskCheck: ToolDefinition = {
       tradingWindowOpen: true,
       duplicateDecision: false,
       paperVenue: 'paper',
+      ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols() }),
     }
     return {
       verdict: validateIntent(probe, account, policy),
@@ -591,6 +597,7 @@ const tradeExecuteOrder: ToolDefinition = {
       tradingWindowOpen: true,
       duplicateDecision: ports.journal.hasClientOrderId(intent.clientOrderId),
       paperVenue: 'paper',
+      ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols() }),
     }
     const verdict = validateIntent(intent, account, policy)
     if (verdict.kind === 'deny') {
@@ -694,32 +701,61 @@ const tradeExecuteOrder: ToolDefinition = {
         reduceOnly: true,
         createdAt: ports.clock.now(),
       })
-      const pAck = await ports.broker.placeProtective({
-        symbol,
-        clientOrderId: protectiveClientId,
-        stopLossPrice: stopPrice,
-        ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
-      })
-      ports.journal.markIntentAcked(
-        protectiveClientId,
-        pAck.state === 'filled' ? 'filled' : 'acked',
-        pAck.exchangeOrderId,
-        ports.clock.now(),
-      )
-      if (pAck.exchangeOrderId !== undefined) {
-        ports.journal.recordOrder({
-          orderId: pAck.exchangeOrderId,
-          venue: ports.broker.venue,
-          exchangeOrderId: pAck.exchangeOrderId,
-          clientOrderId: protectiveClientId,
+      try {
+        const pAck = await ports.broker.placeProtective({
           symbol,
-          status: pAck.state,
-          qty: intent.qty,
-          filledQty: 0,
-          updatedAt: ports.clock.now(),
+          clientOrderId: protectiveClientId,
+          stopLossPrice: stopPrice,
+          ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
         })
+        ports.journal.markIntentAcked(
+          protectiveClientId,
+          // ★ 不能把 rejected 记成 acked：那会把"交易所拒绝了保护单"伪装成"已挂出"，
+          // 与 execute-action 的 ackIntentState 语义不一致，也违反"失败逐字保留"（plan §1）。
+          pAck.state === 'filled' ? 'filled' : pAck.state === 'rejected' ? 'rejected' : 'acked',
+          pAck.exchangeOrderId,
+          ports.clock.now(),
+        )
+        if (pAck.exchangeOrderId !== undefined) {
+          ports.journal.recordOrder({
+            orderId: pAck.exchangeOrderId,
+            venue: ports.broker.venue,
+            exchangeOrderId: pAck.exchangeOrderId,
+            clientOrderId: protectiveClientId,
+            symbol,
+            status: pAck.state,
+            qty: intent.qty,
+            filledQty: 0,
+            updatedAt: ports.clock.now(),
+          })
+        }
+        protectiveAck = pAck
+        if (pAck.state === 'rejected') {
+          await degradeUnprotectedOpen(
+            ports,
+            symbol,
+            intent,
+            effectiveDecisionId,
+            intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+            'protective_rejected',
+          )
+        }
+      } catch (error) {
+        ports.journal.appendAudit({
+          actor: 'system',
+          kind: 'protection_failed',
+          payload: { decisionId: effectiveDecisionId, symbol, error: String(error) },
+          ts: ports.clock.now(),
+        })
+        await degradeUnprotectedOpen(
+          ports,
+          symbol,
+          intent,
+          effectiveDecisionId,
+          intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+          `protective_failed:${String(error)}`,
+        )
       }
-      protectiveAck = pAck
     }
 
     // `close` = 全平 + cancelAll(symbol)（plan §3.3）
@@ -736,6 +772,48 @@ const tradeExecuteOrder: ToolDefinition = {
   },
 }
 
+
+/**
+ * §6.3 降级：入场成交后保护单挂失败 ⇒ 立即平掉这笔仓位。
+ * 与 `execute-action.ts` 的同名逻辑保持同一语义 —— 工具路径与机械执行路径不能有两套保护语义。
+ */
+async function degradeUnprotectedOpen(
+  ports: ToolPorts,
+  symbol: string,
+  intent: OrderRequest,
+  decisionId: string,
+  price: number | undefined,
+  reason: string,
+): Promise<void> {
+  const qty = Math.abs(intent.qty)
+  try {
+    await ports.broker.placeOrder({
+      intentId: `degrade:${decisionId}`,
+      clientOrderId: numericClientOrderId(`degrade:${decisionId}`),
+      decisionId,
+      symbol,
+      type: 'market',
+      side: intent.side === 'buy' ? 'sell' : 'buy',
+      qty,
+      notionalUsd: qty * (price ?? 0),
+      reduceOnly: true,
+    })
+    ports.journal.appendAudit({
+      actor: 'system',
+      kind: 'protection_degrade_closed',
+      payload: { decisionId, symbol, reason, qty },
+      ts: ports.clock.now(),
+    })
+  } catch (error) {
+    // 平仓也失败 ⇒ 如实落审计；下次对账会看到"有持仓无保护单"并冻结该标的。
+    ports.journal.appendAudit({
+      actor: 'system',
+      kind: 'protection_degrade_failed',
+      payload: { decisionId, symbol, reason, error: String(error), qty },
+      ts: ports.clock.now(),
+    })
+  }
+}
 
 const tradeCancel: ToolDefinition = {
   name: 'trade_cancel',

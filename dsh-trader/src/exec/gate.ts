@@ -23,6 +23,12 @@ export interface GatePolicy {
   /** 该 `decisionId` 是否已经执行过（幂等根）。 */
   readonly duplicateDecision: boolean
   readonly paperVenue: Venue
+  /**
+   * 对账/恢复判定"冻结自动交易"的标的（plan §4.2/§6.3）。
+   * 只拦**增加敞口**：平仓/减仓永远放行（"能平仓永远比不能平仓安全"）。
+   * 未提供视为空集；它是"永远生效"的安全检查，不受 `limits === null` 影响。
+   */
+  readonly frozenSymbols?: ReadonlySet<string>
 }
 
 export type GateDecision =
@@ -66,6 +72,13 @@ export function validateIntent(
   // ---- 永远生效：幂等 ----
   if (policy.duplicateDecision) {
     return deny(`decision ${intent.decisionId} 已经执行过（幂等拒绝）`)
+  }
+
+  // ---- 永远生效：冻结标的禁止增加敞口（plan §4.2/§6.3）----
+  // 必须在 `limits === null` 之前：用户放弃风控**参数**，不等于放弃冻结/幂等这类安全机制。
+  // 只拦增加敞口 —— 冻结期间仍然允许平/减仓。
+  if (increasesExposure(intent) && policy.frozenSymbols?.has(intent.symbol) === true) {
+    return deny(`标的 ${intent.symbol} 已被冻结（对账/恢复存在未决状态），禁止新开仓`)
   }
 
   // ---- 永远生效：结构校验（数量/名义金额必须是重取实时状态后算出的数值） ----

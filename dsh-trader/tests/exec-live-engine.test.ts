@@ -207,6 +207,53 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     h.db.close()
   })
 
+  it('市价单回填超时（acked）时重取持仓确认，仍然挂保护单并登记结算', async () => {
+    const h = harness()
+    const realPlace = h.broker.placeOrder.bind(h.broker)
+    // 模拟 HTX：createOrder 只回 open/new，且 #awaitFill 到点仍未确认 ⇒ ack.state='acked'
+    h.broker.placeOrder = async (request: OrderRequest): Promise<OrderAck> => {
+      const ack = await realPlace(request)
+      return { ...ack, state: 'acked' }
+    }
+
+    const result = await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+
+    expect(result.kind).toBe('executed')
+    // 成交由"重取持仓"确认 ⇒ 保护单必须挂上（旧实现只看 ack.state ⇒ 留下裸仓）
+    expect(h.broker.protectiveCalls).toBe(1)
+    const positions = await h.broker.getPositions()
+    expect(positions.some((position) => position.symbol === SYMBOL && position.qty !== 0)).toBe(true)
+    const due = h.db
+      .prepare('SELECT decision_id FROM decisions WHERE reflection_due_at IS NOT NULL')
+      .all() as { decision_id: string }[]
+    expect(due.length).toBeGreaterThan(0)
+    h.db.close()
+  })
+
+  it('保护单被交易所拒绝 ⇒ 立即降级平仓并落审计（plan §6.3）', async () => {
+    const h = harness()
+    h.broker.placeProtective = async (request: ProtectiveRequest): Promise<OrderAck> => ({
+      intentId: request.clientOrderId ?? 'pco',
+      clientOrderId: request.clientOrderId ?? 'pco',
+      state: 'rejected',
+      ts: h.clock.now(),
+      exchangeOrderId: 'rejected-1',
+    })
+
+    const result = await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    expect(result.kind).toBe('executed')
+
+    // 主单 + 降级平仓 = 2 次 placeOrder；降级必须把仓位拉回 0（裸仓是已知危险态）
+    expect(h.broker.orderCalls).toBe(2)
+    const positions = await h.broker.getPositions()
+    expect(positions.find((position) => position.symbol === SYMBOL)?.qty ?? 0).toBe(0)
+    const audit = h.db
+      .prepare("SELECT kind FROM audit_events WHERE kind LIKE 'protection_%'")
+      .all() as { kind: string }[]
+    expect(audit.length).toBeGreaterThan(0)
+    h.db.close()
+  })
+
   it('缺少 funding.rate 时 fail-closed 记 UNCOVERED，不下单', async () => {
     const h = harness({
       commitments: [

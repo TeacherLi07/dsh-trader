@@ -26,6 +26,7 @@ import {
   type ReconcilerResult,
 } from './reconcile.js'
 import type { ExecRuntimeConfig, ExecRuntimeDeps, TradePorts } from './ports.js'
+import { CrashRecovery, type ClientOrderLookup } from './recovery.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx', 'okx']
@@ -344,6 +345,11 @@ export async function createExecRuntime(
     throw error
   }
 
+  // 冻结集合必须在 ports 之前声明：`ports.frozenSymbols()` 是工具与 live-engine 执行
+  // plan §4.2/§6.3「冻结自动交易」的唯一通道。旧实现只把冻结算进 Set、无任何消费方，
+  // 于是"已冻结"的同时照常开仓（审计说冻结、行为没冻结）。
+  const frozen = new Set<string>()
+
   const ports: TradePorts = {
     db: deps.db,
     bars,
@@ -362,9 +368,9 @@ export async function createExecRuntime(
     ...(config.contextHash === undefined ? {} : { contextHash: config.contextHash }),
     ...(config.pm === undefined ? {} : { pm: config.pm }),
     ...(config.allowPmCommitment === undefined ? {} : { allowPmCommitment: config.allowPmCommitment }),
+    frozenSymbols: () => new Set(frozen),
   }
 
-  const frozen = new Set<string>()
   let disposed = false
   let timer: Disposer | undefined
   let running: Promise<ExecReconciliationReport> | undefined
@@ -458,6 +464,42 @@ export async function createExecRuntime(
     journal.appendAudit({
       actor: 'system',
       kind: 'reconcile_failed',
+      payload: { error: String(error), freezeSymbols: [...config.symbols] },
+      ts: deps.clock.now(),
+    })
+  }
+
+  // ── 崩溃恢复必须在普通对账**之前**跑（plan §4.2 / §10 P1 ⑤）──────────────────
+  // `order_intents` 里 `created` 且无 ack 的在途意图是"请求可能已发出甚至已成交"的唯一线索，
+  // 普通 Reconciler 只看 orders/positions，覆盖不到它。旧实现里 CrashRecovery 只在验收脚本
+  // 被 new 出来，常驻进程从不调用 ⇒ 崩溃后 created 意图永不收敛，也不触发"未知即冻结"。
+  try {
+    const recovered = await new CrashRecovery({
+      journal,
+      // paper broker 不一定实现 findOrderByClientOrderId；缺了就让恢复判 unknown 并冻结。
+      broker: broker as Broker & ClientOrderLookup,
+      clock: deps.clock,
+      symbols: config.symbols,
+    }).run()
+    for (const symbol of recovered.freezeSymbols) frozen.add(symbol)
+    journal.appendAudit({
+      actor: 'system',
+      kind: 'crash_recovery',
+      payload: {
+        scanned: recovered.scanned,
+        freezeSymbols: [...recovered.freezeSymbols],
+        orphanOpenOrders: recovered.orphanOpenOrders.length,
+        alerts: recovered.alerts.map((alert) => alert.code),
+      },
+      ts: deps.clock.now(),
+    })
+  } catch (error) {
+    // 恢复失败 = 状态未知。fail-closed：冻结全部配置标的；但不阻断启动
+    //（交易所短暂不可用不应让进程起不来），与周期对账失败同一处理。
+    for (const symbol of config.symbols) frozen.add(symbol)
+    journal.appendAudit({
+      actor: 'system',
+      kind: 'crash_recovery_failed',
       payload: { error: String(error), freezeSymbols: [...config.symbols] },
       ts: deps.clock.now(),
     })
