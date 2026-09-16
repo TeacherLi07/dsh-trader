@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 51 文件 / 572 测试
+pnpm test                        # vitest run，当前 55 文件 / 605 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -120,6 +120,9 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | market 文本不可信 | `question`/`description` 由市场创建者书写 | 按数据注入并标注 `untrustedText`，**不参与工具授权** |
 | HTX 无 sandbox | ccxt 里 HTX 没有 sandbox 端点，OKX 有 | P2 破坏性测试走 OKX sandbox 或纯 `paper`（`plan.md` §12.2 B） |
 | HTX 现货与 USDT 永续是**两个账户** | `fetchBalance()` 默认读现货；跑 `BTC/USDT:USDT` 时现货通常为 0 ⇒ 系统"以为没钱"，sizing 推出 qty=0 | 显式 `accountType: swap`（`fetchBalance({type})` + exchange `defaultType`）；实测同一 key 现货 0 / swap 24.914 |
+| 永续的 `amount`/`contracts` 是**张数** | ccxt 合约的 `createOrder` 与 `fetchPositions` 都用张数；直接传基础币会差一个 `contractSize`（BTC 1000×、ADA 10×） | `CcxtBroker` 按 `contractSize` 换算并用 `amountToPrecision` 对齐；inverse 直接拒绝 |
+| cordis 的 `ctx.X` 必须已声明 | 读未注册的 `ctx.tradePorts` 会抛 `cannot get property "tradePorts" without inject`，**整个 plugin tree 加载失败**（单测测不到） | 插件间用模块级注册表（`getExecPorts()`）或 `inject`；改完必须真启动一次 `dsh --profile trade` |
+| `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
 | 免费 ccxt 无 WS | `has.watchOHLCV === undefined` | v0/v1 只用 REST 轮询（分钟级足够） |
 
 ## 常见改动落点
@@ -145,7 +148,8 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   （`trade_regime` 已由 T2.5 实现。）
 - **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
   `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
-- **P3–P4 未做**：`live_confirm`/`live_auto`、周级复盘/playbook/M3 版本化。
+- **P3–P4 未做**：周级复盘/playbook/M3 版本化；`live_auto` 已按用户授权 arm，但**首单被 §12.2 F 阻塞**
+  （W1 已触发、desk 会话已建，但 `followup` 没跑出回合 ⇒ 无计划卡 ⇒ 零下单）。
 - **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
   §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
 - **待外部输入**（`plan.md` §12.2）：HTX key 已确认可提供；OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；

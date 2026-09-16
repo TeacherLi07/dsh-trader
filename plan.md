@@ -738,7 +738,9 @@ patch 引用的子路径必须在 `exports` 里可达：
 | B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决** |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发 |
-| E | `live_auto` 授权 | 人工决定 + 额度 | 必须先满足 §10 P3（连续 14 天：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算） |
+| E | `live_auto` 授权 | 人工决定 + 额度 | **2026-09-15 用户明确授权**，以最小仓位（1×、单笔 ≤12 USDT、日亏 ≤1.25）arm；回滚 = 把 `trade-exec.mode` 改回 `paper` |
+| F | **desk agent 回合驱动**（阻塞首单） | DSH `ctx.agents.create/resume` 后的 `followup` 必须真的跑出一个回合 | 实测：arm 后 W1 已触发（`audit: w1_wake`）、desk 会话已创建，但会话日志**只有 header**（无 `user/message`/`assistant/message`/工具调用）⇒ 没有计划卡 ⇒ 零下单。`plugins/probe.ts` 的 P0 ⑤ 验收其实是由 **app 自带 root agent** 驱动的，`followup` 对程序内 `create/resume` 的 agent 未必启动回合。修法方向：用 `dsh-agent-loop` 的声明式 `agents` 配置让 loop 接管该会话，或找到正确的驱动入口；**修好前不要重启 live 进程** |
+| G | 首轮监督实测抓到的真 bug | 记入本表与 commit | ① `/halt` 读未声明的 `ctx.tradePorts` ⇒ cordis 抛错、plugin tree 加载失败；② **W1 永不触发**：supervisor 每轮把扫描边界跟到 `now`，而 `everyMs` 从边界起算 ⇒ 游标必须在**触发后**推进到 `fireTs`；③ 永续 `amount`/`contracts` 是**张数**，必须按 `contractSize` 换算（BTC 差 1000×）；④ 行情失败被 `void error` 静默吞掉 |
 
 ---
 
