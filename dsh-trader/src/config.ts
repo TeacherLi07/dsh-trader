@@ -139,6 +139,26 @@ export function checkLimitsConsistency(input: LimitsConsistencyInput): string | 
 }
 
 /**
+ * 启动期的风控自洽校验入口（plan §12 #17）。
+ *
+ * `paper` 模式权益已知（`paperInitialEquityQuote`）⇒ **启动即校验、不自洽就拒绝启动**；
+ * `live*` 模式的权益要等首次 `getAccount()`（券商侧真值），启动时无从得知 ⇒ 这里返回 null，
+ * 由 `live-engine` 在首次读到账户后做一次性校验并落审计（见 `limits_inconsistent`）。
+ *
+ * 为什么必须做：配置不自洽时，每一单都会在硬闸的 `perOrderCapUsd` 处被打回 ——
+ * 系统"看起来在跑"，实际永远不成交。让它在启动时大声失败，比让它安静地空转好。
+ */
+export function startupLimitsError(input: {
+  readonly mode: RunMode
+  readonly equityQuoteUsd: number
+  readonly riskPct: number
+  readonly perOrderCapUsd: number
+}): string | null {
+  if (input.mode !== 'paper') return null
+  return checkLimitsConsistency(input)
+}
+
+/**
  * 解析启动参数：缺省即抛 `StartupParamsError`；仅当 `waiver === true` 时返回受限参数集。
  * `now` 由注入的 Clock 提供，便于回放与测试。
  */

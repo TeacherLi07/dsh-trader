@@ -17,6 +17,12 @@ export interface DslContext {
   get(path: string): Primitive | undefined
   /** 解析一个函数调用；未知或参数非法返回 undefined。 */
   call(name: string, args: readonly Primitive[]): Primitive | undefined
+  /**
+   * 取值路径在**前一根已收盘 bar** 上的值。只有 `crossAbove` / `crossBelow` 需要它。
+   * 未提供（例如回放的第一根 bar、指标暖机中）⇒ cross 求值失败 ⇒ 整式 `ok:false` ⇒ UNCOVERED，
+   * **不静默当成"没有穿越"**（fail-closed，与本文件其它错误一致）。
+   */
+  previous?(path: string): Primitive | undefined
 }
 
 export class DslError extends Error {
@@ -247,6 +253,10 @@ function evaluateNode(node: Expr, ctx: DslContext): Primitive {
       return value
     }
     case 'call': {
+      // `cross*` 需要前一根 bar 的取值，不能像纯数学函数那样只拿"已求值参数"（前值已丢）。
+      if (node.name === 'crossAbove' || node.name === 'crossBelow') {
+        return evaluateCross(node.name, node.args, ctx)
+      }
       const args = node.args.map((arg) => evaluateNode(arg, ctx))
       const value = ctx.call(node.name, args)
       if (value === undefined) {
@@ -263,6 +273,51 @@ function evaluateNode(node: Expr, ctx: DslContext): Primitive {
     case 'binary':
       return evaluateBinary(node, ctx)
   }
+}
+
+/**
+ * `crossAbove(a, b)` / `crossBelow(a, b)` —— **边沿**语义，需要前一根 bar。
+ *
+ * 为什么是特殊形式而不是 `defaultFunctions` 里的普通函数：求值器传给普通函数的参数**已经求值**，
+ * 那时"前一根的值"已经无从取得。这里把两个参数表达式分别在**当前**与**前一根**上下文里各求一次：
+ *   crossAbove = 前一根 `a <= b` 且当前 `a > b`
+ *   crossBelow = 前一根 `a >= b` 且当前 `a < b`
+ *
+ * 缺前值（第一根 bar / 指标暖机 / 未注入 `previous`）⇒ 抛错 ⇒ 整式 `ok:false` ⇒ UNCOVERED。
+ * 这条正是 plan §3.2 承诺的"边沿表达"，也是 §12.2 I 的修复。
+ */
+function evaluateCross(
+  name: 'crossAbove' | 'crossBelow',
+  args: readonly Expr[],
+  ctx: DslContext,
+): boolean {
+  const [leftNode, rightNode] = args
+  if (args.length !== 2 || leftNode === undefined || rightNode === undefined) {
+    throw new DslError(`${name} 需要恰好 2 个参数`, -1)
+  }
+  const previous = ctx.previous
+  if (previous === undefined) {
+    throw new DslError(`${name} 需要前一根 bar 的取值，但当前上下文未提供 previous`, -1)
+  }
+  const previousContext: DslContext = {
+    get: (path) => previous(path),
+    call: (fnName, fnArgs) => ctx.call(fnName, fnArgs),
+  }
+  const curLeft = evaluateNode(leftNode, ctx)
+  const curRight = evaluateNode(rightNode, ctx)
+  const prevLeft = evaluateNode(leftNode, previousContext)
+  const prevRight = evaluateNode(rightNode, previousContext)
+  if (
+    typeof curLeft !== 'number' ||
+    typeof curRight !== 'number' ||
+    typeof prevLeft !== 'number' ||
+    typeof prevRight !== 'number'
+  ) {
+    throw new DslError(`${name} 需要数值操作数`, -1)
+  }
+  return name === 'crossAbove'
+    ? prevLeft <= prevRight && curLeft > curRight
+    : prevLeft >= prevRight && curLeft < curRight
 }
 
 function evaluateBinary(

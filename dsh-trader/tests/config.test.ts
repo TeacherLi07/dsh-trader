@@ -5,6 +5,7 @@ import {
   checkLimitsConsistency,
   describeStartup,
   resolveStartupParams,
+  startupLimitsError,
 } from '../src/config.js'
 
 const complete = {
@@ -103,5 +104,20 @@ describe('startup params', () => {
     expect(params.limits).toBeNull()
     expect(params.waiver).toBe(true)
     expect(describeStartup(params).join('\n')).toContain('风控参数已放弃')
+  })
+
+  it('启动自洽校验：paper 立即校验，live 交给首次账户读取（plan §12 #17）', () => {
+    // paper：权益已知 ⇒ 不自洽就报错（riskPct 0.2% + 权益 1万 ⇒ 名义下界 4000 > 单笔上限 500）
+    expect(
+      startupLimitsError({ mode: 'paper', equityQuoteUsd: 10_000, riskPct: 0.002, perOrderCapUsd: 500 }),
+    ).toEqual(expect.any(String))
+    // paper：自洽 ⇒ null（把单笔上限抬到名义下界之上）
+    expect(
+      startupLimitsError({ mode: 'paper', equityQuoteUsd: 10_000, riskPct: 0.002, perOrderCapUsd: 5_000 }),
+    ).toBeNull()
+    // live：启动时权益未知 ⇒ 返回 null（由 live-engine 首次读到账户后校验并落审计）
+    expect(
+      startupLimitsError({ mode: 'live_auto', equityQuoteUsd: 10_000, riskPct: 0.01, perOrderCapUsd: 500 }),
+    ).toBeNull()
   })
 })

@@ -13,7 +13,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
-import type { RiskLimits } from '../config.js'
+import { StartupParamsError, startupLimitsError, type RiskLimits } from '../config.js'
 import { getDatabase } from '../db/runtime.js'
 import { applyProxyAwareFetch } from '../market/ccxt-source.js'
 import { CcxtBroker, type CcxtProExchangeLike } from '../exec/ccxt-broker.js'
@@ -234,6 +234,23 @@ export function apply(ctx: Context, config: ExecConfig): void {
     `凭据状态：keyInjected=${String(status.keyInjected)} secretInjected=${String(status.secretInjected)} ` +
       `liveCapable=${String(status.liveCapable)} route=${status.route}（mode=${config.mode}）`,
   )
+
+  // plan §12 #17：风控参数自洽校验。paper 模式权益已知 ⇒ **启动即校验，不自洽就拒绝启动**；
+  // live 模式的权益要等首次 getAccount()，由 live-engine 做一次性校验并落审计。
+  // 不自洽会让每一单都在 perOrderCapUsd 处被打回 —— 系统"看起来在跑"却永远不成交。
+  const startupLimits = limitsFromConfig(config)
+  if (startupLimits !== null && config.riskPct !== undefined) {
+    const inconsistent = startupLimitsError({
+      mode: config.mode,
+      equityQuoteUsd: config.paperInitialEquityQuote ?? 10_000,
+      riskPct: config.riskPct,
+      perOrderCapUsd: startupLimits.perOrderCapUsd,
+    })
+    if (inconsistent !== null) {
+      logger.error(`风控自洽校验失败：${inconsistent}`)
+      throw new StartupParamsError([inconsistent])
+    }
+  }
 
   let disposed = false
   let runtime: ExecRuntime | undefined

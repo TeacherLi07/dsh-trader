@@ -21,14 +21,16 @@ export const evaluateWhen = evaluateExpression
 export { compileExpression, parseExpression, referencedPaths }
 export type { DslContext, EvalResult, Expr, Primitive }
 
-/** 由扁平取值表构造上下文；`functions` 默认只含纯数学函数。 */
+/** 由扁平取值表构造上下文；`functions` 默认只含纯数学函数，`previous` 供 `cross*` 使用。 */
 export function createDslContext(
   values: Readonly<Record<string, Primitive>>,
   functions: (name: string, args: readonly Primitive[]) => Primitive | undefined = defaultFunctions,
+  previous?: Readonly<Record<string, Primitive>>,
 ): DslContext {
   return {
     get: (path) => values[path],
     call: (name, args) => functions(name, args),
+    ...(previous === undefined ? {} : { previous: (path: string) => previous[path] }),
   }
 }
 

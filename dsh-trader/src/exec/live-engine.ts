@@ -8,12 +8,13 @@
 import { horizonMsForTimeframe } from '../memory/settle.js'
 import { createFeatureContext } from '../market/context.js'
 import type { FeatureSnapshot } from '../market/features.js'
+import { timeframeMs } from '../market/normalize.js'
 import type { Candle } from '../market/types.js'
 import { matchPlan, planDedupKey, type MatchOutcome } from '../plan/match.js'
 import type { PlanCard } from '../plan/schema.js'
 import type { TriggerQueue } from '../trigger/queue.js'
 import type { Clock } from '../clock.js'
-import type { RiskLimits, RunMode } from '../config.js'
+import { checkLimitsConsistency, type RiskLimits, type RunMode } from '../config.js'
 import type { Broker } from './broker.js'
 import {
   executeAction,
@@ -89,6 +90,8 @@ function actionClientOrderIds(plan: PlanCard, conditionId: string, barTs: number
 export class LiveEngine {
   #snapshots = new Map<string, FeatureSnapshot>()
   #fired = new Set<string>()
+  /** plan §12 #17 的一次性自洽校验：live 模式只有首次读到账户后才知道权益。 */
+  #limitsChecked = false
 
   constructor(private readonly deps: LiveEngineDeps) {}
 
@@ -120,8 +123,42 @@ export class LiveEngine {
 
     // 只有 active 且未过期的计划需要账户/持仓；这里每次 onClosedBar 都从 broker 重取。
     const account = await this.deps.broker.getAccount()
+    // plan §12 #17：live 模式的权益此刻才知道 ⇒ 首次读到账户时做一次性自洽校验并落审计。
+    // 不自洽 = 每一单都会被 perOrderCapUsd 打回（"看起来在跑"却永远不成交），必须留下证据。
+    if (!this.#limitsChecked) {
+      this.#limitsChecked = true
+      const limits = this.deps.limits
+      if (limits !== null) {
+        const inconsistent = checkLimitsConsistency({
+          equityQuoteUsd: account.equityQuote,
+          riskPct: this.deps.riskPct,
+          perOrderCapUsd: limits.perOrderCapUsd,
+        })
+        if (inconsistent !== null) {
+          this.deps.journal.appendAudit({
+            actor: 'system',
+            kind: 'limits_inconsistent',
+            payload: {
+              symbol: input.symbol,
+              reason: inconsistent,
+              equityQuoteUsd: account.equityQuote,
+              riskPct: this.deps.riskPct,
+              perOrderCapUsd: limits.perOrderCapUsd,
+            },
+            ts: now,
+          })
+        }
+      }
+    }
     const positions = await this.deps.broker.getPositions()
     const position = positions.find((candidate) => candidate.symbol === input.symbol)
+    // 前一根已收盘 bar 的快照：`cross*` 要用它做边沿判定。取不到就不注入 `previous`，
+    // 让 cross 求值 fail-closed 成 UNCOVERED，而不是静默当成"没有穿越"。
+    const previousSnapshot = this.deps.features.get?.(
+      input.symbol,
+      input.timeframe,
+      input.barTs - timeframeMs(input.timeframe),
+    )
     const context = createFeatureContext(snapshot, {
       extra: {
         'position.qty': position?.qty ?? 0,
@@ -133,6 +170,7 @@ export class LiveEngine {
         'plan.ageMs': bar.closeTime - plan.createdAt,
         'window.sinceMs': bar.closeTime - plan.createdAt,
       },
+      ...(previousSnapshot === undefined ? {} : { previous: previousSnapshot }),
     })
 
     const outcome = matchPlan({

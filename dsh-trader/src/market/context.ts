@@ -44,6 +44,12 @@ export interface FeatureContextOptions {
   readonly extra?: Readonly<Record<string, Primitive>>
   /** `tf` 相关的取值（如窗口计时）在求值前已经是具体数字，由调用方补齐。 */
   readonly functions?: (name: string, args: readonly Primitive[]) => Primitive | undefined
+  /**
+   * **前一根已收盘 bar** 的快照；只有 `crossAbove`/`crossBelow` 需要。
+   * 缺省（第一根 bar、前一根未归档）⇒ cross 求值失败 ⇒ UNCOVERED（fail-closed）。
+   * 注意：`extra`（仓位/权益）没有历史，前值沿用当前值 —— 所以 cross 只应比较行情/指标路径。
+   */
+  readonly previous?: FeatureSnapshot
 }
 
 export function createFeatureContext(
@@ -52,8 +58,11 @@ export function createFeatureContext(
 ): DslContext {
   const table = featureValues(snapshot.values, options.extra)
   const functions = options.functions ?? defaultFunctions
+  const previousTable =
+    options.previous === undefined ? undefined : featureValues(options.previous.values, options.extra)
   return {
     get: (path) => table[path],
     call: (name, args) => functions(name, args),
+    ...(previousTable === undefined ? {} : { previous: (path: string) => previousTable[path] }),
   }
 }

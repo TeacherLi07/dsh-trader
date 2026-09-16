@@ -6,8 +6,11 @@ import { makeCard } from './helpers/plan.js'
 const NOW = 50_000
 const BAR_TS = 1_700_000_000_000
 
-function context(values: Record<string, number | boolean> = {}) {
-  return createDslContext(values)
+function context(
+  values: Record<string, number | boolean> = {},
+  previous?: Record<string, number | boolean>,
+) {
+  return createDslContext(values, undefined, previous)
 }
 
 describe('matchPlan', () => {
@@ -110,7 +113,7 @@ describe('matchPlan', () => {
     expect(fireOn(BAR_TS + 900_000)).toMatchObject({ kind: 'commitment', id: 'c-1' })
   })
 
-  it('cross* 尚未实现：写它会让求值失败 ⇒ 永久 UNCOVERED，不会静默当成未命中（plan §12.2 I）', () => {
+  it('cross* 是边沿语义：只在穿越那一根触发；缺前值则 fail-closed（plan §12.2 I）', () => {
     const plan = makeCard({
       invalidation: [],
       commitments: [
@@ -123,15 +126,29 @@ describe('matchPlan', () => {
         },
       ],
     })
-    const outcome = matchPlan({
-      plan,
-      timeframe: '15m',
-      barTs: BAR_TS,
-      now: NOW,
-      context: context({ 'bar.close': 95 }),
-    })
-    // fail-closed：不是 none、不是 commitment，而是显式的 uncovered
-    expect(outcome.kind).toBe('uncovered')
+    const fire = (close: number, prevClose: number) =>
+      matchPlan({
+        plan,
+        timeframe: '15m',
+        barTs: BAR_TS,
+        now: NOW,
+        context: context({ 'bar.close': close }, { 'bar.close': prevClose }),
+      })
+
+    // 105 → 95：向下穿越 ⇒ 命中一次
+    expect(fire(95, 105)).toMatchObject({ kind: 'commitment', id: 'c-cross' })
+    // 96 → 95：仍在下方，不是边沿 ⇒ 不命中（这正是 edge 与电平的区别）
+    expect(fire(95, 96)).toEqual({ kind: 'none' })
+    // 没有 previous（回放第一根 / 指标暖机）⇒ UNCOVERED，绝不静默当"没穿越"
+    expect(
+      matchPlan({
+        plan,
+        timeframe: '15m',
+        barTs: BAR_TS,
+        now: NOW,
+        context: context({ 'bar.close': 95 }),
+      }).kind,
+    ).toBe('uncovered')
   })
 
   it('fails closed: an unevaluable condition becomes uncovered, never silently "no match"', () => {

@@ -17,7 +17,7 @@ import { ReplayClock, type Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
 import { BarArchive } from '../market/archive.js'
 import { createFeatureContext } from '../market/context.js'
-import { FeatureEngine } from '../market/features.js'
+import { FeatureEngine, type FeatureSnapshot } from '../market/features.js'
 import { matchPlan, planDedupKey } from '../plan/match.js'
 import { horizonMsForTimeframe } from '../memory/settle.js'
 import type { PlanAction } from '../plan/schema.js'
@@ -154,6 +154,9 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
     lastRealized = now
   }
 
+  // `cross*` 需要前一根 bar 的取值；回放按序推进，直接留住上一根的增量快照即可。
+  let previousSnapshot: FeatureSnapshot | undefined
+
   for (const bar of bars) {
     // 1) 时钟推进到本 bar 收盘；保护单先按 bar 的 high/low 触发（毫秒级不依赖 LLM）
     advanceClock(deps.clock, bar.closeTime)
@@ -203,6 +206,7 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
           ? {}
           : { 'plan.ageMs': bar.closeTime - plan.createdAt, 'window.sinceMs': bar.closeTime - plan.createdAt }),
       },
+      ...(previousSnapshot === undefined ? {} : { previous: previousSnapshot }),
     })
 
     let matchedThisBar = false
@@ -327,6 +331,8 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
     // 每根 bar 结束都采样一次：保护单可能在 onBar 阶段就平掉了仓位（与计划卡是否命中无关）。
     // 旧实现只在计划卡命中后采样，漏掉了"止损在非命中 bar 触发"的盈亏（实测 realizedPnl=0）。
     samplePnl()
+    // 本根成为下一根 bar 的"前值"（cross* 用）
+    previousSnapshot = snapshot
   }
 
   return {

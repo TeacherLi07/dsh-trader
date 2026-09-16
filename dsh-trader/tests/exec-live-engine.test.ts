@@ -254,6 +254,72 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     h.db.close()
   })
 
+  it('crossBelow 端到端：用前一根 bar 判定边沿，只在穿越那一根执行（plan §12.2 I）', async () => {
+    const h = harness(
+      {
+        windowEndsAt: START + 6 * HOUR,
+        commitments: [
+          {
+            id: 'c-cross',
+            seq: 1,
+            tf: TF,
+            when: 'crossBelow(bar.close, 95)',
+            then: {
+              action: 'open',
+              side: 'long',
+              method: 'market',
+              stop: { method: 'structure', level: 80 },
+              riskPct: 0.01,
+            },
+          },
+        ],
+      },
+      START + 3 * HOUR,
+    )
+    // 两根 bar：START close=100（未穿越 95），START+HOUR close=90（向下穿越）
+    const featureEngine = new FeatureEngine()
+    const snapshots = new Map<string, ReturnType<FeatureEngine['onClosedCandle']>>()
+    const candles = normalizeCandles([raw(START, 100), raw(START + HOUR, 90)], SYMBOL, TF, START + 3 * HOUR).candles
+    new BarArchive(h.db).upsertClosed(candles, { source: 'synthetic', fetchedAt: START })
+    for (const candle of candles) {
+      snapshots.set(
+        `${candle.symbol}|${candle.timeframe}|${candle.openTime}`,
+        featureEngine.onClosedCandle(candle),
+      )
+    }
+    const live = createLiveEngine({
+      ...h.deps,
+      // 前一根快照由 feature 层提供（生产里是 FeatureArchive.get）
+      features: { get: (symbol, timeframe, openTime) => snapshots.get(`${symbol}|${timeframe}|${openTime}`) },
+    })
+
+    // 第一根：没有前一根 ⇒ cross fail-closed 成 UNCOVERED，不下单
+    const first = await live.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    expect(first.kind).toBe('uncovered')
+    expect(h.broker.orderCalls).toBe(0)
+
+    // 第二根：100 → 90 向下穿越 95 ⇒ 命中并执行一次
+    const second = await live.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START + HOUR })
+    expect(second.kind).toBe('executed')
+    expect(h.broker.orderCalls).toBe(1)
+    h.db.close()
+  })
+
+  it('首次读到账户后校验风控自洽性，不自洽落 limits_inconsistent 且只落一次（plan §12 #17）', async () => {
+    const h = harness()
+    const live = createLiveEngine(h.deps)
+    // 本 harness 的 LIMITS（单笔上限 5000）相对权益 1 万 × riskPct 1% 是不自洽的：
+    // maxNotionalAtMinStop = 10000 × 0.01 ÷ 0.005 = 20000 > 5000。
+    await live.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    await live.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    const rows = h.db
+      .prepare("SELECT payload_json FROM audit_events WHERE kind = 'limits_inconsistent'")
+      .all() as { payload_json: string }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.payload_json).toContain('maxNotionalAtMinStop')
+    h.db.close()
+  })
+
   it('缺少 funding.rate 时 fail-closed 记 UNCOVERED，不下单', async () => {
     const h = harness({
       commitments: [

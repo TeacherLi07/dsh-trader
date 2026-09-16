@@ -60,9 +60,36 @@ describe('when DSL v0', () => {
     expect(unknownPaths(['bar.close < foo.bar'], V0_ALLOWED_PATHS)).toEqual(['foo.bar'])
   })
 
-  it('leaves crossAbove/crossBelow to the feature layer (they need the previous bar)', () => {
+  it('leaves crossAbove/crossBelow out of the pure-math table (they need the previous bar)', () => {
     expect(defaultFunctions('crossAbove', [1, 2])).toBeUndefined()
     expect(defaultFunctions('crossBelow', [1, 2])).toBeUndefined()
+  })
+
+  it('crossAbove/crossBelow 用前一根 bar 判定穿越；缺前值即 fail-closed（plan §12.2 I）', () => {
+    // 105 → 95，向下穿越 100 ⇒ true
+    expect(
+      evaluateWhen('crossBelow(bar.close, 100)', createDslContext({ 'bar.close': 95 }, undefined, { 'bar.close': 105 })),
+    ).toEqual({ ok: true, value: true })
+    // 96 → 95：仍在下方便不是边沿 ⇒ false（真的是"没穿越"，不是"缺数据"）
+    expect(
+      evaluateWhen('crossBelow(bar.close, 100)', createDslContext({ 'bar.close': 95 }, undefined, { 'bar.close': 96 })),
+    ).toEqual({ ok: true, value: false })
+    // 95 → 95：相等不算穿越
+    expect(
+      evaluateWhen('crossBelow(bar.close, 100)', createDslContext({ 'bar.close': 95 }, undefined, { 'bar.close': 95 })),
+    ).toEqual({ ok: true, value: false })
+    // crossAbove 对称
+    expect(
+      evaluateWhen('crossAbove(bar.close, 100)', createDslContext({ 'bar.close': 105 }, undefined, { 'bar.close': 95 })),
+    ).toEqual({ ok: true, value: true })
+    // 缺 previous ⇒ ok:false（UNCOVERED），绝不静默当成"没穿越"
+    expect(evaluateWhen('crossBelow(bar.close, 100)', createDslContext({ 'bar.close': 95 }))).toMatchObject({
+      ok: false,
+    })
+    // 参数个数不对也要 fail-closed
+    expect(
+      evaluateWhen('crossBelow(bar.close)', createDslContext({ 'bar.close': 95 }, undefined, { 'bar.close': 105 })),
+    ).toMatchObject({ ok: false })
   })
 })
 
