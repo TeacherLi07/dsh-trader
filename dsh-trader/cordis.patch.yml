@@ -19,8 +19,10 @@
       config:
         venue: htx
         crossCheckVenue: okx
-        symbols: [BTC/USDT:USDT, ETH/USDT:USDT]
-        timeframes: [1m, 15m, 1h, 4h, 1d]
+        # 高流动性 + 小额合约（实测 1 张名义：ADA≈1.95 USDT、DOGE≈8.0 USDT），
+        # 24.9 USDT 在 1× 下可下单；BTC≈76.4/ETH≈24.2 开不了最小张。
+        symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
+        timeframes: [1h]
         enabled: true          # 起轮询；--dump-config 不会启动轮询
         pollMs: 60000
         recentLimit: 3
@@ -56,7 +58,7 @@
         maxConsecutiveLosses: 3
         maxSpreadBps: 10
         maxOpenOrders: 2
-        symbols: [BTC/USDT:USDT, ETH/USDT:USDT]
+        symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
         timeframes: [1h]
         benchmark: BTC/USDT:USDT
         venue: htx
@@ -75,7 +77,7 @@
         # 打开后只读账户/持仓/挂单并与本地库对账，**只报告不执行**；mode 保持 paper 时硬闸结构性拒绝下单。
         preflightEnabled: false
         preflightVenue: htx
-        preflightSymbol: BTC/USDT:USDT
+        preflightSymbol: ADA/USDT:USDT
         sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
         accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑永续必须读 swap 账户
 
