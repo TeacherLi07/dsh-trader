@@ -5,6 +5,7 @@ import { migrate } from '../src/db/schema.js'
 import {
   CcxtBroker,
   type CcxtBalanceLike,
+  type CcxtMarketLike,
   type CcxtOrderLike,
   type CcxtPositionLike,
   type CcxtProExchangeLike,
@@ -41,6 +42,8 @@ class FakeExchange implements CcxtProExchangeLike {
   }[] = []
   cancelCalls: string[] = []
   balanceParams: (Readonly<Record<string, unknown>> | undefined)[] = []
+  /** 默认空 = 现货语义（contractSize 视为 1）；永续测试自行注入 contractSize/precision。 */
+  markets: Readonly<Record<string, CcxtMarketLike>> = {}
   balance: CcxtBalanceLike = { total: { USDT: '10000' } }
   positions: readonly CcxtPositionLike[] = []
   openOrders: CcxtOrderLike[] = []
@@ -58,6 +61,11 @@ class FakeExchange implements CcxtProExchangeLike {
   async fetchBalance(params?: Readonly<Record<string, unknown>>): Promise<CcxtBalanceLike> {
     this.balanceParams.push(params)
     return this.balance
+  }
+
+  amountToPrecision(symbol: string, amount: number): string {
+    const step = this.markets[symbol]?.precision?.amount ?? 1
+    return String(Math.floor(amount / step) * step)
   }
 
   async fetchPositions(): Promise<readonly CcxtPositionLike[]> {
@@ -368,6 +376,42 @@ describe('CcxtBroker', () => {
     await makeBroker(spot).readOnlyBalance()
     // 未配置 = 沿用 ccxt 默认（现货），显式传空参数而不是猜一个类型
     expect(spot.balanceParams.at(-1)).toEqual({})
+  })
+
+  it('★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位）', async () => {
+    const exchange = new FakeExchange()
+    // HTX BTC 永续：1 张 = 0.001 BTC，amount 精度 1 张
+    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, precision: { amount: 1 } } }
+    const broker = makeBroker(exchange)
+
+    // 下单：0.05 BTC ⇒ 50 张（而不是把 0.05 当张数）
+    await broker.placeOrder(orderRequest({ qty: 0.05, notionalUsd: 4000 }))
+    expect(exchange.createCalls.at(-1)?.amount).toBe(50)
+
+    // 持仓：ccxt contracts=50 ⇒ 0.05 BTC
+    exchange.positions = [
+      { symbol: SYMBOL, contracts: 50, side: 'long', entryPrice: 60_000, markPrice: 60_000 },
+    ]
+    const positions = await broker.getPositions()
+    expect(positions.length).toBe(1)
+    expect(positions[0]?.qty).toBeCloseTo(0.05, 10)
+  })
+
+  it('不足一张最小合约时拒绝下单（绝不四舍五入放大仓位）', async () => {
+    const exchange = new FakeExchange()
+    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, precision: { amount: 1 } } }
+    const broker = makeBroker(exchange)
+    // 0.0004 BTC < 1 张（0.001 BTC）
+    await expect(broker.placeOrder(orderRequest({ qty: 0.0004, notionalUsd: 30 }))).rejects.toThrow(
+      /不足一张最小合约/,
+    )
+  })
+
+  it('inverse 合约拒绝换算（口径不同，宁可拒绝也不下错）', async () => {
+    const exchange = new FakeExchange()
+    exchange.markets = { [SYMBOL]: { contractSize: 100, inverse: true, precision: { amount: 1 } } }
+    const broker = makeBroker(exchange)
+    await expect(broker.placeOrder(orderRequest({ qty: 0.5, notionalUsd: 100 }))).rejects.toThrow(/inverse/)
   })
 })
 

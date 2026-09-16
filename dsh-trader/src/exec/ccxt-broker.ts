@@ -108,9 +108,23 @@ export interface CcxtTickerLike {
  * 只声明本适配器实际使用的 CCXT Pro 能力，避免把第三方整包类型带入核心执行层。
  * `has[x] === false` 时查询能力明确不可用；未声明时仍尝试调用，以兼容精简 fake。
  */
+/** ccxt `markets` 里我们需要的字段；永续的 `amount` 是**张数**，换算必须用 `contractSize`。 */
+export interface CcxtMarketLike {
+  readonly contractSize?: number
+  readonly linear?: boolean
+  readonly inverse?: boolean
+  readonly swap?: boolean
+  readonly precision?: { readonly amount?: number }
+  readonly limits?: { readonly amount?: { readonly min?: number } }
+}
+
 export interface CcxtProExchangeLike {
   readonly id: string
   readonly has: Readonly<Record<string, unknown>>
+  /** `loadMarkets()` 之后由 ccxt 填充；用于 contractSize / precision，缺了就必须 fail-closed。 */
+  readonly markets?: Readonly<Record<string, CcxtMarketLike>>
+  /** ccxt 的精度助手（把张数对齐到交易所步长）；不存在时退回 precision.amount 向下取整。 */
+  amountToPrecision?(symbol: string, amount: number): string
   /** ccxt 允许覆盖 fetch 实现；`applyProxyAwareFetch` 需要它（plan §12 #14）。 */
   fetchImplementation?: unknown
   /**
@@ -565,12 +579,13 @@ export class CcxtBroker implements Broker {
     addParam(params, 'trailingTriggerPrice', request.trailingTriggerPrice)
 
     const side: OrderSide = position.snapshot.qty > 0 ? 'sell' : 'buy'
+    const protectiveAmount = this.#toContracts(request.symbol, Math.abs(position.snapshot.qty))
     const created = await this.#call(() =>
       this.#exchange.createOrder(
         request.symbol,
         this.#protectiveOrderType,
         side,
-        Math.abs(position.snapshot.qty),
+        protectiveAmount,
         undefined,
         params,
       ),
@@ -657,8 +672,9 @@ export class CcxtBroker implements Broker {
     addParam(params, 'takeProfitPrice', request.takeProfitPrice)
     addParam(params, 'trailingPercent', request.trailingPercent)
 
+    const amount = this.#toContracts(request.symbol, request.qty)
     const created = await this.#call(() =>
-      this.#exchange.createOrder(request.symbol, request.type, request.side, request.qty, request.price, params),
+      this.#exchange.createOrder(request.symbol, request.type, request.side, amount, request.price, params),
     )
     return this.#requirePlacedAck(
       created,
@@ -684,6 +700,53 @@ export class CcxtBroker implements Broker {
    */
   #balanceParams(): CcxtParams {
     return this.#accountType === undefined ? {} : { type: this.#accountType }
+  }
+
+  #market(symbol: string): CcxtMarketLike | undefined {
+    return this.#exchange.markets?.[symbol]
+  }
+
+  /** 永续：一张 = `contractSize` 个基础币；现货为 1。缺元数据时按 1（fail-closed 由 assertLinear/精度兜底）。 */
+  #contractSize(symbol: string): number {
+    const size = this.#market(symbol)?.contractSize
+    return typeof size === 'number' && Number.isFinite(size) && size > 0 ? size : 1
+  }
+
+  /**
+   * 只支持**线性**（USDT 本位）永续。inverse 的 contractSize 以计价币计，`张数×contractSize`
+   * 不是币数，换算会错一个价格因子 —— 宁可拒绝，也不静默把仓位下错。
+   */
+  #assertLinear(symbol: string): void {
+    const market = this.#market(symbol)
+    if (market?.inverse === true) {
+      throw this.#safeError(new Error(`${symbol} 是 inverse 合约：本 broker 只支持 linear，拒绝按错误口径换算`))
+    }
+  }
+
+  /**
+   * 基础币数量 → ccxt 的 `amount`（永续是**张数**）。这是实盘最容易错、也最致命的一步：
+   * 差一个 contractSize 就是几十倍的仓位。优先用 ccxt 的 `amountToPrecision` 对齐交易所步长，
+   * 缺失时按 `precision.amount` 向下取整；结果 ≤ 0 说明不足一张最小单，必须拒绝。
+   */
+  #toContracts(symbol: string, baseQty: number): number {
+    this.#assertLinear(symbol)
+    const raw = baseQty / this.#contractSize(symbol)
+    const toPrecision = this.#exchange.amountToPrecision?.bind(this.#exchange)
+    let amount = Number.NaN
+    if (toPrecision !== undefined) {
+      amount = Number(toPrecision(symbol, raw))
+    } else {
+      const step = this.#market(symbol)?.precision?.amount
+      amount = typeof step === 'number' && step > 0 ? Math.floor(raw / step) * step : Math.floor(raw)
+    }
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw this.#safeError(
+        new Error(
+          `${symbol} 的下单量不足一张最小合约（base=${baseQty}，contractSize=${this.#contractSize(symbol)}）`,
+        ),
+      )
+    }
+    return amount
   }
 
   #riskState(): RiskState {
@@ -745,8 +808,12 @@ export class CcxtBroker implements Broker {
   #readPosition(value: CcxtPositionLike): PositionReading | undefined {
     const raw = value as Readonly<Record<string, unknown>>
     const symbol = asString(raw['symbol'])
-    const qty = positionQty(raw)
-    if (symbol === undefined || qty === undefined) return undefined
+    const contracts = positionQty(raw)
+    if (symbol === undefined || contracts === undefined) return undefined
+    // ★ 仓位数量统一换算成**基础币**：ccxt 永续的 `contracts` 是张数，乘 contractSize 才是币数。
+    // 不换算会让敞口/持仓数量差一个 contractSize（BTC 差 1000×、ADA 差 10×），硬闸算术随之全错。
+    this.#assertLinear(symbol)
+    const qty = contracts * this.#contractSize(symbol)
 
     const avgPrice = firstNumber(raw, ['entryPrice', 'average', 'avgPrice', 'price']) ?? 0
     const markPrice = asNumber(raw['markPrice'])
