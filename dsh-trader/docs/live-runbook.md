@@ -26,6 +26,23 @@ chmod 600 ~/.dsh/trading.env
 HTX key 只开交易权限、禁用提现并绑定 IP；`TRADER_ACCOUNT_TYPE=swap` 不要删除，除非
 已经明确要读另一种账户。环境文件、命令行和日志中都不要出现 key/secret。
 
+### 运行模式在**启动时**决定（不在仓库里写死）
+
+`cordis.patch.yml` 里 `trade-exec.mode` 读的是启动环境变量 `TRADER_MODE`，**未设即 `paper`**：
+
+```bash
+# 纸面（默认；不触网下单）
+cd /workspace/dsh-trader && pnpm build
+TRADER_MODE=paper dsh --profile trade
+
+# 无人值守实盘（会下真单；需已按 plan §12.2 A/E 完成授权）
+TRADER_MODE=live_auto dsh --profile trade
+```
+
+生产走 systemd 时写在 `~/.dsh/trading.env`（`EnvironmentFile`）里的 `TRADER_MODE`，改完
+`systemctl restart dsh-trader` 生效。非法模式值会被插件 Config 的 union 校验**拒绝启动**
+（不会静默退回 paper，避免"以为在实盘、其实在纸面"）。
+
 先执行 §12.2 A 的只读步骤，确认私有端点、永续账户和本地状态都能读到；该命令不下单、
 不撤单：
 
