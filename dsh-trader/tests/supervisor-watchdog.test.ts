@@ -174,7 +174,7 @@ const protectedPositions: readonly LocalPositionSnapshot[] = [
 ]
 
 function reconciler(
-  remoteOrders: readonly { clientOrderId: string; symbol?: string }[],
+  remoteOrders: readonly { clientOrderId: string; exchangeOrderId?: string; symbol?: string }[],
   remotePositions: readonly { symbol: string; qty: number }[],
   localOrders: readonly LocalOrderSnapshot[] = cleanOrders,
   localPositions: readonly LocalPositionSnapshot[] = protectedPositions,
@@ -189,6 +189,7 @@ function reconciler(
             ({
               intentId: order.clientOrderId,
               clientOrderId: order.clientOrderId,
+              ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
               state: 'acked',
               ts: START,
               ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
@@ -216,7 +217,8 @@ describe('Reconciler', () => {
     const runner = reconciler(
       [
         { clientOrderId: 'local-1', symbol: 'BTC/USDT' },
-        { clientOrderId: 'orphan-1', symbol: 'BTC/USDT' },
+        // 孤儿单必须带 exchangeOrderId：撤单端点的契约参数是它，不能用 clientOrderId 顶替。
+        { clientOrderId: 'orphan-1', exchangeOrderId: 'ex-orphan-1', symbol: 'BTC/USDT' },
       ],
       [{ symbol: 'BTC/USDT', qty: 1 }],
       cleanOrders,
@@ -230,7 +232,7 @@ describe('Reconciler', () => {
     const output = await runner.runOnce()
     expect(output.result.actions.length).toBeGreaterThan(0)
     expect(output.applied.length).toBeGreaterThan(0)
-    expect(cancelled).toEqual(['orphan-1'])
+    expect(cancelled).toEqual(['ex-orphan-1'])
     expect(events.length).toBeGreaterThan(0)
     expect(events[0]?.action.kind).toBe('cancel_orphan')
     expect(output.freezeTrading).toBe(false)

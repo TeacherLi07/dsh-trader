@@ -22,6 +22,13 @@ export interface LocalOrderSnapshot {
 export interface RemoteOrderSnapshot {
   readonly clientOrderId: string
   /**
+   * 撤单端点的契约参数（`Broker.cancelOrder(exchangeOrderId)`）。
+   * **不能**用 `clientOrderId` 顶替：交易所不一定回显我们传入的 client id（HTX 实测就是
+   * 交易所生成 client_order_id=订单号，AGENTS.md 坑表），拿它去撤单可能指向不存在的单，
+   * 使孤儿挂单继续存在。因此这里独立保留，缺失时由调用方 fail-closed。
+   */
+  readonly exchangeOrderId?: string
+  /**
    * 远端单的标的。`Broker.getOpenOrders()` 返回的 `OrderAck` 目前不带 symbol
    * （ccxt 的挂单条目里有，但没有进入统一 ack），而 `reconcile()` 只按 `clientOrderId`
    * 比对、并不使用 symbol，所以这里设为可选 —— 宁可不填，也不编一个假 symbol。
@@ -48,7 +55,13 @@ export interface ReconciliationInput {
 }
 
 export type ReconciliationAction =
-  | { readonly kind: 'cancel_orphan'; readonly clientOrderId: string; readonly reason: string }
+  | {
+      readonly kind: 'cancel_orphan'
+      readonly clientOrderId: string
+      /** 撤单必须用它；缺失 ⇒ 调用方不得撤单（fail-closed）。 */
+      readonly exchangeOrderId?: string
+      readonly reason: string
+    }
   | { readonly kind: 'alert_missing_order'; readonly clientOrderId: string; readonly reason: string }
   | { readonly kind: 'alert_unknown_position'; readonly symbol: string; readonly qty: number }
   | { readonly kind: 'alert_unprotected_position'; readonly symbol: string }
@@ -101,6 +114,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
       actions.push({
         kind: 'cancel_orphan',
         clientOrderId: order.clientOrderId,
+        ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
         reason: local === undefined ? '本地无记录' : `本地状态为 ${local.state}`,
       })
     }
@@ -166,8 +180,8 @@ export type ReconciliationEvent = ReconciliationAction & {
 export interface ReconcilerDeps {
   readonly broker: {
     readonly getOpenOrders: () =>
-      | readonly (Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string })[]
-      | Promise<readonly (Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string })[]>
+      | readonly (Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId'> & { readonly symbol?: string })[]
+      | Promise<readonly (Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId'> & { readonly symbol?: string })[]>
     readonly getPositions: () =>
       | readonly Pick<PositionSnapshot, 'symbol' | 'qty'>[]
       | Promise<readonly Pick<PositionSnapshot, 'symbol' | 'qty'>[]>
@@ -261,9 +275,20 @@ export class Reconciler {
     for (const action of result.actions) {
       const at = this.deps.clock.now()
       if (action.kind === 'cancel_orphan') {
+        // 撤单端点的契约参数是 exchangeOrderId（broker.ts:101）。**绝不**回退用 clientOrderId：
+        // 交易所不保证回显它（HTX 实测不回显），用错 id 会撤不掉真实孤儿单（有成交风险），
+        // 甚至可能误撤同账户的另一张单。缺 id 时按 §4.2 fail-closed：冻结 + P0 告警。
+        if (action.exchangeOrderId === undefined) {
+          freezeTrading = true
+          emitEvent(this.deps, {
+            ...eventFor(action, at),
+            level: 'P0',
+            message: '无法安全撤销孤儿订单（缺少 exchangeOrderId），冻结自动交易：' + action.clientOrderId,
+          } as ReconciliationEvent)
+          continue
+        }
         try {
-          // 当前快照没有单独的 exchangeOrderId 字段，只能沿用其稳定 clientOrderId。
-          await this.deps.broker.cancelOrder(action.clientOrderId)
+          await this.deps.broker.cancelOrder(action.exchangeOrderId)
           applied.push(action)
           emitEvent(this.deps, eventFor(action, at))
         } catch (error) {
@@ -286,12 +311,13 @@ export class Reconciler {
   }
 }
 
-type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId'> & { readonly symbol?: string }
+type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId'> & { readonly symbol?: string }
 type BrokerPosition = Pick<PositionSnapshot, 'symbol' | 'qty'>
 
 function toRemoteOrder(order: BrokerOpenOrder): RemoteOrderSnapshot {
   return {
     clientOrderId: order.clientOrderId,
+    ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
     symbol: order.symbol ?? '',
   }
 }
