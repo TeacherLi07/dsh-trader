@@ -15,7 +15,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {
+  Agent,
+  AgentOptions,
+  AgentSetup,
+  CreateAgentOptions,
+  ResumeAgentOptions,
+} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent' // 载入 cordis Events/Context 的模块增强
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
@@ -24,11 +30,13 @@ import { dayKey, PriceTableStore, priceTableStaleAlert } from '../cost-ledger.js
 import { getDatabase } from '../db/runtime.js'
 import { Statements } from '../db/statements.js'
 import { DecisionJournal } from '../exec/journal.js'
+import { RUNTIME_IMPLEMENTED_TOOL_NAMES } from '../agents/tool-roster.js'
 import type { TradePorts } from '../exec/ports.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
 import { dueWindows, validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
 import { getExecPorts } from './exec.js'
 import { assertWiredSupervisorConfig } from '../supervisor/config-guard.js'
+import { setupRoleToolRestriction } from './tools-adapter.js'
 
 export const name = 'trade-supervisor'
 /** 需要 agents 服务才能唤醒 desk；心跳与行情不依赖它。 */
@@ -71,6 +79,48 @@ const DEFAULT_WINDOWS: readonly WindowSpec[] = [
 
 const MAX_NOTICE_SUMMARY = 120
 
+export interface DeskAgentLifecycleInput {
+  readonly sessionId: string
+  readonly agentOptions: AgentOptions
+  readonly deskCwd: string
+  /** 当前已注册且允许作为 judge 候选的工具；workflow 专用工具由调用方追加。 */
+  readonly availableToolNames: readonly string[]
+}
+
+export interface DeskAgentLifecycleOptions {
+  readonly setup: AgentSetup
+  readonly create: CreateAgentOptions
+  readonly resume: ResumeAgentOptions
+}
+
+/**
+ * 生成 desk 的两条真实生命周期 options。
+ *
+ * DSH 的 resume 同样会重新创建 scoped context；只给 create 安装限制会让崩溃恢复
+ * 后的 desk 回到全局工具面，因此 create/resume 明确共享同一份 judge setup。
+ */
+export function deskAgentLifecycleOptions(
+  input: DeskAgentLifecycleInput,
+): DeskAgentLifecycleOptions {
+  // 当前生产路径只有 supervisor → desk judge；analyst/research/risk 子 agent 尚未由
+  // supervisor 创建，因此这里只给通用 helper 留角色参数，不伪造不存在的生命周期路径。
+  const setup = setupRoleToolRestriction('judge', input.availableToolNames)
+  return {
+    setup,
+    create: {
+      sessionId: input.sessionId as never,
+      agentOptions: input.agentOptions,
+      meta: { cwd: input.deskCwd },
+      setup,
+    },
+    resume: {
+      resumeSessionId: input.sessionId as never,
+      agentOptions: input.agentOptions,
+      setup,
+    },
+  }
+}
+
 /**
  * W1 事件包 + notice 文案（plan §5.1：`summary` ≤ 120 字符硬上限）。
  *
@@ -96,10 +146,10 @@ export function buildWindowNotice(
   }
   lines.push(
     '请按你的角色判断本窗口是否有值得执行的机会：',
-    '1) 用只读工具核对行情/特征/持仓（不要相信上下文里记住的数字）；',
-    '2) 若判断可执行，调用 trade_plan_card 提交计划卡（when 必须是 §3.2 词表内可求值的布尔表达式；数量/价位由代码推导）；',
-    '3) 若判断不值得做，调用 trade_record_decision 记 no_trade 并说明理由 —— 这是合法且常见的输出；',
-    '4) 拿不准时不要硬凑方向。',
+    '1) 对每个配置标的/时间框先调用 trade_workflow_run；不得跳过协作直接提交开仓计划。',
+    '2) 阅读 workflow 返回的 evidenceIssues、openDisagreements 与 risk，再决定下一步；',
+    '3) 只有证据收敛且风险允许时才调用 trade_plan_card；否则记录 NO_TRADE 或 REVIEW；',
+    '4) 数量/价位由代码推导，拿不准时不要硬凑方向。',
   )
   return {
     summary: `W1 ${fire.id}: 交易窗口到点，请复核并决定是否更新计划卡`.slice(0, MAX_NOTICE_SUMMARY),
@@ -220,22 +270,21 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     // （实测：turn/start→step/end 6ms、零 assistant/message）。cwd 是**持久会话元数据**，
     // resume 时沿用会话里的值，因此只有在 create 时必须给对。
     const deskCwd = config.deskCwd ?? process.cwd()
+    const lifecycle = deskAgentLifecycleOptions({
+      sessionId: config.deskSessionId,
+      agentOptions,
+      deskCwd,
+      availableToolNames: RUNTIME_IMPLEMENTED_TOOL_NAMES,
+    })
     attaching = (async () => {
       // 首次 resume 失败（会话还不存在）即 create；两次都失败就本轮放弃并告警，不阻塞心跳。
       try {
-        const handle = await ctx.agents.resume({
-          resumeSessionId: config.deskSessionId as never,
-          agentOptions,
-        })
+        const handle = await ctx.agents.resume(lifecycle.resume)
         deskAgent = handle.agent
         return handle.agent
       } catch (resumeError) {
         try {
-          const handle = await ctx.agents.create({
-            sessionId: config.deskSessionId as never,
-            agentOptions,
-            meta: { cwd: deskCwd },
-          })
+          const handle = await ctx.agents.create(lifecycle.create)
           deskAgent = handle.agent
           return handle.agent
         } catch (createError) {

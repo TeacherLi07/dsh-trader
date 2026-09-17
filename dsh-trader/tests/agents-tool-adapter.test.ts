@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
 import {
   IMPLEMENTED_TOOL_NAMES,
   type ToolDefinition,
   type ToolPorts,
 } from '../src/agents/tools.js'
 import { ROLE_SPECS, SIDE_EFFECT_TOOLS } from '../src/agents/roles.js'
-import { toDshTool, toolNamesFor } from '../src/plugins/tools-adapter.js'
+import { setupRoleToolRestriction, toDshTool, toolNamesFor } from '../src/plugins/tools-adapter.js'
 import { DESK_TOOL_NAMES } from '../src/plugins/tools-desk.js'
+import { RUNTIME_IMPLEMENTED_TOOL_NAMES } from '../src/agents/tool-roster.js'
 import { RESEARCH_TOOL_NAMES } from '../src/plugins/tools-research.js'
 import { RISK_TOOL_NAMES } from '../src/plugins/tools-risk.js'
+import { deskAgentLifecycleOptions } from '../src/plugins/supervisor.js'
 import type { TradePorts } from '../src/exec/ports.js'
 
 function definition(
@@ -123,6 +128,70 @@ describe('tool rosters', () => {
     expect(overlap(risk, desk)).toEqual([])
 
     const union = [...new Set(rosters.flat())].sort()
-    expect(union).toEqual([...IMPLEMENTED_TOOL_NAMES].sort())
+    expect(union).toEqual([...RUNTIME_IMPLEMENTED_TOOL_NAMES].sort())
+  })
+})
+
+describe('runtime role restrictions (T2.8)', () => {
+  interface RestrictCapture {
+    readonly filters: ToolRestriction[]
+  }
+
+  function scopedContext(capture: RestrictCapture): Context {
+    return {
+      tools: {
+        restrict(filter: ToolRestriction): () => void {
+          capture.filters.push(filter)
+          return () => undefined
+        },
+      },
+    } as unknown as Context
+  }
+
+  const agent = { id: 'runtime-permissions-test' } as unknown as Agent
+
+  it('captures and executes the same restriction setup from create and resume options', async () => {
+    const lifecycle = deskAgentLifecycleOptions({
+      sessionId: 'desk-session',
+      agentOptions: { provider: 'test-provider', model: 'test-model' },
+      deskCwd: '/workspace/dsh-trader',
+      availableToolNames: [...IMPLEMENTED_TOOL_NAMES, 'trade_workflow_run'],
+    })
+    const captured: Array<CreateAgentOptions | ResumeAgentOptions> = []
+    const capture: RestrictCapture = { filters: [] }
+    const scope = scopedContext(capture)
+
+    // 模拟 AgentRegistry 的两个真实入口：分别捕获 options，再执行 factory 提供的 setup。
+    const invoke = async (options: CreateAgentOptions | ResumeAgentOptions): Promise<void> => {
+      captured.push(options)
+      await options.setup?.(scope, agent)
+    }
+    await invoke(lifecycle.resume)
+    await invoke(lifecycle.create)
+
+    expect(captured).toHaveLength(2)
+    expect(captured[0]!.setup).toBe(captured[1]!.setup)
+    expect(capture.filters).toHaveLength(2)
+    expect(capture.filters[0]).toEqual(capture.filters[1])
+    expect(capture.filters[0]!.allow).toContain('trade_plan_card')
+    expect(capture.filters[0]!.allow).toContain('trade_workflow_run')
+    expect(capture.filters[0]!.allow).not.toContain('trade_execute_order')
+  })
+
+  it('keeps every read-only role helper free of every side-effect tool', async () => {
+    const readOnlyRoles = ['analyst', 'research', 'trader', 'risk', 'meta'] as const
+    const capture: RestrictCapture = { filters: [] }
+    const scope = scopedContext(capture)
+
+    for (const role of readOnlyRoles) {
+      const setup = setupRoleToolRestriction(role, IMPLEMENTED_TOOL_NAMES)
+      await setup(scope, agent)
+    }
+
+    expect(capture.filters).toHaveLength(readOnlyRoles.length)
+    for (const filter of capture.filters) {
+      const allowed = filter.allow ?? []
+      expect(SIDE_EFFECT_TOOLS.some((tool) => allowed.includes(tool))).toBe(false)
+    }
   })
 })

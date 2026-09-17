@@ -26,6 +26,7 @@ const PACKAGES = [
   'dsh-tools',
   'dsh-system-prompt',
   'dsh-session',
+  'dsh-subagent',
   'dsh-llm',
   'schemastery',
 ]

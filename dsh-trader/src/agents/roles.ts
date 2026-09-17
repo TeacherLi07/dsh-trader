@@ -96,7 +96,7 @@ export const ROLE_SPECS: Readonly<Record<RoleName, RoleSpec>> = {
   },
   judge: {
     name: 'judge',
-    label: '裁决/执行（唯一，可下单）',
+    label: '裁决（唯一，可提交计划与降险）',
     modelTier: 'deep',
     allowsSideEffects: true,
     tools: [
@@ -106,7 +106,6 @@ export const ROLE_SPECS: Readonly<Record<RoleName, RoleSpec>> = {
       'trade_risk_check',
       'trade_limits',
       'trade_recall',
-      'trade_execute_order',
       'trade_cancel',
       'trade_record_decision',
       'trade_plan_card',

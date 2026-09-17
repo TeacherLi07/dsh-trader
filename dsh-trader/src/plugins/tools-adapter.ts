@@ -7,12 +7,13 @@
 
 import { defineTool, type ParameterSchemaSpec, type ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { Context } from '@deepseek-ai/cordis'
+import type { AgentSetup } from '@deepseek-ai/dsh-agent'
 import {
   IMPLEMENTED_TOOL_NAMES,
   TOOL_DEFINITIONS,
   type ToolDefinition,
 } from '../agents/tools.js'
-import { ROLE_SPECS, SIDE_EFFECT_TOOLS, type RoleName } from '../agents/roles.js'
+import { restrictFor, ROLE_SPECS, SIDE_EFFECT_TOOLS, type RoleName } from '../agents/roles.js'
 import type { TradePorts } from '../exec/ports.js'
 
 export interface DshToolAdapterOptions {
@@ -155,6 +156,24 @@ export function toolNamesFor(role: RoleName, implementedTools: readonly string[]
 export function implementedToolNames(names: readonly string[]): readonly string[] {
   const implemented = new Set(IMPLEMENTED_TOOL_NAMES)
   return names.filter((name) => implemented.has(name))
+}
+
+/**
+ * 为真实 agent 组合一份角色级工具限制。
+ *
+ * 该限制必须装在 agent 的 scoped context 上：全局 `ctx.tools.restrict()` 会把所有
+ * agent 一起遮掉。调用方传入当前真正可用的工具集合（例如 T2.9 接线后可包含
+ * workflow 专用工具）；把白名单在 setup 创建时冻结，并让 create/resume 复用同一闭包，
+ * 可避免恢复路径忘记收窄而意外继承全局工具（plan §5.4/T2.8）。
+ */
+export function setupRoleToolRestriction(
+  role: RoleName,
+  implementedTools: readonly string[],
+): AgentSetup {
+  const restriction = restrictFor(role, implementedTools)
+  return (agentCtx) => {
+    agentCtx.tools.restrict(restriction)
+  }
 }
 
 /** 在 effect 中注册并保留每个注册动作的精确注销句柄。 */

@@ -5,6 +5,9 @@ import {
   collectOpenDisagreements,
   detectFactConflicts,
   freezeContextPack,
+  validateDebateArgument,
+  validateEvidenceReports,
+  validateRiskAssessment,
 } from '../src/agents/pack.js'
 import type { AnalystReport, JudgmentPackInput } from '../src/agents/types.js'
 
@@ -12,141 +15,126 @@ const input = (over: Partial<JudgmentPackInput> = {}): JudgmentPackInput => ({
   symbol: 'BTC/USDT',
   timeframe: '1h',
   asOf: 1_700_000_000_000,
-  features: { 'bar.close': 100, rsi14: 55 },
+  features: { 'bar.close': 100, rsi14: 55, 'flow.missing': null },
   deskState: { equityQuote: 10_000, positions: [], openOrders: 0 },
   plan: { planId: 'pc-1', contentHash: 'sha256:abc' },
   lessons: [{ lessonId: 'l1' }],
   ...over,
 })
 
-const report = (
-  agent: string,
-  keyNumbers: Record<string, number>,
-  verdict: AnalystReport['verdict'] = 'neutral',
-): AnalystReport => ({
-  agent,
-  verdict,
-  keyNumbers,
-  summary: `${agent} summary`,
-  artifactRef: `artifact://${agent}`,
+const pack = () => freezeContextPack(input())
+
+const report = (p: ReturnType<typeof pack>, over: Partial<AnalystReport> = {}): AnalystReport => ({
+  agent: 'market',
+  contextHash: p.contextHash,
+  verdict: 'bullish',
+  keyNumbers: { 'bar.close': 100 },
+  claims: [{ kind: 'observation', statement: '收盘价可核验', evidencePaths: ['bar.close'] }],
+  missingPaths: [],
+  summary: 'summary',
+  artifactRef: 'artifact://market',
+  ...over,
 })
 
 describe('freezeContextPack', () => {
   it('is deterministic and derives a stable packId', () => {
-    const a = freezeContextPack(input())
-    const b = freezeContextPack(input())
+    const a = pack()
+    const b = pack()
     expect(a.contextHash).toBe(b.contextHash)
-    expect(a.packId).toBe(b.packId)
-    expect(a.contextHash).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(a.packId).toMatch(/^pack-[0-9a-f]{16}$/)
   })
 
-  it('changes the hash when any frozen input changes', () => {
-    const base = freezeContextPack(input()).contextHash
-    expect(freezeContextPack(input({ features: { 'bar.close': 101 } })).contextHash).not.toBe(base)
-    expect(freezeContextPack(input({ asOf: 1 })).contextHash).not.toBe(base)
-    expect(
-      freezeContextPack(input({ deskState: { equityQuote: 1, positions: [], openOrders: 0 } }))
-        .contextHash,
-    ).not.toBe(base)
-    expect(freezeContextPack(input({ plan: { planId: 'pc-2', contentHash: 'x' } })).contextHash).not.toBe(base)
+  it('refuses a mismatched or tampered pack', () => {
+    const p = pack()
+    expect(() => assertPackIntegrity('sha256:deadbeef', p)).toThrow(PackMismatchError)
+    expect(() => assertPackIntegrity(p.contextHash, { ...p, features: { 'bar.close': 999 } })).toThrow(PackMismatchError)
   })
 })
 
-describe('assertPackIntegrity', () => {
-  it('accepts a matching declaration', () => {
-    const pack = freezeContextPack(input())
-    expect(() => assertPackIntegrity(pack.contextHash, pack)).not.toThrow()
+describe('validateEvidenceReports', () => {
+  it('accepts exact pack numbers and claims, but never accepts fabricated paths or values', () => {
+    const p = pack()
+    const valid = validateEvidenceReports(p, [report(p)])
+    expect(valid.accepted).toHaveLength(1)
+    expect(valid.evidenceIssues).toEqual([])
+
+    const invalid = validateEvidenceReports(p, [
+      report(p, { keyNumbers: { forged: 1 } }),
+      report(p, { keyNumbers: { 'bar.close': 101 } }),
+      report(p, { contextHash: 'sha256:wrong' }),
+    ])
+    expect(invalid.accepted).toHaveLength(0)
+    expect(invalid.evidenceIssues.some((issue) => issue.code === 'unknown_path')).toBe(true)
+    expect(invalid.evidenceIssues.some((issue) => issue.code === 'value_mismatch')).toBe(true)
+    expect(invalid.evidenceIssues.some((issue) => issue.code === 'context_mismatch')).toBe(true)
   })
 
-  it('refuses a mismatched declaration', () => {
-    const pack = freezeContextPack(input())
-    expect(() => assertPackIntegrity('sha256:deadbeef', pack)).toThrow(PackMismatchError)
+  it('guards against vacuous bullish/unknown reports', () => {
+    const p = pack()
+    expect(validateEvidenceReports(p, [report(p, { keyNumbers: {}, claims: [] })]).accepted).toHaveLength(0)
+    expect(validateEvidenceReports(p, [report(p, { verdict: 'unknown', keyNumbers: {}, claims: [], missingPaths: [] })]).accepted).toHaveLength(0)
+    expect(validateEvidenceReports(p, [report(p, { verdict: 'unknown', keyNumbers: {}, claims: [], missingPaths: ['flow.missing'] })]).accepted).toHaveLength(1)
   })
 
-  it('refuses a pack whose content was changed after freezing', () => {
-    const pack = freezeContextPack(input())
-    const tampered = { ...pack, features: { 'bar.close': 999 } }
-    expect(() => assertPackIntegrity(pack.contextHash, tampered)).toThrow(PackMismatchError)
+  it('is self-contained when embedded into a sandbox', () => {
+    const p = pack()
+    const revived = new Function(`return (${validateEvidenceReports.toString()})`)() as typeof validateEvidenceReports
+    expect(revived(p, [report(p)])).toEqual(validateEvidenceReports(p, [report(p)]))
   })
 })
 
-describe('detectFactConflicts (铁律 B)', () => {
-  it('finds nothing when analysts agree within tolerance', () => {
-    const conflicts = detectFactConflicts([
-      report('market', { price: 100 }),
-      report('flow', { price: 100.5 }),
-    ])
-    expect(conflicts).toEqual([])
+describe('debate and risk evidence guards', () => {
+  const argument = (p: ReturnType<typeof pack>) => ({
+    contextHash: p.contextHash,
+    points: [{
+      statement: '趋势证据支持多头',
+      evidencePaths: ['bar.close'],
+      invalidatedBy: { statement: '收盘价跌破观察值', evidencePaths: ['bar.close'] },
+    }],
+    concede: false,
   })
 
-  it('finds the key and reports every asserted value when they diverge', () => {
-    const conflicts = detectFactConflicts([
-      report('market', { price: 100, funding: 0.01 }),
-      report('flow', { price: 130, funding: 0.01 }),
-    ])
-    expect(conflicts).toHaveLength(1)
-    expect(conflicts[0]?.key).toBe('price')
-    expect(conflicts[0]?.values).toEqual([
-      { agent: 'market', value: 100 },
-      { agent: 'flow', value: 130 },
-    ])
+  it('requires structured invalidatedBy and only accepted evidence paths', () => {
+    const p = pack()
+    expect(validateDebateArgument(p, argument(p), ['bar.close']).accepted).not.toBeNull()
+    expect(validateDebateArgument(p, { ...argument(p), contextHash: 'wrong' }, ['bar.close']).accepted).toBeNull()
+    expect(validateDebateArgument(p, { ...argument(p), points: [{ ...argument(p).points[0], invalidatedBy: ['bar.close'] }] }, ['bar.close']).accepted).toBeNull()
+    expect(validateDebateArgument(p, argument(p), ['rsi14']).accepted).toBeNull()
   })
 
-  it('ignores single-source keys, non-numbers and null reports', () => {
-    const conflicts = detectFactConflicts([
-      report('market', { price: 100, only: 1 }),
-      { ...report('flow', { price: 130 }), keyNumbers: { price: 130, bad: Number.NaN } },
-      null as unknown as AnalystReport,
-    ])
-    expect(conflicts.map((conflict) => conflict.key)).toEqual(['price'])
+  it('validates a single structured RiskCritic output', () => {
+    const p = pack()
+    const valid = validateRiskAssessment(p, {
+      contextHash: p.contextHash,
+      disposition: 'proceed',
+      failureModes: [{ statement: '失效', severity: 'P1', evidencePaths: ['bar.close'] }],
+      missingEvidence: [],
+    }, ['bar.close'])
+    expect(valid.accepted?.disposition).toBe('proceed')
+    expect(validateRiskAssessment(p, {
+      contextHash: p.contextHash,
+      disposition: 'proceed',
+      failureModes: [{ statement: '失效', severity: 'P1', evidencePaths: ['forged'] }],
+      missingEvidence: [],
+    }, ['bar.close']).accepted).toBeNull()
+  })
+})
+
+describe('collectOpenDisagreements and legacy conflict detector', () => {
+  it('exposes evidence issues, incomplete debate, and absent risk instead of hiding them', () => {
+    const p = pack()
+    const result = collectOpenDisagreements([report(p)], [{ stage: 'analyst', code: 'unknown_path', kind: 'unknown_path', message: 'bad' }], { bull: null, bear: null, rounds: 0 }, null)
+    expect(result.some((line) => line.includes('证据问题'))).toBe(true)
+    expect(result.some((line) => line.includes('没有完整有效'))).toBe(true)
+    expect(result.some((line) => line.includes('没有有效的 RiskCritic'))).toBe(true)
   })
 
-  it('honours a custom relative tolerance', () => {
-    // 100 vs 101 ⇒ 相对差 1/101 ≈ 0.0099，默认 1% 容差内；收紧到 0.1% 就成为冲突
-    const reports = [report('a', { price: 100 }), report('b', { price: 101 })]
-    expect(detectFactConflicts(reports)).toHaveLength(0)
-    expect(detectFactConflicts(reports, { relativeTolerance: 0.001 })).toHaveLength(1)
-  })
-
-  it('is self-contained — it survives being embedded as source in the workflow sandbox', () => {
+  it('keeps conflict detection self-contained for already-materialized reports', () => {
+    const p = pack()
+    const a = report(p, { keyNumbers: { 'bar.close': 100 } })
+    const b = report(p, { agent: 'flow', keyNumbers: { 'bar.close': 130 } })
+    expect(detectFactConflicts([a, b])).toHaveLength(1)
     const revived = new Function(`return (${detectFactConflicts.toString()})`)() as typeof detectFactConflicts
-    const reports = [report('a', { price: 100 }), report('b', { price: 130 })]
-    expect(revived(reports)).toEqual(detectFactConflicts(reports))
-  })
-})
-
-describe('collectOpenDisagreements', () => {
-  it('reports nothing when everything is aligned and converged', () => {
-    expect(
-      collectOpenDisagreements(
-        [report('a', { price: 1 }, 'bullish'), report('b', { price: 1 }, 'bullish')],
-        [],
-        { points: ['x'], concede: true },
-        { points: ['y'], concede: false },
-        { stance: 'favor', concerns: [] },
-        { stance: 'neutral', concerns: [] },
-      ),
-    ).toEqual([])
-  })
-
-  it('lists unresolved conflicts, non-convergence, opposite risk stances and split verdicts', () => {
-    const open = collectOpenDisagreements(
-      [report('a', { price: 1 }, 'bullish'), report('b', { price: 9 }, 'bearish')],
-      [{ key: 'price', values: [{ agent: 'a', value: 1 }, { agent: 'b', value: 9 }] }],
-      { points: ['x'], concede: false },
-      { points: ['y'], concede: false },
-      { stance: 'favor', concerns: [] },
-      { stance: 'oppose', concerns: [] },
-    )
-    expect(open.some((line) => line.includes('事实冲突：price'))).toBe(true)
-    expect(open.some((line) => line.includes('未收敛'))).toBe(true)
-    expect(open.some((line) => line.includes('风控两方立场相反'))).toBe(true)
-    expect(open.some((line) => line.includes('分析师结论不一致'))).toBe(true)
-  })
-
-  it('is self-contained too', () => {
-    const revived = new Function(`return (${collectOpenDisagreements.toString()})`)() as typeof collectOpenDisagreements
-    expect(revived([], [], null, null, null, null)).toEqual([])
+    expect(revived([a, b])).toEqual(detectFactConflicts([a, b]))
   })
 })

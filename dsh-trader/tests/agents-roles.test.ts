@@ -13,6 +13,7 @@ import {
   sideEffectToolsFor,
 } from '../src/agents/roles.js'
 import { IMPLEMENTED_TOOL_NAMES } from '../src/agents/tools.js'
+import { RUNTIME_IMPLEMENTED_TOOL_NAMES } from '../src/agents/tool-roster.js'
 
 const ROUTING = {
   deep: { provider: 'deepseek-official', model: 'deepseek-reasoner' },
@@ -31,9 +32,9 @@ describe('role surface (T1.2)', () => {
     }
   })
 
-  it('gives the judge — and only the judge — the execution tools', () => {
+  it('gives the judge — and only the judge — side-effect tools except direct execution', () => {
     expect(ROLE_SPECS.judge.allowsSideEffects).toBe(true)
-    expect(ROLE_SPECS.judge.tools).toContain('trade_execute_order')
+    expect(ROLE_SPECS.judge.tools).not.toContain('trade_execute_order')
     expect(ROLE_SPECS.judge.tools).toContain('trade_cancel')
     expect(ROLE_SPECS.judge.tools).toContain('trade_record_decision')
 
@@ -59,13 +60,13 @@ describe('role surface (T1.2)', () => {
   })
 
   it('reports the unimplemented tools instead of pretending the surface is complete', () => {
-    const missing = missingTools(IMPLEMENTED_TOOL_NAMES)
+    const missing = missingTools(RUNTIME_IMPLEMENTED_TOOL_NAMES)
     expect(missing.length).toBeGreaterThan(0)
     expect(missing).toContain('trade_derivatives')
     expect(IMPLEMENTED_TOOL_NAMES).toContain('trade_regime')
     expect(missing).not.toContain('trade_regime')
     expect(missing).toContain('trade_stress_test')
-    expect(missing).toContain('trade_workflow_run')
+    expect(missing).not.toContain('trade_workflow_run')
     // 已实现的绝不能出现在"缺失"里
     for (const implemented of IMPLEMENTED_TOOL_NAMES) expect(missing).not.toContain(implemented)
   })
@@ -84,8 +85,8 @@ describe('role surface (T1.2)', () => {
     expect(analyst.allow).toContain('trade_market')
     expect(analyst.allow).not.toContain('trade_derivatives')
 
-    const judge = restrictFor('judge', IMPLEMENTED_TOOL_NAMES)
-    expect(judge.allow).toContain('trade_execute_order')
-    expect(judge.allow).not.toContain('trade_workflow_run')
+    const judge = restrictFor('judge', RUNTIME_IMPLEMENTED_TOOL_NAMES)
+    expect(judge.allow).not.toContain('trade_execute_order')
+    expect(judge.allow).toContain('trade_workflow_run')
   })
 })

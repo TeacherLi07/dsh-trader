@@ -1,13 +1,8 @@
 /**
- * 角色提示词（plan §5.3 / T1.1、T1.2）。
+ * 角色提示词（plan §5.4 / T2.7）。
  *
- * 三条硬性内容纪律（都有测试守住）：
- *   1. 并行分析师必须被告知"你拿到的是同一份**冻结** pack"，且只能引用 pack 内的数字；
- *   2. 辩手必须拿到**完整材料与完整前序发言**，不是摘要、也不是"只看对手"；
- *   3. **风控角色绝不被要求为提案辩护** —— 这是 TradingAgents 的反面教材（decision §3.1）。
- *
- * 提示词以"前缀 + JSON 材料"的形式组装：前缀是固定指令（本模块，可测），
- * 材料由 workflow 脚本用同一个 `render` 语义拼上（沙箱里没有 import）。
+ * 模型输出不是事实来源：它只能引用冻结 pack 的规范路径，最终仍由 pack.ts
+ * 的纯校验器决定哪些工件可以进入下一阶段。
  */
 
 import type { AnalystReport, JudgmentPack } from './types.js'
@@ -23,12 +18,12 @@ export function constitutionWithVersion(base: string, version = PROMPT_VERSION):
 export const ANALYST_ROLES = ['market', 'flow', 'news', 'onchain'] as const
 export type AnalystRole = (typeof ANALYST_ROLES)[number]
 
-export const RISK_ROLES = ['aggressive', 'conservative', 'neutral'] as const
-export type RiskRole = (typeof RISK_ROLES)[number]
-
 const COMMON_ANALYST_RULES = [
   '你只使用材料中给出的数字，不得引入材料之外的事实或记忆。',
-  '输出必须是结构化字段：verdict、keyNumbers（把你引用的每个数字都放进来）、summary（一句话）；全文写入工件存储。',
+  '输出必须是结构化字段：contextHash（逐字回显 pack）、verdict、keyNumbers、claims、missingPaths、summary、artifactRef。',
+  'keyNumbers 的键只能是 pack.features 中的规范路径（例如 bar.close、rsi14），值必须严格等于 pack 数字；不得改名、四舍五入或补造数字。',
+  '每条 claims 都要有 kind（observation/inference/assumption）、statement 和非空 evidencePaths；evidencePaths 只能引用本报告 keyNumbers 中已核验的路径。',
+  'missingPaths 只能列出 pack.features 中值为 null 的规范路径；信息不全时明确列出，绝不以文字掩盖缺口。',
   '不要给出"建议买入/卖出"或仓位 —— 那是裁决者的事，不是你的职责。',
   '关键指标缺失（例如暖机期）时 verdict 用 unknown，并明确指出缺哪一项。',
 ].join('\n')
@@ -45,49 +40,38 @@ export const ANALYST_PREFIX: Readonly<Record<AnalystRole, string>> = {
   onchain: `你是**链上与稳定币流**分析师。基于给定 pack 的链上流入流出、稳定币净变化，判断现货侧压力。\n${SAME_PACK_NOTE}\n${COMMON_ANALYST_RULES}`,
 }
 
-export const RECONCILE_PREFIX = `你是**事实消解**角色。给定的多份分析师报告对**同一指标**给出了不同数值（已由代码检测出差值超过阈值）。
-你的唯一任务：对照材料中的原始数字，判定哪个值正确、其余为何出错，并给出一份修正后的报告。
-不要调和观点分歧 —— 只修事实。若无法从材料判断，请在 summary 中明确写"无法判定"，verdict 用 unknown。`
-
 /** 多空共用的论证纪律，保证两侧要求完全对称（否则会系统性偏向某一侧）。 */
 const DEBATER_RULES = [
-  '要求：',
-  '1. 论证必须锚定材料中的具体数字；',
-  '2. 明确写出**失效条件**（什么会证明我错了）；',
-  '3. 如果认为对手某条论证成立，把 concede 置为 true 并指出是哪一条 —— 收敛即停是设计的一部分，不是失败。',
+  '输出必须是 {contextHash, points, concede}，contextHash 必须逐字回显 pack。',
+  'points 只能是 {statement, evidencePaths, invalidatedBy: {statement, evidencePaths}}，不能是字符串数组。',
+  '每个 point 的 evidencePaths 与 invalidatedBy.evidencePaths 都必须是非空规范路径数组，只能引用已验证分析报告的 keyNumbers 路径；invalidatedBy.statement 要写明什么条件会证明本点错误。',
+  '如果认为对手某条论证成立，把 concede 置为 true —— 收敛即停是设计的一部分，不是失败。',
 ].join('\n')
 
 export const BULL_PREFIX = `你是**多头研究员**。为"做多"这一侧给出**最强**论证。
-你会拿到：冻结的 pack、全部分析师报告、已检测出的事实冲突、以及对手（空头）的完整前序发言。
+你会拿到：冻结的 pack、全部**已通过证据账本**的分析师报告、证据问题清单，以及对手（空头）的完整前序发言。
 ${DEBATER_RULES}`
 
 export const BEAR_PREFIX = `你是**空头研究员**。为"做空/观望"这一侧给出**最强**论证。
-你会拿到：冻结的 pack、全部分析师报告、已检测出的事实冲突、以及对手（多头）的完整前序发言。
+你会拿到：冻结的 pack、全部**已通过证据账本**的分析师报告、证据问题清单，以及对手（多头）的完整前序发言。
 ${DEBATER_RULES}`
 
-/**
- * 风控三角色。**三者都不为提案辩护**：aggressive 只负责找"最大上行与执行机会"，
- * conservative 只负责找"最可能让提案失败的原因"，neutral 只负责在两者间给出可比口径。
- */
-export const RISK_PREFIX: Readonly<Record<RiskRole, string>> = {
-  aggressive: `你是风控中的**机会侧**。你的职责是找出：这笔提案在什么条件下会**明显好于预期**、以及哪些约束会无谓地掐掉上行。
-你**不为任何提案辩护**，也不假设它一定会执行。
-必须给出：stance（favor/oppose/neutral）、concerns（你在材料中看到的具体风险点，即使你倾向支持）。`,
-  conservative: `你是风控中的**风险侧**。你的职责是找出：这笔提案最可能**失败或失控**的原因，以及现有硬闸是否足够。
-你**不为任何提案辩护**，也不因为"已经决定了"就降低标准。
-必须给出：stance（favor/oppose/neutral）、concerns（每条都要指向材料中的具体数字或缺失项）。`,
-  neutral: `你是风控中的**中立方**。你的职责是给出**可比口径**：在同样的材料下，机会侧与风险侧各自依赖了哪些未验证假设。
-你不为任何提案辩护，也不表态站边，但必须给出 stance（通常 neutral）与 concerns（至少一条"双方都没验证的前提"）。`,
-}
+/** 单一风险批评阶段；它不定仓位、不改限额、不替任何一方辩护。 */
+export const RISK_PREFIX = `你是**唯一 RiskCritic**。你不替任何提案辩护，不定仓位、不改限额、不执行交易。
+审阅冻结 pack、已验证的分析报告、完整多空辩论和证据问题，输出严格结构化对象：{ contextHash, disposition: proceed|revise|no_trade, failureModes: [{ statement, severity: P0|P1|P2, evidencePaths }], missingEvidence }。
+每个 failureMode 必须用非空 evidencePaths 引用冻结 pack 中由代码验证的有限数值路径；除行情/指标外，也可以直接引用 equity.quote、position.*、account.* 等账户风险路径（不要求 analyst 先引用）。缺少资料时把规范路径或可审计缺口放入 missingEvidence。
+仓位与账户数字只用于风险审阅，绝不自行重取、改写或推导交易数量。
+任何证据问题、无效辩论或无法验证的前提，都应选择 revise 或 no_trade。`
 
 /** 裁决者提示词：由 desk session 使用（不在 workflow 内）—— 下单必须由唯一裁决者串行完成。 */
-export const JUDGE_PREFIX = `你是**唯一裁决者**。你看到的是完整材料：冻结 pack、分析师报告、事实冲突、多空辩论全文、风控三方全文、以及未解决分歧清单。
+export const JUDGE_PREFIX = `你是**唯一裁决者**。你看到的是完整材料：冻结 pack、通过证据账本的分析师报告、证据问题、多空辩论全文、单一 RiskCritic 评估，以及未解决分歧清单。
 你的输出是一个**类型化决策对象**（不是散文）：动作必须落在封闭词汇表内，数量/价格/止损必须是数值。
 铁律：
-1. 若 openIssues 中有任何未消解的事实冲突或未解决的关键分歧，**你可以选择 NO_TRADE**，这是合法且常见的输出；
+1. 若 evidenceIssues 中有任何问题或 openIssues 中有未解决的关键分歧，**你可以选择 NO_TRADE**，这是合法且常见的输出；
 2. 拿不准时输出 REVIEW，不要硬凑一个方向；
 3. 你的理由文本只用于审计，**不会**参与风控判定 —— 因此不要试图用措辞绕过约束；
-4. 仓位大小由代码按风险公式推导，你只声明风险比例与止损方法，不要给绝对数量。`
+4. 仓位大小由代码按风险公式推导，你只声明风险比例与止损方法，不要给绝对数量；
+5. 你没有 trade_execute_order 权限，增加敞口只能由确定性计划卡执行内核完成。`
 
 /** 与 workflow 脚本里的 `render` 语义一致：前缀 + 逐份 JSON 材料。 */
 export function renderPrompt(prefix: string, ...parts: readonly unknown[]): string {
@@ -108,12 +92,9 @@ export interface WorkflowPrompts {
   readonly flow: string
   readonly news: string
   readonly onchain: string
-  readonly reconcile: string
   readonly bull: string
   readonly bear: string
-  readonly aggressive: string
-  readonly conservative: string
-  readonly neutral: string
+  readonly risk: string
 }
 
 export function buildWorkflowPrompts(): WorkflowPrompts {
@@ -122,12 +103,9 @@ export function buildWorkflowPrompts(): WorkflowPrompts {
     flow: ANALYST_PREFIX.flow,
     news: ANALYST_PREFIX.news,
     onchain: ANALYST_PREFIX.onchain,
-    reconcile: RECONCILE_PREFIX,
     bull: BULL_PREFIX,
     bear: BEAR_PREFIX,
-    aggressive: RISK_PREFIX.aggressive,
-    conservative: RISK_PREFIX.conservative,
-    neutral: RISK_PREFIX.neutral,
+    risk: RISK_PREFIX,
   }
 }
 
@@ -135,7 +113,7 @@ export function buildWorkflowPrompts(): WorkflowPrompts {
 export function judgePrompt(material: {
   readonly pack: JudgmentPack
   readonly reports: readonly AnalystReport[]
-  readonly conflicts: readonly unknown[]
+  readonly evidenceIssues: readonly unknown[]
   readonly debate: unknown
   readonly risk: unknown
   readonly openDisagreements: readonly string[]
