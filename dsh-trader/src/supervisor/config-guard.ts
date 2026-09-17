@@ -45,18 +45,27 @@ function fail(entries: readonly string[], where: string, hint: string): void {
 
 const HINT = '请从 cordis.patch.yml 移除，或先实现 W2/W3 接线（claim + decideWake + 预算）后再配置。'
 
+/** schemastery 会把缺省 object/array 补成空容器；空容器不是“用户已配置”。 */
+function hasConfiguredValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (typeof value === 'string') return value.trim().length > 0
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return true
+}
+
 export function assertWiredSupervisorConfig(config: MaybeUnwiredSupervisorConfig): void {
   const unwired: string[] = []
-  if (config.l2 !== undefined) unwired.push('l2')
-  if (config.l3MinIntervalMs !== undefined) unwired.push('l3MinIntervalMs')
-  if (config.dailyBudgetUsd !== undefined) unwired.push('dailyBudgetUsd')
+  if (hasConfiguredValue(config.l2)) unwired.push('l2')
+  if (hasConfiguredValue(config.l3MinIntervalMs)) unwired.push('l3MinIntervalMs')
+  if (hasConfiguredValue(config.dailyBudgetUsd)) unwired.push('dailyBudgetUsd')
   fail(unwired, 'trade-supervisor', HINT)
 }
 
 export function assertWiredRulesConfig(config: MaybeUnwiredRulesConfig): void {
   const unwired: string[] = []
-  if (config.windows !== undefined) unwired.push('windows')
-  if (config.judgment?.provider !== undefined) unwired.push('judgment.provider')
-  if (config.judgment?.model !== undefined) unwired.push('judgment.model')
+  if (hasConfiguredValue(config.windows)) unwired.push('windows')
+  if (hasConfiguredValue(config.judgment?.provider)) unwired.push('judgment.provider')
+  if (hasConfiguredValue(config.judgment?.model)) unwired.push('judgment.model')
   fail(unwired, 'trade-rules', HINT)
 }

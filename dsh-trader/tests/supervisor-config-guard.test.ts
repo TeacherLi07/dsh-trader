@@ -6,8 +6,9 @@ import { assertWiredRulesConfig, assertWiredSupervisorConfig } from '../src/supe
  * 而不是"配了却不生效"（那会让人误以为限流与预算在起作用）。
  */
 describe('未接线配置守卫（审计 S7）', () => {
-  it('supervisor：不配未接线项 ⇒ 通过', () => {
-    expect(() => assertWiredSupervisorConfig({})).not.toThrow()
+  it('空 object/array 是 schema 缺省值，不应伪装成已配置', () => {
+    expect(() => assertWiredSupervisorConfig({ l2: {}, l3MinIntervalMs: undefined, dailyBudgetUsd: undefined })).not.toThrow()
+    expect(() => assertWiredRulesConfig({ windows: [], judgment: {} })).not.toThrow()
   })
 
   it('supervisor：配了 l2 / l3MinIntervalMs / dailyBudgetUsd ⇒ 拒绝启动并点名', () => {
@@ -18,7 +19,7 @@ describe('未接线配置守卫（审计 S7）', () => {
 
   it('rules：windows 与 judgment.provider/model 拒绝；纯数值上限通过', () => {
     expect(() => assertWiredRulesConfig({ judgment: { maxPerHour: 3, maxPerDay: 8 } })).not.toThrow()
-    expect(() => assertWiredRulesConfig({ windows: [] })).toThrow(/windows/)
+    expect(() => assertWiredRulesConfig({ windows: [{ id: 'w1' }] })).toThrow(/windows/)
     expect(() => assertWiredRulesConfig({ judgment: { provider: 'deepseek-official' } })).toThrow(
       /judgment\.provider/,
     )
