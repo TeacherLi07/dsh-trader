@@ -19,8 +19,8 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地（T2.1–T2.6；§10 P2 ①–④ 由持久化模拟 venue 验证）。
-**下一步**：P3 小额实盘 —— 阻塞在 §12.2 A（HTX key）与 §12.2 E（`live_auto` 授权）；真 HTX 只读对账是进入 P3 前的第一件事。
+**当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地与安全收口（T2.1–T2.9；§10 P2 ①–④ 由持久化模拟 venue 验证）。
+**下一步**：P3 小额实盘前安全收口 —— HTX key/只读预检/最小额独立冒烟均已完成，`live_auto` 也曾获授权但当前已回退 `paper`。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账，并补齐 §12.1 #25 的结构化 `live_confirm` 逐单确认通道（未接入前 runtime fail-closed 拒绝该模式）。
 
 **七条红线**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 56 文件 / 611 测试
+pnpm test                        # vitest run，当前 59 文件 / 644 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -148,20 +148,21 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 
 写代码时**不要**注册"调用即抛错"的占位工具或空实现来让表格好看；缺口要如实报告。
 
-- **7 个工具未实现**（`missingTools()` 会打印）：`trade_derivatives`、`trade_news`、`trade_onchain`、
-  `trade_stress_test`、`trade_workflow_run`、`trade_review`、`trade_playbook_update`。
+- **6 个工具未实现**（`missingTools()` 会打印）：`trade_derivatives`、`trade_news`、`trade_onchain`、
+  `trade_stress_test`、`trade_review`、`trade_playbook_update`。`trade_workflow_run` 已由 T2.9
+  固化接线（子 agent 使用结构化输出与零工具面）。
   （`trade_regime` 已由 T2.5 实现。）
 - **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
   `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
 - **P3–P4 未做**：周级复盘/playbook/M3 版本化。`live_auto` 已按用户授权 arm，无人值守回路
   **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
-- **P2 的剩余外部依赖**：真 HTX 只读对账（`CcxtBroker` 代码已就绪、单测覆盖；缺 §12.2 A 的 key）。
+- **P2 的剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（`CcxtBroker` 代码已就绪、单测覆盖；需用已有 key 做非空实测）；结构化 `live_confirm` 逐单确认通道仍未接入。
   §10 P2 ①–④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`、`docs/p2-watchdog-2026-09-15.md`）。
 - **宏观事件窗口不是硬闸（暂不启用）**：`GatePolicy.tradingWindowOpen` 可选，调用方不传即不拦截；
   宏观风险只写进 `news` 分析师的提示词提醒（软判断，主动权在 agent）。**不要**再塞一个恒真/恒假的开关
   假装有这条风控；接入日历前请先读 `plan.md` §12.1 #22 的推翻条件。
-- **待外部输入**（`plan.md` §12.2）：HTX key 已确认可提供；OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
-  A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。
+- **待外部输入**（`plan.md` §12.2）：OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
+  A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。真 HTX merged 对账使用已确认的现有 key，不再是凭据阻塞。
 
 ## 文档维护
 

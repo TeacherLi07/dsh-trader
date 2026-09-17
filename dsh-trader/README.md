@@ -27,16 +27,19 @@
 | — | **P0 验收**：plan §10 六条全部通过 | ✅ `tag: phase-p0` |
 | T1.1 | 判断流程：冻结 pack + workflow 脚本 + 角色提示词 | ✅ 已完成（脚本用 `.toString()` 内嵌 `pack.ts` 的纯函数，杜绝沙箱与库漂移；**真实脚本文本可在进程内用假 agent 执行**，253 单测覆盖 hash 守卫/冲突消解/收敛即停/只回结构化字段） |
 | T1.2 | 角色工具箱与模型路由 `agents/roles.ts` | ✅ 已完成（只读角色**断言无副作用工具**、judge 独占执行权、desk ≤ 20；未实现工具由 `missingTools()` 显式报告） |
-| T1.3 | 交易工具 `agents/tools.ts`（10 个，含 propose/execute） | ✅ 已完成（**propose 绝不触达交易所**、**execute 内二次硬闸**、意图先落库→ack 后置状态、被拒也写审计链） |
+| T1.3 | 交易工具 `agents/tools.ts`（14 个，含 propose/execute） | ✅ 已完成（**propose 绝不触达交易所**、**execute 内二次硬闸**、意图先落库→ack 后置状态、被拒也写审计链） |
 | T1.4–T1.11 | 结算/反思、context 组装、预算账本、P1.5 闸门、预测市场（§4.4） | ✅ 已完成（`tag: phase-p1`；证据见 `../docs/p1-acceptance-2026-09-14.md`、`../docs/pm-pit-acceptance-2026-09-14.md`、`../docs/p1.5-gate-run-2026-09-14.md`） |
 | — | **P1 验收 + P1.5 通道闸门**（§10 P1 ①–⑥；闸门判定"关闭 W2/W3"） | ✅ `tag: phase-p1` |
-| T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 代码 + 单测完成；**缺 §12.2 A 的 key**，真 HTX 只读对账待做；缺凭据时安全降级 `paper` |
-| T2.2 | 对账 runner + 外部 watchdog + `/halt` `/resume` | ✅ P2 ③ 8/8（真实 `SIGSTOP`）：`../docs/p2-watchdog-2026-09-15.md` |
+| T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 真 HTX 只读预检与最小额独立冒烟已通过；普通/算法单合并计数与撤单已补测；进 P3 前仍需真 HTX “有持仓 + 保护单”对账验证 |
+| T2.2 | 对账 runner + 外部 watchdog + `/halt` `/resume` | ✅ P2 ③ 8/8（真实 `SIGSTOP`）；持久化 `halted` 已接入新增敞口硬闸，`/resume` 不清对账冻结；证据 `../docs/p2-watchdog-2026-09-15.md` |
 | T2.3 | 故障注入：`kill -9`×50 / 幂等提交×10 / 保护单停摆仍生效 | ✅ P2 ①②④ 全通过：`../docs/p2-fault-injection-2026-09-15.md` |
 | T2.4 | 内核指标补全：`adx14` + `funding.rate`/`oi.changePct`/`liq.notional`/`basis.bps` | ✅ 增量=全量（ADX 对拍 92 样本）；单位口径有测试；`UNIMPLEMENTED_PATHS` 清空 |
 | T2.5 | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | ✅ 分位定义可复现；样本 < 30 一律 `ok:false` |
 | T2.6 | §12 已决小项：#5 提示词版本并入 C1、#12 negRisk 只校验、#17 启动自洽、#18 视界按 tf、#19 价目表年龄 | ✅ 每项一个单测 |
-| P3–P4 | 小额实盘、周级复盘/playbook/M3 版本化 | ⬜ 未开始（阻塞：HTX key / OKX demo key / `live_auto` 授权，见 `../plan.md` §12.2） |
+| T2.7 | 结构化证据账本 + 有限 Bull/Bear + 单一 `RiskCritic` | ✅ 数字/路径/contextHash 由代码校验；无效工件不进下一阶段；三风险人格已移除 |
+| T2.8 | 真实 agent 运行时权限收窄 | ✅ create/resume 共用 scoped restrict；judge 无 `trade_execute_order`，只读角色无副作用工具 |
+| T2.9 | 固化判断 workflow `trade_workflow_run` | ✅ 已接线（代码组装 pack、固定脚本；spawn child 只允许 `structured_output`，结果/失败均落审计） |
+| P3–P4 | 小额实盘、周级复盘/playbook/M3 版本化 | ⬜ 未开始（当前为 `paper`；进 P3 前需真 HTX 保护单对账验证，并补结构化 `live_confirm` 逐单确认；未接入前该 runtime 会 fail-closed 拒绝） |
 
 ## 开发
 

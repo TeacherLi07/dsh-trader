@@ -39,6 +39,7 @@ agent 默认 idle，**无新信息不唤醒（零 token）**。只有三类唤�
 - W3 信号白名单：交易所/预言机状态异常、单 bar > k·ATR、资金费率越极端分位、清算量破历史分位、稳定币脱锚、白名单新闻源高危关键词、**预测市场概率跳变 / 新市场 / 结算**（§4.4，且必须先过流动性门槛）。
 - 超限一律**落库 + 告警**，不唤醒。
 - 规则命中后的分流：命中承诺 → 执行（不唤醒）；`invalidation` → 执行降险（不唤醒）；`novelty` → W3；`info` → 只落库；其余 → 仅当 W2 成立才入队。
+- 规则去重键必须包含 `timeframe`：`ruleId|symbol|timeframe|barTs`；否则 1h/4h 在同一时刻收盘时会互相吞掉。
 - agent 忙时不打断，只入队；仅 P0（持仓风险）允许 `steer()`。
 - **★ attach 时机（实测，见 §4.6 R1）**：**不能在插件 `apply` 期间调用 `ctx.agents.create/resume`** —— agent factory 由 `agent-loop` 注册，而它的 apply 晚于插件 include 条目。在 `apply` 里调用会抛 `no agent factory registered`；若 `await` 等待 factory 出现，会**死锁 plugin loader**（loader 正在等 `apply` 返回）。正确做法：挂 `agent/created` 事件后**即发即忘**地 attach，或在进程启动完成后再驱动（supervisor 的 T1.x 实现必须遵守）。
 
@@ -99,7 +100,7 @@ decision 刻意没有锁字段；本节补齐，作为 P0 的实现依据。**�
 
 **内核指标层的当前覆盖（T0.5 交付，T2.4 补齐）**：已实现 `ema20`/`ema50`/`atr14`/`rsi14`/`vwap20`/`zscore20`/`volRealized20`，全部为**增量维护**且与全量重算**逐点严格相等**（`indicators.ts` 是对拍参考实现）。**T2.4 已补齐**：`adx14`（Wilder 三重平滑，增量=全量逐点相等），以及依赖衍生品/清算数据源的 `oi.changePct`、`liq.notional`、`funding.rate`、`basis.bps`（`derivatives.ts`；单位口径：`funding.rate` 为**小数比例**、`basis.bps` 为 **bps**、`liq.notional` 为窗口 `trade_turnover` **累加**、`oi.changePct` 为相对上一观测的**百分比**，各有单位测试）。指标以**扁平取值**暴露（求值本身已绑定到某个 `tf` 的那根 bar），因此**不使用 `atr(tf,n)` 这类函数形式** —— DSL 词法器没有 `tf` 记号，那种写法根本无法解析。衍生品数据未注入时相应路径**缺失** ⇒ `ok:false` → **UNCOVERED（fail-closed）**，不会静默当成 false，也不会在回测里假装有值（见 §12 #16）。
 
-**求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**。**触发语义（已决，§12.1 #23）**：每根已收盘 bar 求值一次，`fired` 去重键含 `barTs` ⇒ **条件持续为真时每根 bar 都会触发（电平）**。**边沿表达**：`crossAbove`/`crossBelow` 已实现（2026-09-17，§12.2 I）—— 它们是**特殊形式**，求值器会把两个参数表达式分别在**当前**与**前一根**上下文里各求一次再判穿越（`crossAbove` = 前 `a<=b` 且当前 `a>b`）；缺前值（回放第一根、指标暖机、未注入 previous）⇒ 整式 `ok:false` ⇒ UNCOVERED（fail-closed），绝不静默当成"没有穿越"。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
+**求值契约**：`evalWhen(expr, ctx) → {ok:true, value:boolean} | {ok:false, reason}`。返回 `ok:false` 时**记为 UNCOVERED 并告警，绝不静默当作 false**；同一优先级的任一适用条件求值失败/`forbidden` 时，整组必须先返回 UNCOVERED，不得被后面一条可求值的 true 条件覆盖。**触发语义（已决，§12.1 #23）**：每根已收盘 bar 求值一次，`fired` 去重键含 `barTs` ⇒ **条件持续为真时每根 bar 都会触发（电平）**。**边沿表达**：`crossAbove`/`crossBelow` 已实现（2026-09-17，§12.2 I）—— 它们是**特殊形式**，求值器会把两个参数表达式分别在**当前**与**前一根**上下文里各求一次再判穿越（`crossAbove` = 前 `a<=b` 且当前 `a>b`）；缺前值（回放第一根、指标暖机、未注入 previous）⇒ 整式 `ok:false` ⇒ UNCOVERED（fail-closed），绝不静默当成"没有穿越"。解析与求值实现为零依赖纯函数，单测覆盖每个算子与每个错误分支（P0 门禁：表达式编译成功率 100%）。
 
 ### 3.3 动作词汇表（封闭枚举，`then.action`）
 
@@ -327,7 +328,7 @@ CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT N
 
 | 数据 | P0/P1 | P2 |
 |---|---|---|
-| 行情 K 线 | **v0 = CCXT REST 轮询**（免费 `ccxt` 没有 WS OHLCV，见 §12 #15）+ `fetchOHLCV` 分页回补；**必须注入代理感知的 fetch**（§12 #14） | CCXT Pro WS（主）+ OKX 交叉校验 |
+| 行情 K 线 | **v0 = CCXT REST 轮询**（免费 `ccxt` 没有 WS OHLCV，见 §12 #15）+ `fetchOHLCV` 分页回补；**必须注入代理感知的 fetch**（§12 #14）；轮询必须 single-flight，且必须等待该 bar 的机械执行完成再处理下一根 | CCXT Pro WS（主）+ OKX 交叉校验 |
 | 资金费率 / OI | CCXT REST/WS（HTX、OKX） | — |
 | 清算流 | 启动按 `has`/`features` 探测；**不可用即标记该特征不可用，不伪造** | 换源补齐 |
 | **事件概率（预测市场）** | **Polymarket 只读**：Gamma（发现/元数据）+ CLOB（盘口/价格）+ Data API v2（历史序列）；默认 60s 轮询，WSS 作为可用时的增强 | 鲸鱼集中度/持仓（Data API v2）、结算链上事件 |
@@ -438,6 +439,21 @@ M3 记忆块：`id/label/value/limit/description`；接近上限**先摘要再�
 结算：决策落地写 `reflection_due_at = now + horizon`（4h/24h 按策略），基准用 **BTC/ETH**；独立 `SettlementScheduler` 扫描**全部** pending；按**交易级**净额（实际仓位、扣手续费/滑点/资金费）算净收益、alpha、MFE/MAE、是否触发止损。
 **复盘瞄准执行而非预测**：主指标是"计划 vs 实际"的偏离（承诺是否被忠实执行、W2 频率、有无窗口外即兴、止损是否守住），预测类结论必须攒够样本；复盘产出**只能提案**，不得自动改策略参数。
 
+### 5.4 判断协作协议 `[定]`
+
+TradingAgents 提供了“专业分工 + 多空辩论 + 最终裁决”的组织原型，但论文没有单 agent / 无辩论 / 无风控团队的消融，不能把角色数量当成已证实的 alpha 来源。本项目保留有工程价值的分工，并把模型自由度收敛到可验证工件：
+
+1. **冻结输入**：每轮只有一份 `JudgmentPack`，所有角色必须回显同一 `contextHash`。
+2. **分析师只提证据**：输出 `EvidenceReport`，其中数字键必须是 pack 中的规范路径，数值必须与 pack 严格一致；每条 claim 分为 `observation|inference|assumption`，并列出 `evidencePaths`。
+3. **代码验证证据账本**：未知路径、数值不一致、非有限数、claim 无证据引用均记入 `evidenceIssues`；该报告不进入辩论，缺口原样传给裁决者。
+4. **有限反方审议**：Bull/Bear 只能引用已验证 `evidencePaths`，每条论点必须写 `invalidatedBy`；最多 2 轮，任一方让步即停。
+5. **单一风险批评者**：删除 aggressive/neutral/conservative 三人格辩论。`RiskCritic` 只产出 `proceed|revise|no_trade`、带证据路径的失败模式和缺失证据；它不定仓位、不改限额、不为任何方辩护。
+6. **唯一裁决者，但模型不直接成交**：judge 只能提交 `trade_plan_card`、记录 `NO_TRADE/REVIEW`、登记只读关注或执行降险撤单；`trade_execute_order` 从模型工具面移除，真正下单只由计划卡命中后的确定性执行内核产生。
+7. **权限必须在运行时生效**：`ROLE_SPECS` 不是文档；`create/resume` 真实 agent 时必须调用 `agentCtx.tools.restrict(...)`，只读角色的可见工具集中不得出现任何 `SIDE_EFFECT_TOOLS`。
+8. **生产只跑固化 workflow**：实现 `trade_workflow_run(symbol,timeframe)`，工具内部从同一 `TradePorts` 组装 pack，只运行版本化的 `buildJudgmentWorkflowScript()`；模型不能提交/修改编排脚本。desk judge 持久受角色白名单约束，每个 workflow child 又在 `subagents.start` 时显式使用 `toolFilter:{allow:[]}`；返回证据工件后由 judge 单独提交计划卡或 `NO_TRADE/REVIEW`。
+
+此协议的目标不是让多个模型“投票”，而是把**证据提取、反例搜索、风险批评、最终承诺**分成责任清晰的阶段；任何不可验证的中间产物只能导向 `NO_TRADE/REVIEW`，不能增加执行权。
+
 ---
 
 ## 6. 执行、风控与安全
@@ -450,6 +466,8 @@ M3 记忆块：`id/label/value/limit/description`；接近上限**先摘要再�
 | `live_confirm` | 实时 | 测试网/小额实盘 | 每单 `ask`（可选过渡档） |
 | `live_auto` | 实时 | 实盘 | **无（目标档位）** |
 
+**实现边界**：`live_confirm` 的目标语义仍是逐单结构化 `ask`，但当前 DSH 确认通道未接入执行组合根。为避免“名义上人工确认、实际自动下单”，一旦 `reconcileEnabled=true`/`createExecRuntime()` 要创建真实 runtime，必须同步 fail-closed 拒绝 `live_confirm`；只读预检仍可独立运行。只有结构化确认 token 能被每条真实下单路径在 broker 前验证时，才能解除该拒绝。
+
 **`REVIEW` 在 `live_auto` 下不得阻塞**：记录决策 + P1 告警 + **不产生任何新动作**（已有保护单保持不动），**不等待人类**；在 `live_confirm` 下转为 `ask`。若 7 天滚动 REVIEW 率 > 30%，视为提示词/工具/计划质量的缺陷，**暂停新开仓**直到处理。`NO_TRADE` = 明确不动，仅 info 级记录。
 
 ### 6.2 硬闸 `[定]`
@@ -459,6 +477,7 @@ M3 记忆块：`id/label/value/limit/description`；接近上限**先摘要再�
 ```
 validateIntent(intent, portfolio, config):
   mode != paper 而 venue == paper            → deny
+  heartbeat.halted && !reduceOnly              → deny
   不在交易窗口（宏观事件前后 N 分钟）          → deny
   |newNotional| > perOrderCapUsd             → deny
   |totalExposure| > maxExposureUsd           → deny
@@ -474,6 +493,7 @@ validateIntent(intent, portfolio, config):
 - **只读结构化字段**：理由文本永不参与判定。
 - **宏观事件窗口当前不是硬闸**（§12.1 #22）：`tradingWindowOpen` 可选，未传即不拦截；宏观风险写进 `news` 分析师提示词（软判断，主动权在 agent），不做"禁止开仓"式规定。
 - **点两项实现 + 单测**：`tools/pre-execute` 全局监听（deny）+ 每个交易工具内部二次校验。
+- 挂单数、撤单与对账必须使用同一份“普通单 + 算法保护单”合并视图；HTX 的 `stopLossTakeProfit`/`trigger`/`trailing` 不在普通 `fetchOpenOrders` 里。
 - **执行前重取状态**：所有交易工具先向交易所重拉账户/持仓/最新价，用实时状态重算，再执行或拒绝；下单前估算滑点与深度，超阈值即拒绝或降级限价。
 - `propose` 与 `execute` 分离；降级路径：私有接口连续失败 N 次 → **可平不可开** + 告警。
 
@@ -485,11 +505,13 @@ validateIntent(intent, portfolio, config):
 2. 否则必须有独立 watchdog（独立 systemd unit 或 cron 调 `dsh --profile trade-headless "healthcheck"`），读 `heartbeat` 表，`now - beat_at > 3×interval` → 置 `halted` + `cancelAll()` + 告警。watchdog 用最小独立客户端，不复用主进程代码。
 3. 恢复必须人工（`/resume`）。
 
+`heartbeat.halted` 是持久化的组合级硬闸：执行组合根每次下单前动态读取，halted 时把全部配置标的纳入 `frozenSymbols`，只拦新增敞口，reduce/close 仍可执行。`/halt` 在命令执行时才解析最新 broker（不在插件 apply 时捕获空值）并撤单；`/resume` 只解除 heartbeat 层，不得清除对账/恢复产生的标的冻结。
+
 **HTX 保护单窗口**：不支持原子括号单 ⇒ 入场成交后**立即**挂 `stopLossPrice`/`takeProfitPrice`（`reduceOnly: true`）；挂失败即降级（平仓或冻结）；"有持仓无保护单"是对账 P0 不一致。
 
 ### 6.4 权限与密钥 `[定]`
 
-- 工具白名单：分析师只读（`trade_market`/`trade_derivatives`/`trade_news`/`trade_onchain`/`trade_predictions`）；研究与辩论加 `trade_recall`/`trade_regime`；交易员 `trade_portfolio`/`trade_propose_order`/`trade_order_status`；风控 `trade_risk_check`/`trade_stress_test`/`trade_limits`（不能下单）；裁决 `trade_execute_order`/`trade_cancel`/`trade_record_decision`/`trade_workflow_run`/`trade_prediction_watch`；元循环 `trade_review`/`trade_playbook_update`（人审后生效）。
+- 工具白名单：分析师只读（`trade_market`/`trade_derivatives`/`trade_news`/`trade_onchain`/`trade_predictions`）；研究与辩论加 `trade_recall`/`trade_regime`；交易员只能提议（`trade_portfolio`/`trade_propose_order`/`trade_order_status`）；风险批评者 `trade_risk_check`/`trade_stress_test`/`trade_limits`（不能下单）；裁决者可写 `trade_plan_card`/`trade_record_decision`/`trade_prediction_watch`，并可用 `trade_cancel` 降险，**不持有 `trade_execute_order`**；元循环 `trade_review`/`trade_playbook_update`（人审后生效）。
 - **预测市场只有只读工具 + 关注登记工具**：`trade_predictions` 只读（分析师可用），`trade_prediction_watch` 有副作用（登记/取消关注）⇒ 只给裁决者；**没有任何 pm 下单工具**（§4.4 红线 1）。
 - 用 `agentCtx.tools.restrict({allow, deny})` 按角色收窄；**desk agent 工具目标 ≤ 20**；窗口内**不增删工具**（要收窄用约束，不改工具集）。
 - 子 agent 一律剥夺副作用能力（`deny: ['trade_execute_order','trade_cancel', …]`），**能下单的工具只注册给裁决者**。
@@ -584,7 +606,7 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
 ```
 
 > T1.1–T1.11 均已落地，目录与上表一致（`journal` 落在 `exec/`，因为它是执行链的账本）。
-> T2.1–T2.6 新增 `exec/ccxt-broker.ts`（注入 exchange 的真实 Broker）、`exec/sim-exchange.ts`
+> T2.1–T2.9 新增 `exec/ccxt-broker.ts`（注入 exchange 的真实 Broker）、`exec/sim-exchange.ts`
 > （**仅为验收/单测**的跨进程持久化模拟 venue，不是生产 venue）、`market/derivatives.ts`、
 > `market/regime.ts`、`supervisor/{heartbeat,watchdog}.ts`。
 > `predictions/watch.ts` 未单独成文件：watch 治理落在 `store.ts`（写入侧强制），
@@ -626,7 +648,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 ## 10. 路线图与量化验收
 
 原文档的"显著优于 / 曲线平稳 / 连续 N 天"不可自动判定；下面全部改成可计算的判据。
-**状态截至 2026-09-15：P0 ✅、P1 ✅、P1.5 闸门 ✅（可运行判定已产出，判定为"关闭 W2/W3"）、P2 ✅（T2.1–T2.6 代码落地，§10 P2 ①–④ 由持久化模拟 venue 验证；真实 HTX 只读对账待 §12.2 A 的凭据）。**
+**状态截至 2026-09-17：P0 ✅、P1 ✅、P1.5 闸门 ✅（可运行判定已产出，判定为"关闭 W2/W3"）、P2 ✅（T2.1–T2.9 代码落地，§10 P2 ①–④ 由持久化模拟 venue 验证；真 HTX 只读预检和独立最小额冒烟已完成，进 P3 前仍需“有持仓 + 算法保护单”的 merged 对账验证）。**
 
 | 阶段 | 状态 | 量化验收（可自动验证） |
 |---|---|---|
@@ -696,6 +718,9 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T2.4 | ✅ | 内核指标补全：`adx14` + `funding.rate` + `oi.changePct` + `liq.notional` + `basis.bps`（§12 #16） | 增量=全量逐点相等（ADX 对拍 92 个有效样本）；单位口径各有测试；5 路径移入 `V0_ALLOWED_PATHS` |
 | T2.5 | ✅ | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | 分位定义可复现（边界 0.33/0.67 归 mid）；样本 < 30 一律 `ok:false` |
 | T2.6 | ✅ | **§12 已决策待实现的小项**：`SUGGESTED_LIMITS`→`EXAMPLE_LIMITS` + 启动自洽校验（#17）；negRisk 偏差校验（#12）；`PriceTableStore.ageDays` + 90 天告警（#19）；结算视界按 tf 推导 + `Reflector` 绑 quick tier（#18）；`PROMPT_VERSION` 并入 C1 哈希（#5） | 每项一个单测；#17 有"不自洽即拒启动"的断言 |
+| T2.7 | ✅ | §5.4 结构化证据账本 + 单一 `RiskCritic` + judge 去直接下单权 | 伪造/未知路径报告不进辩论；所有论点/失败模式引用已验证路径；workflow 仅 1 个 risk 调用；judge 白名单无 `trade_execute_order` |
+| T2.8 | ✅ | 真实 agent 运行时权限收窄 | create/resume 都通过同一 `setupRoleToolRestriction(role, availableTools)` 安装 scoped `restrict`；测试捕获并执行两条 options 的 setup，断言只读角色不含副作用工具、judge 不含 `trade_execute_order` 且可见固化 `trade_workflow_run` |
+| T2.9 | ✅ | 固化 `trade_workflow_run` 生产接线 | 参数只有 symbol/tf，pack 由代码组装；脚本由代码固定/版本化；workflow child 零副作用工具；W1 notice 明确要求先跑 workflow 再裁决；真实 `ctx.subagents.start('spawn')` + 假 subagent/ports 单测证明 result 回到 judge；失败/结果均落审计 |
 | T3.* | ⏳ | 限额与告警打磨、`live_confirm` → `live_auto` | §10 P3 |
 | T4.* | ⏳ | 周级复盘、playbook 提案、regime 检索、M3 版本化 | §10 P4 |
 
@@ -731,21 +756,44 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 20 | 结算与反思的观测口径 | 结算结果必须同时报 `settled` / `deferred` / `deferredIds`；缺数据**推迟**并在下一轮重试，绝不写 `entry_price = 0` | 我们实际踩过：缺数据时写 0 会把"数据缺口"伪装成"零收益交易"，直接污染 alpha 与 lessons |
 | 21 | 机械执行与判断通道的记录一致性 | 机械执行路径**必须**登记 `reflection_due_at`（`{open, reduce, close}` 成交后）；`isTradeTrigger` 对 pm 信号写死 `false` | 实际踩过：机械路径不登记 ⇒ 反思闭环在回测里根本不跑，而"结算成功率 100%"是在 0 个样本上通过的 |
 | 22 | 宏观事件窗口是否做硬闸 | **不做硬闸（暂不启用）**。`GatePolicy.tradingWindowOpen` 改为**可选**，调用方不传 ⇒ 不拦截；宏观风险改为写进 `news` 分析师的提示词（"高影响宏观事件前后**更密切地评估风险**"），**不写"禁止开仓"这类禁令** —— 主动权留给 agent 与裁决者 | 目前**没有**宏观日历数据源（`trade_news` 未实现、pack 里没有日历条目），硬闸拿不到可靠输入，只能退化成恒真常量（审计 I5 认定的"看起来有"）。推翻条件：出现必须程序化避开宏观时点的需求，**且**有可靠日历源（人工 YAML 或供应商 API），届时按 §6.2 接入并补测试 |
-| 23 | 计划卡 `when` 的触发语义：edge vs 电平（审计 H） | **判为「电平」并改正文档**：每根已收盘 bar 求值一次，`fired` 键含 `barTs` —— 这正是 §3.5 伪代码的语义，`src/plan/match.ts` + `live-engine.#alreadyFired` 的实现与测试都按它，**代码不变**。§3.2 原写"默认 edge 触发"是**文档错误**，已改正 | 依据 §12 #4：改内核语义属"改宪法"级必须人审；edge-default 需要为每个条件**持久化 `last_value`**（否则重启后仍为真的条件会再触发一次），代价与风险都不小。**注意**：原打算"用 `cross*` 表达边沿"，但审计发现 `cross*` **从未实现**（§12.2 I），所以当前**没有办法**表达"只触发一次"——这一点必须让计划卡作者知道。**反向条件**：若复盘发现"本意只触发一次却被每根 bar 重复执行"（尤其 `open` 缺 `position.qty` 守卫时形成加仓），就按 §12.2 I 实现边沿表达 |
+| 23 | 计划卡 `when` 的触发语义：edge vs 电平（审计 H） | **判为「电平」并改正文档**：每根已收盘 bar 求值一次，`fired` 键含 `barTs` —— 这正是 §3.5 伪代码的语义，`src/plan/match.ts` + `live-engine.#alreadyFired` 的实现与测试都按它，**代码不变**。§3.2 原写"默认 edge 触发"是**文档错误**，已改正 | 依据 §12 #4：改内核语义属"改宪法"级必须人审；edge-default 需要为每个条件**持久化 `last_value`**（否则重启后仍为真的条件会再触发一次），代价与风险都不小。**注意**：需要边沿语义的计划卡必须显式使用 §12.2 I 的 `crossAbove`/`crossBelow`；普通条件仍是电平，不能把持续为真误写成边沿。**反向条件**：若复盘发现"本意只触发一次却被每根 bar 重复执行"，应补齐 `cross*` 的前值来源与缺值 fail-closed 验收，而不是修改默认触发语义 |
+| 24 | 紧急熔断的执行语义 | `heartbeat.halted` 必须动态并入硬闸，冻结全部配置标的的新增敞口；`/resume` 不清对账冻结 | 旧实现只写 heartbeat 表，下单路径从不读它，watchdog/人工 halt 后仍可开仓。回归测试钉住 open deny、reduceOnly allow 与晚到 broker 撤单 |
+| 25 | `live_confirm` 能力边界 | 在结构化逐单确认通道接入之前，创建执行 runtime 一律同步拒绝；只读预检可继续 | 审计确认旧实现没有 ask/token 验证，实际与 `live_auto` 等价。推翻条件：每条真实下单路径在 broker 前校验不可伪造、不可复用的确认 token，且拒绝也落审计 |
+| 26 | REST 行情并发语义 | `MarketFeed.pollOnce` 全入口 single-flight，`onClosedCandle` 必须等待机械执行完成 | 慢请求/慢 broker 时 interval 会重入，多根 bar 可同时用旧账户快照通过敞口硬闸。失败后 guard 必须可清理并允许下一轮 |
+| 27 | 条件失败与去重粒度 | 任一适用条件失败/forbidden 优先 UNCOVERED；规则去重键加 `timeframe` | 旧实现会被后续 true 条件覆盖失败，且同 rule/symbol/barTs 的 1h/4h 互相去重；两者都会把“未知/未处理”伪装成正常 |
+| 28 | HTX 算法单的统一视图 | 账户挂单数、对账、`cancelAll` 共用 merged open-orders；撤单用订单自身 symbol 并有界复核 | 普通 `fetchOpenOrders` 看不到 SL/TP，旧 `cancelAll` 会漏撤保护单，且多标的时曾错用首个 spread symbol |
+| 29 | TradingAgents 协作结构如何收敛 | 保留并行专业证据提取与有限 Bull/Bear 反方审议；三风险人格收窄为单一 `RiskCritic`，中间产物全部强类型并引用冻结 pack 路径 | TradingAgents 的完整系统回测优于规则基线，但没有角色/辩论消融；不为未证实的人格数量支付持续 token 和相关错误成本 |
+| 30 | 证据约束放在 prompt 还是代码 | **必须放代码**。`keyNumbers` 键即 pack 规范路径，数值严格对拍；claim/debate/risk 的 `evidencePaths` 只能引用已验证路径 | “只用 pack 数字”的提示词不是安全边界；失败必须可计算为 `evidenceIssues`，而不是依赖裁决者通读散文发现幻觉 |
+| 31 | 模型是否允许直接下单 | **不允许**。judge 产出计划卡/NO_TRADE/REVIEW，可撤单降险；增加敞口只由 plan DSL 命中后的确定性执行内核生成 | 这把 TradingAgents 的“Trader/Manager 提议并执行”分成可审计的判断面与执行面，同时从权限上消除 `trade_execute_order` 与机械执行语义漂移对真实资金的影响 |
+| 32 | 协作脚本由模型现写还是代码固化 | **代码固化**。模型只调 `trade_workflow_run(symbol,timeframe)`，不看也不传 script/pack/contextHash；固定入口用 `ctx.subagents.start('spawn')` 启动 one-shot child，显式传 `outputSchema`、`maxDepth=1`、`toolFilter:{allow:[]}`，并在每个 child 结束后 dispose | 生产协作图是安全协议，不是每轮都允许重写的 prompt 技巧；固化入口可保证同一 pack、子 agent 权限剔除、脚本版本与审计对得上。DSH 明确 child 不继承 parent restriction，因此零工具面必须每次 start 显式传入 |
 
 ### 12.2 待外部输入（不阻塞 P2 开工）
 
 | # | 事项 | 需要什么 | 现状与替代路径 |
 |---|---|---|---|
-| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已实测通过（2026-09-15）**：`node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs` → exit 0，私有端点认证成功、`executedActions=[]`（只读保证成立）。★ 实测坑：**HTX 现货与 USDT 永续是两个账户**，不指定 `accountType` 会读到现货的 0（"以为没钱"，会让 sizing 推出 qty=0）——修为 `accountType=swap` 后读到真实永续余额 **24.914 USDT**（无持仓无挂单）。该次"对账一致"是**平凡**的（两边都是 0），非空验证到的是只读链路可用。手册见 `docs/htx-credentials.md`，实测记录见 `docs/htx-preflight-2026-09-15.md`。**第②③步均已完成**（② `paper` 全链路见 `docs/paper-e2e-2026-09-16.md`；③ 真实首单见下）。★ **第③步（真实首单）已实测通过（2026-09-16）**：`node scripts/htx-live-smoke.mjs --execute ADA/USDT:USDT` → **18/18 步、exit 0**：市价开仓(filled) → 挂止损+止盈保护单 → getAccount/getPositions/getOpenOrders/按订单号查询 → 撤单(算法单)/cancelAll → reduceOnly 平仓 → 空仓；账户 0 持仓 0 挂单，5 轮往返成本 ≈0.0056 USDT。过程中修掉 4 个实盘缺陷（市价单成交不回填、算法保护单缺 `position_site`→`position_side`、算法单撤不掉、算法挂单看不见），记录 2 条**平台限制**：① HTX 不采用我们传的 `clientOrderId`（生成=订单号）⇒ 恢复对未 ack 意图只能 fail-closed 冻结；② ccxt HTX `fetchOpenOrders` 不返回算法单 ⇒ `getPositions().protectedStopPrice` 在 HTX 上看不到交易所侧保护单，对账"无保护单"会误报。★ **2026-09-17 复核：这条已升级为显式待办** —— 审计 I1 让"冻结"**真正生效**了，所以一旦误报，会直接冻结该标的、禁止新开仓。`CcxtBroker` 已有 `#fetchOpenOrdersMerged()` 去捞算法单，理论上应已缓解，但**从未在真 HTX 上验证过**；进入 P3 前必须用真 key 跑一次"**有持仓 + 已挂算法保护单**"的对账，确认 `protectedStopPrice` 能读到；读不到就补"本地保护单意图兜底"，否则 P3 会被自己的冻结机制卡死。证据见 `docs/htx-live-smoke-2026-09-16.md` |
-| B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 最小额 `live_confirm` 单笔核对。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
+| A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已实测通过（2026-09-15）**：`node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs` → exit 0，私有端点认证成功、`executedActions=[]`（只读保证成立）。★ 实测坑：**HTX 现货与 USDT 永续是两个账户**，不指定 `accountType` 会读到现货的 0（"以为没钱"，会让 sizing 推出 qty=0）——修为 `accountType=swap` 后读到真实永续余额 **24.914 USDT**（无持仓无挂单）。该次"对账一致"是**平凡**的（两边都是 0），非空验证到的是只读链路可用。手册见 `docs/htx-credentials.md`，实测记录见 `docs/htx-preflight-2026-09-15.md`。**第②步已完成；独立真实首单冒烟也已完成，但不代表 `live_confirm` 逐单 ask runtime 已实现（见 §12.1 #25）**（`paper` 全链路见 `docs/paper-e2e-2026-09-16.md`；真实首单见下）。★ **独立真实首单已实测通过（2026-09-16）**：`node scripts/htx-live-smoke.mjs --execute ADA/USDT:USDT` → **18/18 步、exit 0**：市价开仓(filled) → 挂止损+止盈保护单 → getAccount/getPositions/getOpenOrders/按订单号查询 → 撤单(算法单)/cancelAll → reduceOnly 平仓 → 空仓；账户 0 持仓 0 挂单，5 轮往返成本 ≈0.0056 USDT。过程中修掉 4 个实盘缺陷（市价单成交不回填、算法保护单缺 `position_site`→`position_side`、算法单撤不掉、算法挂单看不见），记录 2 条**平台限制**：① HTX 不采用我们传的 `clientOrderId`（生成=订单号）⇒ 恢复对未 ack 意图只能 fail-closed 冻结；② ccxt HTX `fetchOpenOrders` 不返回算法单 ⇒ `getPositions().protectedStopPrice` 在 HTX 上看不到交易所侧保护单，对账"无保护单"会误报。★ **2026-09-17 复核：这条已升级为显式待办** —— 审计 I1 让"冻结"**真正生效**了，所以一旦误报，会直接冻结该标的、禁止新开仓。`CcxtBroker` 已有 `#fetchOpenOrdersMerged()` 去捞算法单，理论上应已缓解，但**从未在真 HTX 上验证过**；进入 P3 前必须用真 key 跑一次"**有持仓 + 已挂算法保护单**"的对账，确认 `protectedStopPrice` 能读到；读不到就补"本地保护单意图兜底"，否则 P3 会被自己的冻结机制卡死。证据见 `docs/htx-live-smoke-2026-09-16.md` |
+| B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 独立最小额单笔冒烟；结构化 `live_confirm` 逐单核对待 §12.1 #25 关闭。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决**。★ **澄清（2026-09-17）**：**运行时的 desk 模型不需要单独的 key** —— 它走 DSH 当前提供方（`trade-supervisor.l3 = deepseek-official/deepseek-flash`）。C 只指**离线 A/B 脚本**的 B 臂；而 `scripts/ab-gate.mjs` 是独立 Node 进程，拿不到 DSH 的 provider 插拔，要么给它 env 凭据、要么把 A/B 判断臂放进 DSH 跑。**当前决定：不关 C** —— W2/W3 已按 P1.5 关闭，且 D 不解决就算不出结论（首轮 n=1） |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发。★ **决策（2026-09-17）：选 `--preset high-freq`，不选"拉长窗口"** —— 要凑到 bootstrap 可用的样本，拉长窗口约需 10× 时间跨度（≈2.5 年），且加密 regime 漂移会让跨年样本的可比性变差；高频 preset 现在就能出样本，而闸门要回答的是"**每笔交易**上判断通道有没有增量"，需要的是**成交笔数**而不是日历跨度。代价：preset 放宽了入场条件，结论只对该高频策略成立，不能直接搬到生产计划卡 —— 但这不影响闸门的用途（它测通道，不测策略赚钱能力）。**实现暂缓**：该脚本要真实行情+网络才能验证，不在无网环境盲改验收脚本 |
 | E | `live_auto` 授权 | 人工决定 + 额度 | **2026-09-15 用户明确授权**，以最小仓位（1×、单笔 ≤12 USDT、日亏 ≤1.25）arm 并完成首轮观测（W1→desk 回合→`no_trade`，**零下单**）。**会话结束已回退 `paper`**（本会话定位=开发/测试，避免误触真实下单）；重新 arm = 把 `trade-exec.mode` 改成 `live_auto`（一行）。证据见 `docs/live-cycle-2026-09-16.md` |
 | F | **desk agent 回合驱动** | ~~阻塞首单~~ **已关闭** | 根因：`ctx.agents.create` 缺 `meta.cwd` ⇒ 系统提示 persona-suffix 的 `{{cwd}}` 无值，回合在模型调用前抛错（6ms、零 `assistant/message`），错误被 agent-loop 的 `kick()` 吞掉。修法：create 传 `deskCwd`（默认 `process.cwd()`）+ 显式监听 `agent/error` 落审计。**实测修后**：`deskEvents` = `user/message → assistant/message×3–4 → tool/call×10–14 → tool/result → turn/end`，`idleMs≈10–13s`，落了 4 条 `no_trade` 决策（ADA/DOGE）；计划卡与下单取决于模型是否判出机会（commit `0b7b0e6`） |
 | G | 首轮监督实测抓到的真 bug | 记入本表与 commit | ① `/halt` 读未声明的 `ctx.tradePorts` ⇒ cordis 抛错、plugin tree 加载失败；② **W1 永不触发**：supervisor 每轮把扫描边界跟到 `now`，而 `everyMs` 从边界起算 ⇒ 游标必须在**触发后**推进到 `fireTs`；③ 永续 `amount`/`contracts` 是**张数**，必须按 `contractSize` 换算（BTC 差 1000×）；④ 行情失败被 `void error` 静默吞掉 |
-| H | 计划卡 `when` 的 edge vs 电平 语义 | ~~人工裁决~~ **已决（§12.1 #23）** | 判为「**电平**」：§3.2 的"默认 edge"是文档错误，已改正；实现（`src/plan/match.ts` 的 `planDedupKey` + `live-engine.#alreadyFired`，fired 键含 `barTs`）本就按 §3.5 的电平语义，**代码不变**。新增测试钉住"持续为真 ⇒ 每根 bar 各触发一次"。★ 连带发现：`crossAbove`/`crossBelow` **从未实现**（见 I），所以当前无法表达边沿。dedup 键用明文而非 `hash(...)` 只是形式差异，不构成缺陷 |
-| I | 表达式层**无法表达边沿**（`cross*` 未实现） | ~~人工决定方向~~ **已实现（2026-09-17）** | 按建议走 (a)：在 `src/plan/dsl.ts` 把 `crossAbove`/`crossBelow` 实现为**特殊形式**（`DslContext` 增加可选 `previous(path)`；求值器把参数表达式在当前与前一根上下文各求一次再判穿越）。`src/market/context.ts` 的 `createFeatureContext` 接受 `previous` 快照；`live-engine` 用 `barTs − timeframeMs(tf)` 取前一根归档特征，`replay` 按序保留上一根快照。缺前值 ⇒ UNCOVERED（fail-closed）。测试：`dsl.test.ts`（穿越/非穿越/相等/缺前值/参数个数）、`plan-match.test.ts`、`exec-live-engine.test.ts`（两根 bar 端到端）。**未选** (b) edge-default（需持久化每条件状态，且会改变所有现有条件的行为） |
+| H | 计划卡 `when` 的 edge vs 电平 语义 | ~~人工裁决~~ **已决（§12.1 #23）** | 判为「**电平**」：§3.2 的"默认 edge"是文档错误，已改正；实现（`src/plan/match.ts` 的 `planDedupKey` + `live-engine.#alreadyFired`，fired 键含 `barTs`）本就按 §3.5 的电平语义，**代码不变**。新增测试钉住"持续为真 ⇒ 每根 bar 各触发一次"。★ 历史审计曾发现 `crossAbove`/`crossBelow` 未实现；现已由 I 补齐。dedup 键用明文而非 `hash(...)` 只是形式差异，不构成缺陷 |
+| I | 表达式层边沿表达（`cross*`） | ~~人工决定方向~~ **已实现（2026-09-17）** | 按建议走 (a)：在 `src/plan/dsl.ts` 把 `crossAbove`/`crossBelow` 实现为**特殊形式**（`DslContext` 增加可选 `previous(path)`；求值器把参数表达式在当前与前一根上下文各求一次再判穿越）。`src/market/context.ts` 的 `createFeatureContext` 接受 `previous` 快照；`live-engine` 用 `barTs − timeframeMs(tf)` 取前一根归档特征，`replay` 按序保留上一根快照。缺前值 ⇒ UNCOVERED（fail-closed）。测试：`dsl.test.ts`（穿越/非穿越/相等/缺前值/参数个数）、`plan-match.test.ts`、`exec-live-engine.test.ts`（两根 bar 端到端）。**未选** (b) edge-default（需持久化每条件状态，且会改变所有现有条件的行为） |
+
+### 12.3 静态/动态审阅后的工程 backlog（不需外部输入）
+
+下列项目在本轮 Luna xhigh 分模块审阅中已找到可复现机制，但**本轮没有假装完成**。排序是下一批实现优先级：
+
+| 优先级 | 缺口 | 修改方案 / 验收 |
+|---|---|---|
+| P0 | `trade_execute_order` 与 `executeAction` 成交确认/保护单语义分叉；`acked` 超时可漏挂保护单，旧持仓非零还可被误认为本单成交 | 抽出唯一的“下单→成交归因→保护→结算”状态机；用下单前后 position delta + 订单查询归因，未知即冻结；HTX 风格 acked 回归必须证明零裸仓 |
+| P0 | resting limit open 后续成交时没有补挂保护单的常驻监控 | 完整方案是用户数据/对账状态机在 open→filled 时立即挂保护；接入前应禁止 limit open。验收 resting→filled→protective 非空全链路 |
+| P0 | watchdog 先 `cancelAll()` 再写 halted，撤单等待期仍可新开仓 | heartbeat 状态扩成 `halt_requested|halted`：先持久化冻结、再撤单，失败保持 fail-closed 且可重试；验收 cancel promise 未 resolve 时并发 open 必须 deny |
+| P1 | 显式 `set_stop/set_target/set_trailing` 在 broker 异常时已先记 executed，同一决策无法安全收敛 | 保护意图独立状态机；ack 前不记 executed，未知走查询/冻结，rejected/throw 必须落审计并验证幂等恢复 |
+| P1 | W1 一次扫到多个 fire 时，busy 分支只留痕不入队，cursor 已推进导致永久丢窗 | 增 pending queue，只在接受/完成后推进；fake clock 一次产生两个 fire，最终两个都必须执行 |
+| P1 | liquidation REST 重叠页重复累加；`FeatureEngine` 对同一 candle 重放不幂等/乱序无守卫 | 清算按事件 id/hash + 游标去重；特征层对 `(symbol,timeframe,openTime)` 做单调唯一守卫，重复返回同快照、乱序 fail-closed |
+| P2 | `p1-acceptance` 在0 条到期决策时仍计 100%；`live-paper-e2e` 只数 protective intent，不验 ack/实际保护 | 先断言分母/执行样本 > 0；每个 filled open 必须有 acked 保护或已确认 flat/frozen，否则验收失败 |
 
 ---
 
