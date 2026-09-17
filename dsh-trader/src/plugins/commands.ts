@@ -40,6 +40,8 @@ export function setCommandPort(port: CommandBrokerPort | undefined): void {
 export interface HaltHandlerDeps {
   readonly heartbeat: Pick<HeartbeatStore, 'halt'>
   readonly clock: Clock
+  /** 调用时解析，避免 apply 早于执行 runtime 时永久捕获 undefined。 */
+  readonly brokerProvider?: () => Pick<Broker, 'cancelAll'> | undefined
   readonly broker?: Pick<Broker, 'cancelAll'>
   readonly audit?: (event: HeartbeatAuditEvent) => void
 }
@@ -78,7 +80,11 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
       return { kind: 'error', text: failureText('无法持久化 halt 状态：', error) }
     }
 
-    if (deps.broker === undefined) {
+    // broker 必须在 halt 命令真正执行时解析：Cordis 插件 apply 顺序可能让
+    // commands 先注册、exec runtime 后就绪；提前捕获空值会导致本地已熔断却
+    // 永远不撤单，直到人工再次操作或外部 watchdog 介入。
+    const broker = deps.brokerProvider?.() ?? deps.broker
+    if (broker === undefined) {
       const auditError = auditFailure(deps.audit, {
         actor: 'human',
         kind: 'manual.halt',
@@ -95,7 +101,7 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
     }
 
     try {
-      await deps.broker.cancelAll()
+      await broker.cancelAll()
       const auditError = auditFailure(deps.audit, {
         actor: 'human',
         kind: 'manual.halt',
@@ -179,8 +185,14 @@ export function apply(ctx: Context): void {
     journal.appendAudit(event)
   }
   const clock = systemClock()
-  const broker = commandPort?.broker ?? brokerFromContext()
-  const halt = makeHaltHandler({ heartbeat, clock, ...(broker === undefined ? {} : { broker }), audit })
+  const halt = makeHaltHandler({
+    heartbeat,
+    clock,
+    // 不在 apply 时读取 broker；/halt 执行时再看最新的显式 commandPort 与
+    // exec 注册表，保证 runtime 晚到仍会完成 cancelAll。
+    brokerProvider: () => commandPort?.broker ?? brokerFromContext(),
+    audit,
+  })
   const resume = makeResumeHandler({ heartbeat, clock, audit })
 
   const commands = (ctx as CommandsContext).commands

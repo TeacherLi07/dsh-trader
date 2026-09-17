@@ -28,6 +28,7 @@ import {
 import type { ExecRuntimeConfig, ExecRuntimeDeps, TradePorts } from './ports.js'
 import { CrashRecovery, type ClientOrderLookup } from './recovery.js'
 import { SettlementScheduler } from '../memory/settle.js'
+import { HeartbeatStore } from '../supervisor/heartbeat.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx', 'okx']
@@ -59,6 +60,17 @@ export interface ExecRuntime {
   reconcileOnce(): Promise<ExecReconciliationReport>
   frozenSymbols(): ReadonlySet<string>
   dispose(): Promise<void>
+}
+
+export const LIVE_CONFIRM_UNSUPPORTED_REASON =
+  'live_confirm 拒绝启动：当前没有结构化逐单确认通道，禁止创建执行 runtime'
+
+/**
+ * live_confirm 不能仅靠日志降级：若继续创建真实 broker，调用者会误以为每单都
+ * 经过人工确认。插件入口和组合根都调用同一守卫，确保异步/直接调用两条路径一致。
+ */
+export function assertExecRuntimeMode(mode: ExecRuntimeConfig['mode']): void {
+  if (mode === 'live_confirm') throw new Error(LIVE_CONFIRM_UNSUPPORTED_REASON)
 }
 
 interface RiskOutcomeRow {
@@ -287,6 +299,9 @@ export async function createExecRuntime(
   config: ExecRuntimeConfig,
   deps: ExecRuntimeDeps,
 ): Promise<ExecRuntime> {
+  // 当前没有结构化的逐单人工确认通道；在任何 runtime 参数/交易所处理前失败，
+  // 不能把未确认的实盘执行伪装成安全过渡档。
+  assertExecRuntimeMode(config.mode)
   const limits = limitsFromConfig(config)
   validateConfig(config, limits)
 
@@ -295,6 +310,7 @@ export async function createExecRuntime(
   const plans = new PlanStore(deps.db)
   const journal = new DecisionJournal(deps.db)
   const local = new LocalStateReader(deps.db)
+  const heartbeat = new HeartbeatStore(new Statements(deps.db))
   const riskStateProvider = createRiskStateProvider(deps.db, deps.clock, journal)
   const acknowledgeOrphans = config.liveAckOrphans ?? config.acknowledgeOrphans ?? false
 
@@ -351,6 +367,17 @@ export async function createExecRuntime(
   // 于是"已冻结"的同时照常开仓（审计说冻结、行为没冻结）。
   const frozen = new Set<string>()
 
+  const frozenSymbols = (): ReadonlySet<string> => {
+    const current = new Set(frozen)
+    if (heartbeat.isHalted()) {
+      // halt 是组合级的死人开关，不只冻结触发故障的标的；否则其它配置标的
+      // 仍能增加敞口，/halt 的安全承诺会被分片绕过。每次读取数据库使得
+      // /resume 能立即解除这一层，而对账冻结仍保留在 `frozen` 中。
+      for (const symbol of config.symbols) current.add(symbol)
+    }
+    return current
+  }
+
   const ports: TradePorts = {
     db: deps.db,
     bars,
@@ -369,7 +396,7 @@ export async function createExecRuntime(
     ...(config.contextHash === undefined ? {} : { contextHash: config.contextHash }),
     ...(config.pm === undefined ? {} : { pm: config.pm }),
     ...(config.allowPmCommitment === undefined ? {} : { allowPmCommitment: config.allowPmCommitment }),
-    frozenSymbols: () => new Set(frozen),
+    frozenSymbols,
   }
 
   let disposed = false
@@ -584,7 +611,7 @@ export async function createExecRuntime(
     broker,
     getPorts: () => ports,
     reconcileOnce,
-    frozenSymbols: () => new Set(frozen),
+    frozenSymbols,
     async dispose() {
       if (disposed) return
       disposed = true

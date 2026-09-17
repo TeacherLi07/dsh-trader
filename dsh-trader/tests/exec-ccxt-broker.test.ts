@@ -31,6 +31,10 @@ class FakeExchange implements CcxtProExchangeLike {
   loads = 0
   sandbox = false
   fetchOrderCalls: { id: string; params?: Readonly<Record<string, unknown>> }[] = []
+  fetchOpenOrdersCalls: {
+    symbol?: string
+    params?: Readonly<Record<string, unknown>>
+  }[] = []
   fetchMyTradesCalls: { params?: Readonly<Record<string, unknown>> }[] = []
   createCalls: {
     symbol: string
@@ -41,12 +45,19 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>
   }[] = []
   cancelCalls: string[] = []
+  cancelOrderCalls: {
+    id: string
+    symbol?: string
+    params?: Readonly<Record<string, unknown>>
+  }[] = []
   balanceParams: (Readonly<Record<string, unknown>> | undefined)[] = []
   /** 默认空 = 现货语义（contractSize 视为 1）；永续测试自行注入 contractSize/precision。 */
   markets: Readonly<Record<string, CcxtMarketLike>> = {}
   balance: CcxtBalanceLike = { total: { USDT: '10000' } }
   positions: readonly CcxtPositionLike[] = []
   openOrders: CcxtOrderLike[] = []
+  /** HTX 算法挂单不出现在普通列表；按请求的 flag 提供独立返回，复现真实端点语义。 */
+  algorithmOrders: Partial<Record<'stopLossTakeProfit' | 'stopLoss' | 'takeProfit' | 'trigger' | 'trailing', readonly CcxtOrderLike[]>> = {}
   trades: readonly CcxtTradeLike[] = []
   directOrder: CcxtOrderLike | undefined
   ticker: CcxtTickerLike = { bid: 100, ask: 100.2 }
@@ -72,10 +83,18 @@ class FakeExchange implements CcxtProExchangeLike {
     return this.positions
   }
 
-  async fetchOpenOrders(symbol?: string): Promise<readonly CcxtOrderLike[]> {
+  async fetchOpenOrders(
+    symbol?: string,
+    _since?: number,
+    _limit?: number,
+    params?: Readonly<Record<string, unknown>>,
+  ): Promise<readonly CcxtOrderLike[]> {
+    this.fetchOpenOrdersCalls.push({ symbol, params })
+    const flag = Object.keys(params ?? {})[0] as keyof typeof this.algorithmOrders | undefined
+    const source = flag === undefined ? this.openOrders : this.algorithmOrders[flag] ?? []
     return symbol === undefined
-      ? this.openOrders
-      : this.openOrders.filter((order) => order.symbol === undefined || order.symbol === symbol)
+      ? source
+      : source.filter((order) => order.symbol === undefined || order.symbol === symbol)
   }
 
   async createOrder(
@@ -101,8 +120,18 @@ class FakeExchange implements CcxtProExchangeLike {
     return order
   }
 
-  async cancelOrder(id: string): Promise<void> {
+  async cancelOrder(
+    id: string,
+    symbol?: string,
+    params?: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
     this.cancelCalls.push(id)
+    this.cancelOrderCalls.push({ id, symbol, params })
+    this.openOrders = this.openOrders.filter((order) => order.id !== id)
+    for (const flag of ['stopLossTakeProfit', 'stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
+      const orders = this.algorithmOrders[flag]
+      if (orders !== undefined) this.algorithmOrders[flag] = orders.filter((order) => order.id !== id)
+    }
   }
 
   async fetchOrder(
@@ -330,6 +359,96 @@ describe('CcxtBroker', () => {
     await makeBroker(exchange).cancelAll(SYMBOL)
 
     expect(exchange.cancelCalls).toEqual(['open-1', 'open-2'])
+  })
+
+  it('counts algorithm-only protective orders in account openOrders', async () => {
+    const exchange = new FakeExchange()
+    const protective: CcxtOrderLike = {
+      id: 'algo-only-1',
+      clientOrderId: 'protect-1',
+      symbol: SYMBOL,
+      status: 'open',
+      type: 'stop',
+      reduceOnly: true,
+      stopPrice: 95,
+    }
+    exchange.algorithmOrders.stopLossTakeProfit = [protective]
+
+    const account = await makeBroker(exchange).getAccount()
+
+    expect(account.openOrders).toBe(1)
+    expect(exchange.fetchOpenOrdersCalls.some((call) => call.params?.['stopLossTakeProfit'] === true)).toBe(true)
+  })
+
+  it('cancelAll finds and cancels algorithm-only orders, then verifies no residue', async () => {
+    const exchange = new FakeExchange()
+    const protective: CcxtOrderLike = {
+      id: 'algo-only-1',
+      clientOrderId: 'protect-1',
+      symbol: SYMBOL,
+      status: 'open',
+      type: 'stop',
+      reduceOnly: true,
+      stopPrice: 95,
+    }
+    exchange.algorithmOrders.stopLossTakeProfit = [protective]
+
+    await makeBroker(exchange).cancelAll(SYMBOL)
+
+    expect(exchange.cancelCalls).toEqual(['algo-only-1'])
+    expect(exchange.cancelOrderCalls[0]).toMatchObject({ id: 'algo-only-1', symbol: SYMBOL })
+    expect((await makeBroker(exchange).getOpenOrders(SYMBOL)).length).toBe(0)
+  })
+
+  it('uses each order symbol when canceling all markets instead of spreadSymbol', async () => {
+    const exchange = new FakeExchange()
+    const ethSymbol = 'ETH/USDT:USDT'
+    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, status: 'open' }]
+
+    await makeBroker(exchange).cancelAll()
+
+    expect(exchange.cancelOrderCalls[0]).toMatchObject({ id: 'eth-order', symbol: ethSymbol })
+    expect(exchange.cancelOrderCalls[0]?.symbol).not.toBe(SYMBOL)
+  })
+
+  it('resolves the actual symbol for public cancelOrder when only exchange id is supplied', async () => {
+    const exchange = new FakeExchange()
+    const ethSymbol = 'ETH/USDT:USDT'
+    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, status: 'open' }]
+
+    await makeBroker(exchange).cancelOrder('eth-order')
+
+    expect(exchange.cancelOrderCalls[0]).toMatchObject({ id: 'eth-order', symbol: ethSymbol })
+    expect(exchange.cancelOrderCalls[0]?.symbol).not.toBe(SYMBOL)
+  })
+
+  it('does not invent spreadSymbol when public cancelOrder cannot resolve an order', async () => {
+    const exchange = new FakeExchange()
+
+    await makeBroker(exchange).cancelOrder('unknown-order')
+
+    expect(exchange.cancelOrderCalls[0]).toMatchObject({ id: 'unknown-order' })
+    expect(exchange.cancelOrderCalls[0]?.symbol).toBeUndefined()
+  })
+
+  it('deduplicates the same order returned by ordinary and algorithm endpoints', async () => {
+    const exchange = new FakeExchange()
+    const order: CcxtOrderLike = {
+      id: 'duplicate-1',
+      clientOrderId: 'protect-duplicate',
+      symbol: SYMBOL,
+      status: 'open',
+      type: 'stop',
+      reduceOnly: true,
+      stopPrice: 95,
+    }
+    exchange.openOrders = [order]
+    exchange.algorithmOrders.stopLossTakeProfit = [order]
+
+    const openOrders = await makeBroker(exchange).getOpenOrders(SYMBOL)
+
+    expect(openOrders).toHaveLength(1)
+    expect(openOrders[0]?.exchangeOrderId).toBe('duplicate-1')
   })
 
   it('sets sandbox without requiring a network call', () => {

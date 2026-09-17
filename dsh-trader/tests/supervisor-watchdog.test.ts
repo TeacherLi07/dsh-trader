@@ -291,6 +291,33 @@ describe('Reconciler', () => {
 })
 
 describe('halt/resume command handlers', () => {
+  it('在 handler 调用时读取晚到的 broker，而不是在注册时捕获空值', async () => {
+    const db = heartbeatDb()
+    try {
+      const heartbeat = new HeartbeatStore(new Statements(db))
+      const clock = new ReplayClock(START)
+      let currentBroker: { cancelAll: () => Promise<void> } | undefined
+      let cancelCalls = 0
+      const halt = makeHaltHandler({
+        heartbeat,
+        clock,
+        brokerProvider: () => currentBroker,
+      })
+
+      const beforeRuntime = await halt(noOpInvocation())
+      expect(beforeRuntime.kind).toBe('error')
+      expect(heartbeat.isHalted()).toBe(true)
+
+      // 模拟 exec runtime 在 commands 注册之后才就绪；下一次命令必须使用新 broker。
+      currentBroker = { cancelAll: async () => void cancelCalls++ }
+      const afterRuntime = await halt(noOpInvocation())
+      expect(afterRuntime.kind).toBe('success')
+      expect(cancelCalls).toBe(1)
+    } finally {
+      db.close()
+    }
+  })
+
   it('halts and cancels successfully, then resumes without trading actions', async () => {
     const db = heartbeatDb()
     try {

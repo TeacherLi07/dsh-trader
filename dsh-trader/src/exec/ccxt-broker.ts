@@ -471,7 +471,8 @@ export class CcxtBroker implements Broker {
     await this.#ensureMarketsLoaded()
     const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
     const positions = await this.#call(() => this.#exchange.fetchPositions())
-    const openOrders = await this.#call(() => this.#exchange.fetchOpenOrders())
+    // HTX 的保护单在算法端点，普通列表为空并不表示没有挂单；账户计数必须和对账/撤单使用同一合并视图。
+    const openOrders = await this.#fetchOpenOrdersMerged()
     const equity = quoteAmount(balance, this.#quoteCurrency)
     if (equity === undefined) {
       throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
@@ -614,6 +615,13 @@ export class CcxtBroker implements Broker {
 
   async cancelOrder(exchangeOrderId: string): Promise<void> {
     await this.#ensureMarketsLoaded()
+    // 公共 Broker 契约只有 exchangeOrderId。先从交易所返回的真实订单解析 symbol；解析失败时传 undefined，
+    // 让交易所自行按订单号定位或明确报错，不能把 spreadSymbol 当成未知订单的假 symbol。
+    const symbol = await this.#resolveCancelSymbol(exchangeOrderId)
+    await this.#cancelOrder(exchangeOrderId, symbol)
+  }
+
+  async #cancelOrder(exchangeOrderId: string, symbol: string | undefined): Promise<void> {
     // ★ HTX 的**算法单（sl/tp/trigger/trailing）**在普通撤单端点查不到（实测 `not.found`），
     // 必须带对应标志走 `v5/algo/cancel_orders`。逐个尝试，全 miss 才报错。
     const attempts: readonly CcxtParams[] = [
@@ -623,14 +631,23 @@ export class CcxtBroker implements Broker {
       { trailing: true },
     ]
     let lastError: unknown
+    let canceled = false
     for (const params of attempts) {
       try {
-        await this.#exchange.cancelOrder(exchangeOrderId, this.#spreadSymbol, params)
-        return
+        await this.#exchange.cancelOrder(exchangeOrderId, symbol, params)
+        canceled = true
+        break
       } catch (error) {
         lastError = error
         if (!lookupMiss(error)) throw this.#safeError(error)
       }
+    }
+    if (canceled) {
+      // 交易所撤单响应与查询通常是最终一致的；留出短暂窗口再复核，避免无等待查询造成假失败。
+      if (await this.#orderStillOpenAfterCancel(exchangeOrderId)) {
+        throw this.#safeError(new Error(`撤单成功响应后仍发现挂单 ${exchangeOrderId}`))
+      }
+      return
     }
     if (lastError === undefined) return
     // 全部尝试都"查不到"：说明这个 id 不属于本账户/本 venue，必须报错而不是静默成功。
@@ -639,14 +656,60 @@ export class CcxtBroker implements Broker {
 
   async cancelAll(symbol?: string): Promise<void> {
     await this.#ensureMarketsLoaded()
-    const orders = await this.#call(() => this.#exchange.fetchOpenOrders(symbol))
+    const orders = await this.#fetchOpenOrdersMerged(symbol)
     for (const order of orders) {
       const exchangeOrderId = exchangeOrderIdFrom(order)
       if (exchangeOrderId === undefined) {
         throw this.#safeError(new Error('挂单缺少 exchange order id，无法安全执行 cancelAll'))
       }
-      await this.cancelOrder(exchangeOrderId)
+      const orderSymbol = asString(order['symbol'])
+      if (orderSymbol === undefined) {
+        // 即使调用方传了 symbol，也不能把查询参数冒充成订单字段；未知标的撤单可能误伤另一市场。
+        throw this.#safeError(new Error(`挂单 ${exchangeOrderId} 缺少 symbol，无法安全执行 cancelAll`))
+      }
+      await this.#cancelOrder(exchangeOrderId, orderSymbol)
     }
+  }
+
+  async #resolveCancelSymbol(exchangeOrderId: string): Promise<string | undefined> {
+    if (this.#can('fetchOpenOrders')) {
+      const orders = await this.#fetchOpenOrdersMerged()
+      const matching = orders.find((order) => exchangeOrderIdFrom(order) === exchangeOrderId)
+      const symbol = matching === undefined ? undefined : asString(matching['symbol'])
+      if (symbol !== undefined) return symbol
+    }
+
+    // 某些交易所允许按 id 直接查询，且查询结果带真实 symbol；不带 symbol 试探失败时继续走无 symbol 的撤单，
+    // 不能回退到 spreadSymbol。ArgumentsRequired/未找到只代表无法解析，不应遮掉后续安全撤单策略。
+    if (this.#can('fetchOrder')) {
+      try {
+        const order = await this.#exchange.fetchOrder(exchangeOrderId)
+        if (order !== undefined && exchangeOrderIdFrom(order) === exchangeOrderId) {
+          return asString(order['symbol'])
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!lookupMiss(error) && !/argument|required|symbol/i.test(message)) {
+          throw this.#safeError(error)
+        }
+      }
+    }
+    return undefined
+  }
+
+  async #orderStillOpen(exchangeOrderId: string): Promise<boolean> {
+    if (!this.#can('fetchOpenOrders')) return false
+    const orders = await this.#fetchOpenOrdersMerged()
+    return orders.some((order) => exchangeOrderIdFrom(order) === exchangeOrderId)
+  }
+
+  async #orderStillOpenAfterCancel(exchangeOrderId: string): Promise<boolean> {
+    // HTX 算法端点存在短暂最终一致性；固定、有界重试足够覆盖常见延迟，又不会让撤单无限等待。
+    for (const delayMs of [25, 100, 250]) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+      if (!(await this.#orderStillOpen(exchangeOrderId))) return false
+    }
+    return true
   }
 
   subscribeUserData(_onEvent: (event: UserDataEvent) => void): () => void {
@@ -799,18 +862,33 @@ export class CcxtBroker implements Broker {
    */
   async #fetchOpenOrdersMerged(symbol?: string): Promise<readonly CcxtOrderLike[]> {
     const collected: CcxtOrderLike[] = []
-    const seen = new Set<string>()
+    const seenIds = new Set<string>()
+    const seenClientIds = new Set<string>()
+    const seenAnonymous = new Set<string>()
     const push = (orders: readonly CcxtOrderLike[]): void => {
       for (const order of orders) {
-        const key = exchangeOrderIdFrom(order) ?? clientOrderIdFrom(order) ?? JSON.stringify(order).slice(0, 60)
-        if (seen.has(key)) continue
-        seen.add(key)
+        const exchangeOrderId = exchangeOrderIdFrom(order)
+        const clientOrderId = clientOrderIdFrom(order)
+        // 同一订单可能同时出现在普通端点和算法端点；优先用任一稳定 id 去重，
+        // 不能只看 exchange id，否则某端点只回 client id 时会把同一张单计两次。
+        const anonymous = exchangeOrderId === undefined && clientOrderId === undefined
+          ? JSON.stringify(order).slice(0, 60)
+          : undefined
+        if (
+          (exchangeOrderId !== undefined && seenIds.has(exchangeOrderId)) ||
+          (clientOrderId !== undefined && seenClientIds.has(clientOrderId)) ||
+          (anonymous !== undefined && seenAnonymous.has(anonymous))
+        ) continue
+        if (exchangeOrderId !== undefined) seenIds.add(exchangeOrderId)
+        if (clientOrderId !== undefined) seenClientIds.add(clientOrderId)
+        if (anonymous !== undefined) seenAnonymous.add(anonymous)
         collected.push(order)
       }
     }
     push(await this.#call(() => this.#exchange.fetchOpenOrders(symbol)))
     if (this.venue === 'htx') {
-      for (const flag of ['stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
+      // ccxt/HTX 的 SL 与 TP 查询共用 stopLossTakeProfit；保留旧版分拆 flag 兼容精简 fake/其它适配器。
+      for (const flag of ['stopLossTakeProfit', 'stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
         try {
           const algo = await this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true })
           if (Array.isArray(algo)) push(algo)

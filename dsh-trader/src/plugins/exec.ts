@@ -19,7 +19,11 @@ import { applyProxyAwareFetch } from '../market/ccxt-source.js'
 import { CcxtBroker, type CcxtProExchangeLike } from '../exec/ccxt-broker.js'
 import { DecisionJournal } from '../exec/journal.js'
 import { LocalStateReader, runReadOnlyPreflight } from '../exec/preflight.js'
-import { createExecRuntime, type ExecRuntime } from '../exec/runtime.js'
+import {
+  assertExecRuntimeMode,
+  createExecRuntime,
+  type ExecRuntime,
+} from '../exec/runtime.js'
 import type { ExecRuntimeConfig, TradePorts } from '../exec/ports.js'
 
 export const name = 'trade-exec'
@@ -234,6 +238,13 @@ export function apply(ctx: Context, config: ExecConfig): void {
     `凭据状态：keyInjected=${String(status.keyInjected)} secretInjected=${String(status.secretInjected)} ` +
       `liveCapable=${String(status.liveCapable)} route=${status.route}（mode=${config.mode}）`,
   )
+
+  if (config.reconcileEnabled === true) {
+    // apply 内的 runtime 创建是异步的，单纯在 Promise catch 里记录日志会让
+    // profile 看似启动成功；当前没有逐单 ask 通道，live_confirm 必须在注册
+    // 任何执行 runtime 之前同步拒绝。只读预检不创建 runtime，仍可独立运行。
+    assertExecRuntimeMode(config.mode)
+  }
 
   // plan §12 #17：风控参数自洽校验。paper 模式权益已知 ⇒ **启动即校验，不自洽就拒绝启动**；
   // live 模式的权益要等首次 getAccount()，由 live-engine 做一次性校验并落审计。

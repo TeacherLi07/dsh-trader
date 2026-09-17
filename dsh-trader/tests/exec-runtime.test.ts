@@ -3,10 +3,14 @@ import { describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
 import { EXAMPLE_LIMITS } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
+import { Statements } from '../src/db/statements.js'
 import type { CcxtBalanceLike, CcxtOrderLike, CcxtPositionLike, CcxtProExchangeLike, CcxtTradeLike } from '../src/exec/ccxt-broker.js'
+import type { AccountSnapshot, OrderRequest } from '../src/exec/broker.js'
+import { validateIntent } from '../src/exec/gate.js'
 import { DecisionJournal } from '../src/exec/journal.js'
 import { createExecRuntime, createRiskStateProvider } from '../src/exec/runtime.js'
 import type { ExecRuntimeConfig } from '../src/exec/ports.js'
+import { HeartbeatStore } from '../src/supervisor/heartbeat.js'
 
 const NOW = 1_700_000_000_000
 const SYMBOL = 'BTC/USDT:USDT'
@@ -28,6 +32,7 @@ class FakeExchange implements CcxtProExchangeLike {
   positions: readonly CcxtPositionLike[] = []
   openOrders: readonly CcxtOrderLike[] = []
   trades: readonly CcxtTradeLike[] = []
+  createOrderCalls = 0
 
   async loadMarkets(): Promise<unknown> {
     this.loads += 1
@@ -62,6 +67,7 @@ class FakeExchange implements CcxtProExchangeLike {
     price?: number,
     params?: Readonly<Record<string, unknown>>,
   ): Promise<CcxtOrderLike> {
+    this.createOrderCalls += 1
     return {
       id: 'fake-order',
       clientOrderId: params?.['clientOrderId'],
@@ -162,7 +168,7 @@ describe('ExecRuntime 组合根', () => {
     const exchange = new FakeExchange()
     const live = await createExecRuntime(
       config({
-        mode: 'live_confirm',
+        mode: 'live_auto',
         venue: 'htx',
         apiKey: 'key',
         apiSecret: 'secret',
@@ -185,7 +191,7 @@ describe('ExecRuntime 组合根', () => {
     await live.dispose()
 
     const fallback = await createExecRuntime(
-      config({ mode: 'live_confirm', venue: 'htx', apiKey: undefined, apiSecret: undefined }),
+      config({ mode: 'live_auto', venue: 'htx', apiKey: undefined, apiSecret: undefined }),
       { db, clock },
     )
     expect(fallback.broker.venue).toBe('paper')
@@ -277,7 +283,7 @@ describe('ExecRuntime 组合根', () => {
     exchange.positions = [{ symbol: 'ETH/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
     const runtime = await createExecRuntime(
       config({
-        mode: 'live_confirm',
+        mode: 'live_auto',
         venue: 'htx',
         apiKey: 'key',
         apiSecret: 'secret',
@@ -295,5 +301,107 @@ describe('ExecRuntime 组合根', () => {
     expect(exchange.cancelCalls).toHaveLength(0)
     await runtime.dispose()
     db.close()
+  })
+
+  it('live_confirm 在构造 exchange 前 fail-closed，且不触达下单路由', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    let exchangeCalls = 0
+    try {
+      await expect(
+        createExecRuntime(
+          config({ mode: 'live_confirm', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+          {
+            db,
+            clock,
+            createExchange: () => {
+              exchangeCalls += 1
+              throw new Error('不应构造 exchange')
+            },
+          },
+        ),
+      ).rejects.toThrow('当前没有结构化逐单确认通道')
+      expect(exchangeCalls).toBe(0)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM order_intents').get()).toEqual({ n: 0 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it('heartbeat halt 动态冻结全部配置 symbol，resume 只解除心跳层并保留对账冻结', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const symbols = [SYMBOL, 'ETH/USDT:USDT']
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: 'DOGE/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
+    const runtime = await createExecRuntime(
+      config({
+        mode: 'live_auto',
+        venue: 'htx',
+        apiKey: 'key',
+        apiSecret: 'secret',
+        symbols,
+        benchmark: symbols[0] as string,
+      }),
+      { db, clock, createExchange: () => exchange },
+    )
+    try {
+      const heartbeat = new HeartbeatStore(new Statements(db))
+      const initial = runtime.frozenSymbols()
+      expect(initial.has(SYMBOL)).toBe(false)
+      expect(initial.has('ETH/USDT:USDT')).toBe(false)
+
+      heartbeat.halt(NOW + 1)
+      const halted = runtime.frozenSymbols()
+      expect(halted.has(SYMBOL)).toBe(true)
+      expect(halted.has('ETH/USDT:USDT')).toBe(true)
+
+      const account: AccountSnapshot = {
+        venue: 'htx',
+        equityQuote: 4_321,
+        totalExposureUsd: 0,
+        openOrders: 0,
+        leverage: 0,
+        dailyLossUsd: 0,
+        drawdownUsd: 0,
+        consecutiveLosses: 0,
+        spreadBps: 0,
+        observedAt: NOW + 1,
+      }
+      const openIntent: OrderRequest = {
+        intentId: 'halt-open',
+        clientOrderId: 'halt-open',
+        decisionId: 'halt-open',
+        symbol: SYMBOL,
+        type: 'market',
+        side: 'buy',
+        qty: 0.01,
+        notionalUsd: 10,
+        reduceOnly: false,
+      }
+      const policy = {
+        mode: 'live_auto' as const,
+        limits: EXAMPLE_LIMITS,
+        duplicateDecision: false,
+        paperVenue: 'paper' as const,
+        frozenSymbols: runtime.frozenSymbols(),
+      }
+      expect(validateIntent(openIntent, account, policy).kind).toBe('deny')
+      // gate 在下单前拒绝，交易所只发生了执行前的只读状态重取，不会触达 createOrder。
+      expect(exchange.createOrderCalls).toBe(0)
+      expect(validateIntent({ ...openIntent, reduceOnly: true }, account, policy)).toEqual({ kind: 'allow' })
+
+      await runtime.reconcileOnce()
+      expect(runtime.frozenSymbols().has('DOGE/USDT:USDT')).toBe(true)
+      heartbeat.resume(NOW + 2)
+      const resumed = runtime.frozenSymbols()
+      expect(resumed.has(SYMBOL)).toBe(false)
+      expect(resumed.has('ETH/USDT:USDT')).toBe(false)
+      // resume 不能抹掉对账发现的未知持仓冻结，避免人工恢复心跳掩盖状态不一致。
+      expect(resumed.has('DOGE/USDT:USDT')).toBe(true)
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
   })
 })
