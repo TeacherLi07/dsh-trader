@@ -27,3 +27,6 @@ coverage/
 #   pdfs are large binaries; TradingAgents is a third-party clone with its own .git
 research/pdfs/
 research/TradingAgents/
+
+# audit worktrees (local)
+.worktrees/
