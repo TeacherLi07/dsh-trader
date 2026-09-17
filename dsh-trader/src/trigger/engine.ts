@@ -76,9 +76,9 @@ export interface RuleFailure {
   readonly reason: string
 }
 
-/** 去重键：`ruleId|symbol|barTs`。plan §6.5 的 `hash(rule_id, symbol, bar_ts, 阈值桶)`。 */
-export function ruleDedupKey(ruleId: string, symbol: string, barTs: number): string {
-  return `${ruleId}|${symbol}|${barTs}`
+/** 去重键：`ruleId|symbol|timeframe|barTs`，避免不同时间框架相同 bar 时间互相吞掉。 */
+export function ruleDedupKey(ruleId: string, symbol: string, timeframe: string, barTs: number): string {
+  return `${ruleId}|${symbol}|${timeframe}|${barTs}`
 }
 
 export interface RuleEvaluationInput {
@@ -124,7 +124,7 @@ export function evaluateRules(input: RuleEvaluationInput): RuleEvaluation {
       barTs: input.barTs,
       severity: rule.severity ?? severityFor(rule.purpose),
       expression: rule.when,
-      dedupKey: ruleDedupKey(rule.id, input.symbol, input.barTs),
+      dedupKey: ruleDedupKey(rule.id, input.symbol, input.timeframe, input.barTs),
     })
   }
 

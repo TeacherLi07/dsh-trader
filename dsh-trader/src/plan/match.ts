@@ -67,6 +67,8 @@ export function matchPlan(input: MatchInput): MatchOutcome {
   const alreadyFired = input.alreadyFired ?? ((): boolean => false)
   const failures: { readonly id: string; readonly reason: string; readonly dedupKey: string }[] = []
 
+  let invalidationMatch: Extract<MatchOutcome, { kind: 'invalidation' }> | undefined
+
   // ── 1) 失效条件优先：论点被证伪 → 直接降险，不唤醒 LLM ──────────────────────
   for (const invalidation of plan.invalidation) {
     if (invalidation.tf !== timeframe) continue
@@ -81,7 +83,7 @@ export function matchPlan(input: MatchInput): MatchOutcome {
       failures.push({ id: invalidation.id, reason: 'forbidden_action', dedupKey })
       continue
     }
-    return {
+    invalidationMatch ??= {
       kind: 'invalidation',
       id: invalidation.id,
       action: invalidation.then,
@@ -102,10 +104,12 @@ export function matchPlan(input: MatchInput): MatchOutcome {
       dedupKey: firstInvalidationFailure.dedupKey,
     }
   }
+  if (invalidationMatch !== undefined) return invalidationMatch
 
   // ── 2) 承诺：按 seq 升序，命中即执行（零 token、零延迟）──────────────────────
   if (!plan.noTrade) {
     const ordered = [...plan.commitments].sort((a, b) => a.seq - b.seq)
+    let commitmentMatch: Extract<MatchOutcome, { kind: 'commitment' }> | undefined
     for (const commitment of ordered) {
       if (commitment.tf !== timeframe) continue
       const dedupKey = planDedupKey(plan.planId, commitment.id, plan.symbol, barTs)
@@ -119,7 +123,7 @@ export function matchPlan(input: MatchInput): MatchOutcome {
         failures.push({ id: commitment.id, reason: 'forbidden_action', dedupKey })
         continue
       }
-      return {
+      commitmentMatch ??= {
         kind: 'commitment',
         id: commitment.id,
         action: commitment.then,
@@ -127,6 +131,11 @@ export function matchPlan(input: MatchInput): MatchOutcome {
         dedupKey,
       }
     }
+    if (failures.length > 0) {
+      const first = failures[0]!
+      return { kind: 'uncovered', id: first.id, reason: first.reason, dedupKey: first.dedupKey }
+    }
+    if (commitmentMatch !== undefined) return commitmentMatch
   }
 
   // ── 3) 有任何求值失败 → UNCOVERED（fail-closed，绝不当作"没命中"）──────────

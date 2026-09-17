@@ -76,6 +76,11 @@ const MAX_RATE_LIMIT_RETRIES = 64
 
 export class MarketFeed {
   #attempts = new Map<string, number>()
+  /**
+   * 周期回调可能在上一轮 REST 请求尚未返回时再次到期；保留正在运行的 promise，
+   * 让所有入口共享同一轮，避免慢源导致并发请求和乱序写入。
+   */
+  #pollInFlight: Promise<PollResult> | undefined
 
   constructor(private readonly options: MarketFeedOptions) {}
 
@@ -97,7 +102,25 @@ export class MarketFeed {
   }
 
   /** 跑一轮：每个 symbol×timeframe 独立 try/catch，失败只计数不抛出。 */
-  async pollOnce(): Promise<PollResult> {
+  pollOnce(): Promise<PollResult> {
+    const inFlight = this.#pollInFlight
+    if (inFlight !== undefined) return inFlight
+
+    const poll = this.#pollOnce()
+    this.#pollInFlight = poll
+    // 两个分支都消费清理 promise；若内部出现未预期 reject，也不能制造新的 unhandled rejection。
+    void poll.then(
+      () => {
+        if (this.#pollInFlight === poll) this.#pollInFlight = undefined
+      },
+      () => {
+        if (this.#pollInFlight === poll) this.#pollInFlight = undefined
+      },
+    )
+    return poll
+  }
+
+  async #pollOnce(): Promise<PollResult> {
     const {
       source,
       archive,

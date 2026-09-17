@@ -58,6 +58,43 @@ describe('matchPlan', () => {
     expect(outcome).toMatchObject({ kind: 'invalidation', id: 'inv-1' })
   })
 
+  it('does not let a later true invalidation hide an earlier unevaluable condition', () => {
+    const plan = makeCard({
+      invalidation: [
+        { id: 'inv-missing', tf: '15m', when: 'adx14 > 25', then: { action: 'reduce', fraction: 0.5 } },
+        { id: 'inv-hit', tf: '15m', when: 'bar.close < 130', then: { action: 'reduce', fraction: 0.5 } },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 120 }),
+    })
+
+    expect(outcome).toMatchObject({ kind: 'uncovered', id: 'inv-missing' })
+  })
+
+  it('does not let a later true invalidation hide a forbidden action', () => {
+    const plan = makeCard({
+      forbidden: ['reduce'],
+      invalidation: [
+        { id: 'inv-forbidden', tf: '15m', when: 'bar.close < 130', then: { action: 'reduce', fraction: 0.5 } },
+        { id: 'inv-hit', tf: '15m', when: 'bar.close < 140', then: { action: 'close' } },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 120 }),
+    })
+
+    expect(outcome).toMatchObject({ kind: 'uncovered', id: 'inv-forbidden', reason: 'forbidden_action' })
+  })
+
   it('only evaluates conditions declared for the current timeframe', () => {
     const outcome = matchPlan({
       plan: makeCard(),
@@ -88,6 +125,45 @@ describe('matchPlan', () => {
       context: context({ 'bar.close': 120 }),
     })
     expect(outcome).toMatchObject({ kind: 'commitment', id: 'c-early' })
+  })
+
+  it('does not let a later true commitment hide an earlier unevaluable condition', () => {
+    const plan = makeCard({
+      invalidation: [],
+      commitments: [
+        { id: 'c-missing', seq: 1, tf: '15m', when: 'adx14 > 25', then: { action: 'reduce', fraction: 0.5 } },
+        { id: 'c-hit', seq: 2, tf: '15m', when: 'bar.close > 110', then: { action: 'reduce', fraction: 0.5 } },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 120 }),
+    })
+
+    expect(outcome).toMatchObject({ kind: 'uncovered', id: 'c-missing' })
+  })
+
+  it('does not let a later true commitment hide a forbidden action', () => {
+    const plan = makeCard({
+      invalidation: [],
+      forbidden: ['reduce'],
+      commitments: [
+        { id: 'c-forbidden', seq: 1, tf: '15m', when: 'bar.close > 110', then: { action: 'reduce', fraction: 0.5 } },
+        { id: 'c-hit', seq: 2, tf: '15m', when: 'bar.close > 100', then: { action: 'close' } },
+      ],
+    })
+    const outcome = matchPlan({
+      plan,
+      timeframe: '15m',
+      barTs: BAR_TS,
+      now: NOW,
+      context: context({ 'bar.close': 120 }),
+    })
+
+    expect(outcome).toMatchObject({ kind: 'uncovered', id: 'c-forbidden', reason: 'forbidden_action' })
   })
 
   it('skips conditions that already fired for this bar (per-bar dedup)', () => {

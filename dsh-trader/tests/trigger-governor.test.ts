@@ -57,8 +57,8 @@ describe('TriggerGovernor', () => {
 
     expect(outcome.decisions.map((decision) => decision.disposition.kind)).toEqual(['info', 'novelty'])
     expect(outcome.decisions.map((decision) => decision.severity)).toEqual(['P2', 'P1'])
-    expect(queue.get(`${'i'}|${SYMBOL}|${START}`)?.state).toBe('done')
-    expect(queue.get(`${'n'}|${SYMBOL}|${START}`)?.state).toBe('queued')
+    expect(queue.get(`${'i'}|${SYMBOL}|${TF}|${START}`)?.state).toBe('done')
+    expect(queue.get(`${'n'}|${SYMBOL}|${TF}|${START}`)?.state).toBe('queued')
     expect(queue.queuedCount()).toBe(1)
   })
 
@@ -73,7 +73,7 @@ describe('TriggerGovernor', () => {
     const second = watch.onBar({ symbol: SYMBOL, timeframe: TF, barTs: START + HOUR, context: ctx })
     expect(second.decisions[0]?.disposition).toEqual({ kind: 'cooldown', until: START + 10 * 60_000 })
     expect(second.decisions[0]?.persisted).toBe(true)
-    expect(queue.get(`n|${SYMBOL}|${START + HOUR}`)?.state).toBe('done')
+    expect(queue.get(`n|${SYMBOL}|${TF}|${START + HOUR}`)?.state).toBe('done')
   })
 
   it('enforces the W3 hourly cap and does not let suppressed attempts consume the budget', () => {

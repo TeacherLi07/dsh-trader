@@ -105,7 +105,7 @@ export function apply(ctx: Context, config: MarketConfig): void {
         archive: bars,
         clock: systemClock(),
         createExchange: () => new Exchange({ enableRateLimit: true }),
-        onClosedCandle: (candle) => {
+        onClosedCandle: async (candle) => {
           // T2.4 接线由调用方提供已经取样的 observation；此处不新增网络请求或墙钟读取。
           const snapshot = pipeline.onClosedCandle(candle, config.derivativesForCandle?.(candle))
           // 行情 → 特征 → 规则 → 触发；rules 插件未启用时静默跳过（不是错误）
@@ -141,23 +141,21 @@ export function apply(ctx: Context, config: MarketConfig): void {
             riskPct: ports.riskPct,
             ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols }),
           })
-          void liveEngine
-            .onClosedBar({
+          try {
+            const outcome = await liveEngine.onClosedBar({
               symbol: candle.symbol,
               timeframe: candle.timeframe,
               barTs: candle.openTime,
             })
-            .then((outcome) => {
-              if (outcome.kind === 'noop') return
-              logger.info(
-                `live-engine ${candle.symbol} ${candle.timeframe} ${candle.openTime}: ` +
-                  `${outcome.kind}${outcome.reason === undefined ? '' : `（${outcome.reason}）`}`,
-              )
-            })
-            .catch((error) => {
-              // 单根 bar 执行失败不得让行情循环崩溃；如实告警（审计优先，不擦掉失败）
-              logger.error(`live-engine 执行失败：${String(error)}`)
-            })
+            if (outcome.kind === 'noop') return
+            logger.info(
+              `live-engine ${candle.symbol} ${candle.timeframe} ${candle.openTime}: ` +
+                `${outcome.kind}${outcome.reason === undefined ? '' : `（${outcome.reason}）`}`,
+            )
+          } catch (error) {
+            // 单根 bar 执行失败不得让行情循环崩溃；如实告警（审计优先，不擦掉失败）
+            logger.error(`live-engine 执行失败：${String(error)}`)
+          }
         },
         onError: (error, info) => {
           // 数据源失败只跳过本轮，绝不让主循环崩溃（plan §4.3）——但**绝不静默**：

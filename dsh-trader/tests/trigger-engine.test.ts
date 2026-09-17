@@ -60,8 +60,29 @@ describe('evaluateRules', () => {
     expect(result.hits.map((hit) => hit.ruleId)).toEqual(['r1', 'r2'])
     expect(result.hits[0]?.severity).toBe('P2')
     expect(result.hits[1]?.severity).toBe('P1')
-    expect(result.hits[0]?.dedupKey).toBe(ruleDedupKey('r1', SYMBOL, NOW))
+    expect(result.hits[0]?.dedupKey).toBe(ruleDedupKey('r1', SYMBOL, TF, NOW))
     expect(result.failures).toEqual([])
+  })
+
+  it('includes timeframe so identical rule/symbol/bar timestamps do not cross-dedupe', () => {
+    const oneHour = evaluateRules({
+      rules: [rule()],
+      symbol: SYMBOL,
+      timeframe: '1h',
+      barTs: NOW,
+      context: context({ rsi14: 75 }),
+    }).hits[0]
+    const fourHour = evaluateRules({
+      rules: [rule()],
+      symbol: SYMBOL,
+      timeframe: '4h',
+      barTs: NOW,
+      context: context({ rsi14: 75 }),
+    }).hits[0]
+
+    expect(oneHour?.dedupKey).toBe(ruleDedupKey('r1', SYMBOL, '1h', NOW))
+    expect(fourHour?.dedupKey).toBe(ruleDedupKey('r1', SYMBOL, '4h', NOW))
+    expect(oneHour?.dedupKey).not.toBe(fourHour?.dedupKey)
   })
 
   it('skips rules bound to another symbol or timeframe', () => {

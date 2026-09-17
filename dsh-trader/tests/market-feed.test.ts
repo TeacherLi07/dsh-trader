@@ -158,6 +158,83 @@ describe('MarketFeed', () => {
     expect(clock.pendingTimers()).toBe(0)
   })
 
+  it('does not overlap periodic polls while the source is slow', async () => {
+    const clock = new ReplayClock(NOW)
+    let release: (() => void) | undefined
+    let fetchCalls = 0
+    const source: MarketDataSource = {
+      id: 'slow-source',
+      capabilities: { watchOHLCV: false },
+      async fetchOHLCV() {
+        fetchCalls += 1
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return series(NOW - HOUR, 1)
+      },
+    }
+    const feed = makeFeed(source, clock)
+    const stop = feed.start()
+
+    clock.advanceTo(NOW + 60_000)
+    clock.advanceTo(NOW + 3 * 60_000)
+    expect(fetchCalls).toBe(1)
+    expect(release).toBeDefined()
+
+    release?.()
+    await feed.pollOnce()
+    stop()
+  })
+
+  it('does not overlap periodic polls while a closed-candle callback is slow', async () => {
+    const clock = new ReplayClock(NOW)
+    let callbackRelease: (() => void) | undefined
+    let callbackCalls = 0
+    const source = new FakeSource({ pages: [series(NOW - HOUR, 1), series(NOW, 1)] })
+    const feed = makeFeed(source, clock, {
+      onClosedCandle: async () => {
+        callbackCalls += 1
+        await new Promise<void>((resolve) => {
+          callbackRelease = resolve
+        })
+      },
+    })
+    const stop = feed.start()
+
+    clock.advanceTo(NOW + 60_000)
+    await Promise.resolve()
+    expect(callbackCalls).toBe(1)
+    clock.advanceTo(NOW + 3 * 60_000)
+    expect(source.calls).toHaveLength(1)
+
+    callbackRelease?.()
+    await feed.pollOnce()
+    stop()
+  })
+
+  it('clears the single-flight guard when an unexpected poll error rejects', async () => {
+    const clock = new ReplayClock(NOW)
+    let calls = 0
+    const source: MarketDataSource = {
+      id: 'rejecting-source',
+      capabilities: { watchOHLCV: false },
+      async fetchOHLCV() {
+        calls += 1
+        if (calls === 1) throw new Error('unexpected poll failure')
+        return []
+      },
+    }
+    const feed = makeFeed(source, clock, {
+      onError: () => {
+        throw new Error('unexpected onError failure')
+      },
+    })
+
+    await expect(feed.pollOnce()).rejects.toThrow('unexpected onError failure')
+    await expect(feed.pollOnce()).resolves.toEqual({ fetched: 0, written: 0, emitted: 0, failures: 0 })
+    expect(calls).toBe(2)
+  })
+
   it('reports an unsupported timeframe instead of silently skipping', async () => {
     const clock = new ReplayClock(NOW)
     const source = new FakeSource({ pages: [] })
