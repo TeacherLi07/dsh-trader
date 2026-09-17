@@ -82,7 +82,7 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
 
     // broker 必须在 halt 命令真正执行时解析：Cordis 插件 apply 顺序可能让
     // commands 先注册、exec runtime 后就绪；提前捕获空值会导致本地已熔断却
-    // 永远不撤单，直到人工再次操作或外部 watchdog 介入。
+    // 永远不撤单，直到人工再次操作；当前 Docker 单进程没有外部 watchdog 兜底。
     const broker = deps.brokerProvider?.() ?? deps.broker
     if (broker === undefined) {
       const auditError = auditFailure(deps.audit, {
@@ -96,7 +96,7 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
       }
       return {
         kind: 'error',
-        text: '已暂停交易；撤单未执行，需外部 watchdog 兜底。',
+        text: '已暂停交易；撤单未执行，需人工核对交易所挂单后再决定是否恢复。',
       }
     }
 
@@ -128,7 +128,7 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
           '已暂停交易，但撤单失败：' +
           String(error) +
           (auditError === undefined ? '' : '；审计写入失败：' + auditError) +
-          '；需外部 watchdog 兜底。',
+          '；需人工核对交易所挂单，保持 halted。',
       }
     }
   }

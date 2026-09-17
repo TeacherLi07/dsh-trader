@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
- * P2 ③ watchdog 验收：子进程真正 SIGSTOP 后，独立进程使用同一 SQLite 库撤销持仓挂单。
+ * 历史 P2 ③ watchdog 验收脚本（当前硬禁用）。
  *
- * 用法：pnpm build && node scripts/watchdog-check.mjs [outPath]
- * 这里不使用主循环或内存 broker；挂单状态放在 JSON 文件中，便于证明撤单动作跨进程可见。
+ * 旧 JSON 证据保留在 docs/；当前 Docker 单进程不再执行 SIGSTOP → 外部撤单验收。
  */
 
 import { spawn } from 'node:child_process'
@@ -15,9 +14,27 @@ import { ReplayClock } from '../lib/clock.js'
 import { migrate } from '../lib/db/schema.js'
 import { Statements } from '../lib/db/statements.js'
 import { HeartbeatStore } from '../lib/supervisor/heartbeat.js'
-import { ExternalWatchdog, watchdogDecision } from '../lib/supervisor/watchdog.js'
+import {
+  ExternalWatchdog,
+  WATCHDOG_DISABLED_REASON,
+  WATCHDOG_ENABLED,
+  watchdogDecision,
+} from '../lib/supervisor/watchdog.js'
 
 const OUT = process.argv[2]
+
+if (!WATCHDOG_ENABLED) {
+  const report = {
+    disabled: true,
+    watchdogEnabled: false,
+    reason: WATCHDOG_DISABLED_REASON,
+    allPassed: false,
+  }
+  console.log(JSON.stringify(report, null, 2))
+  if (OUT !== undefined) writeFileSync(OUT, JSON.stringify(report, null, 2), 'utf8')
+  process.exit(78)
+}
+
 const dir = mkdtempSync(join(tmpdir(), 'dsh-watchdog-'))
 const dbPath = join(dir, 'watchdog.db')
 const ordersPath = join(dir, 'open-orders.json')

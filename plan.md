@@ -497,15 +497,21 @@ validateIntent(intent, portfolio, config):
 - **执行前重取状态**：所有交易工具先向交易所重拉账户/持仓/最新价，用实时状态重算，再执行或拒绝；下单前估算滑点与深度，超阈值即拒绝或降级限价。
 - `propose` 与 `execute` 分离；降级路径：私有接口连续失败 N 次 → **可平不可开** + 告警。
 
-### 6.3 心跳与死人开关 `[定]`（修正原设计）
+### 6.3 Docker 单进程、心跳与启动恢复 `[定]`
 
-进程内 `HeartbeatGuard` 只负责**写心跳**与检测内部卡死；**进程死亡时它自己也死了**，因此真正的撤单动作必须由**进程外**执行：
+生产部署只有一个交易进程：Docker 以 dsh 为主进程并负责 restart policy。dsh 退出后不保留任何
+独立交易/撤单进程；**不启用外部 watchdog，也不把 `heartbeat` stale 判定当作撤单触发器**。
+心跳只用于运行状态、熔断状态和 UI/审计可观测性。
 
-1. 交易所若原生支持 dead-man/cancel-on-timeout → 优先用。
-2. 否则必须有独立 watchdog（独立 systemd unit 或 cron 调 `dsh --profile trade-headless "healthcheck"`），读 `heartbeat` 表，`now - beat_at > 3×interval` → 置 `halted` + `cancelAll()` + 告警。watchdog 用最小独立客户端，不复用主进程代码。
-3. 恢复必须人工（`/resume`）。
+每次容器重启都必须按固定顺序收敛状态：
 
-`heartbeat.halted` 是持久化的组合级硬闸：执行组合根每次下单前动态读取，halted 时把全部配置标的纳入 `frozenSymbols`，只拦新增敞口，reduce/close 仍可执行。`/halt` 在命令执行时才解析最新 broker（不在插件 apply 时捕获空值）并撤单；`/resume` 只解除 heartbeat 层，不得清除对账/恢复产生的标的冻结。
+1. 打开并迁移 SQLite，恢复持久化调度/熔断游标；
+2. 只读重取交易所账户、持仓、普通单与算法保护单；
+3. 先运行 `CrashRecovery`：查询 `created` 且无 ack 的在途意图，能确认则推进状态，不能确认则标 `unknown` 并冻结标的；
+4. 再运行普通 `reconcile`：处理孤儿单、未知持仓、数量不一致和无保护单；任一状态未知都 fail-closed；
+5. 只有恢复/对账完成后才注册周期任务。恢复失败不阻断容器启动，但必须审计并冻结全部配置标的。
+
+`heartbeat.halted` 是持久化的组合级硬闸：执行组合根每次下单前动态读取，halted 时把全部配置标的纳入 `frozenSymbols`，只拦新增敞口，reduce/close 仍可执行。`/halt` 在命令执行时才解析最新 broker（不在插件 apply 时捕获空值）并撤单；撤单失败时保持 halted，由人工核对交易所状态。`/resume` 只解除 heartbeat 层，不得清除对账/恢复产生的标的冻结。
 
 **HTX 保护单窗口**：不支持原子括号单 ⇒ 入场成交后**立即**挂 `stopLossPrice`/`takeProfitPrice`（`reduceOnly: true`）；挂失败即降级（平仓或冻结）；"有持仓无保护单"是对账 P0 不一致。
 
@@ -515,7 +521,7 @@ validateIntent(intent, portfolio, config):
 - **预测市场只有只读工具 + 关注登记工具**：`trade_predictions` 只读（分析师可用），`trade_prediction_watch` 有副作用（登记/取消关注）⇒ 只给裁决者；**没有任何 pm 下单工具**（§4.4 红线 1）。
 - 用 `agentCtx.tools.restrict({allow, deny})` 按角色收窄；**desk agent 工具目标 ≤ 20**；窗口内**不增删工具**（要收窄用约束，不改工具集）。
 - 子 agent 一律剥夺副作用能力（`deny: ['trade_execute_order','trade_cancel', …]`），**能下单的工具只注册给裁决者**。
-- 密钥：systemd `EnvironmentFile=%h/.dsh/trading.env`（`0600`，不入仓库），patch 里用 `!!js process.env.*` 引用；插件**不打印密钥**；实盘 key 只开交易权限、**禁用提现**；`paper` 与 `live` 用不同 profile。凭据机制（`dsh-credentials-local`）作为后续收敛方向，`[开]` 见 §12。
+- 密钥：Docker secret/env-file（`0600`，不入仓库），patch 里用 `!!js process.env.*` 引用；插件**不打印密钥**；实盘 key 只开交易权限、**禁用提现**；`paper` 与 `live` 用不同 profile。凭据机制（`dsh-credentials-local`）作为后续收敛方向，`[开]` 见 §12。
 
 ---
 
@@ -601,14 +607,14 @@ DeepSeek 缓存默认开启、自动命中，**不做缓存调优**。但预算�
         ├── memory/{recall,settle}.ts                      # ★ 教训检索（TTL 执行）+ 交易级结算
         ├── exec/{broker,paper,gate,sizing,journal,reconcile,replay,recovery,ccxt-broker,sim-exchange}.ts
         ├── agents/{types,pack,prompts,workflow,roles,tools}.ts
-        ├── supervisor/{metrics,desk,heartbeat,watchdog}.ts  # desk 属 P4；heartbeat/外部 watchdog 见 T2.2
+        ├── supervisor/{metrics,desk,heartbeat,watchdog}.ts  # desk 属 P4；watchdog 仅保留历史兼容代码
         └── plugins/{db,market,predictions,rules,exec,supervisor,tools-desk,tools-research,tools-risk,commands,probe}.ts
 ```
 
 > T1.1–T1.11 均已落地，目录与上表一致（`journal` 落在 `exec/`，因为它是执行链的账本）。
 > T2.1–T2.9 新增 `exec/ccxt-broker.ts`（注入 exchange 的真实 Broker）、`exec/sim-exchange.ts`
 > （**仅为验收/单测**的跨进程持久化模拟 venue，不是生产 venue）、`market/derivatives.ts`、
-> `market/regime.ts`、`supervisor/{heartbeat,watchdog}.ts`。
+> `market/regime.ts`、`supervisor/{heartbeat,watchdog}.ts`（watchdog 仅保留历史验收兼容实现，不进入 Docker 运行路径）。
 > `predictions/watch.ts` 未单独成文件：watch 治理落在 `store.ts`（写入侧强制），
 > pm 规则族落在 `rules.ts`，接线落在 `wiring.ts` —— 三处都比"一个 watch.ts"更靠近各自的职责。
 
@@ -655,7 +661,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | **P0 骨架** | ✅ `tag: phase-p0` | ① `--dump-config` exit 0 且列出全部 patch 行；② 30 天回放**跑两遍**：三表 id 集合完全相等、`client_order_id` 重复数 = 0；③ 每次命中都打印 `matched:`/`UNCOVERED:`；④ 表达式编译成功率 100%；⑤ 探针 `resume`→`followup` 产生 `assistant/message` 且 `source.form=notice` 正确落盘；⑥ 压测稳态增长 +2.73%、fd 波动 0、WAL 有界 |
 | **P1 判断与计划卡** | ✅ `tag: phase-p1` | ① 计划卡 schema 100%；② `when` 求值错误率 = 0（错误一律 UNCOVERED）；③ 覆盖率 / W2-W3 频次 / 每窗口成本；④ 结算成功率 ≥ 99%（含重试）+ 每条决策至多一条反思；⑤ `kill -9` 后 resume 且无重复决策；⑥ 预测市场专项 ①–⑧ 全通过 |
 | **P1.5 通道有效性闸门** | ✅ 可运行 | 保留条件：净 PnL 差值 bootstrap 95% CI 下界 > 0 **且** B 回撤 ≤ A × 1.2；否则关闭 W2/W3，退化为"纯窗口 + 机械执行"（仍是完整可用系统）。**首轮判定：关闭**（`docs/p1.5-gate-run-2026-09-14.md`） |
-| **P2 真实接口与故障注入** | ✅ 可运行判定 | ① 订单在途时 `kill -9` × 50：孤儿订单 = 0、重复成交 = 0（`docs/p2-fault-injection-2026-09-15.md`）；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ `SIGSTOP` > 3× 心跳 → watchdog 撤单、交易所挂单 = 0（`docs/p2-watchdog-2026-09-15.md`）；④ 停掉模型供应商：已挂保护单仍生效。**真 HTX 端点**的只读核对待 §12.2 A |
+| **P2 真实接口与故障注入** | ✅ 可运行判定 | ① 订单在途时 `kill -9` × 50：孤儿订单 = 0、重复成交 = 0（`docs/p2-fault-injection-2026-09-15.md`）；② 同一 `clientOrderId` 提交 10 次 → 仅 1 次成交；③ Docker 重启后先 CrashRecovery、再 reconcile，未知在途意图必须冻结且不重复下单；④ 停掉模型供应商：已挂保护单仍生效。旧 `SIGSTOP`/watchdog 结果只作历史归档，不再是当前运行模型。**真 HTX 端点**的非空 merged 对账仍是 P3 前置 |
 | **P3 小额实盘** | 待做 | 连续 **14 天**：对账不一致 = 0、硬闸绕过 = 0、日支出 ≤ 预算、W2 ≤ 8/天、W3 ≤ 6/天 |
 | **P4 离线整合** | 待做 | 周级复盘可读；playbook 变更**必须人工批准**；记忆块有版本与 diff |
 
@@ -673,7 +679,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | P1 ⑥ 预测市场 | `node scripts/pm-pit-check.mjs 30` | 11/11（`docs/pm-pit-acceptance-2026-09-14.md`） |
 | P1.5 通道闸门 | `node scripts/ab-gate.mjs htx BTC/USDT 1h 92` | 判定：关闭 W2/W3（`docs/p1.5-gate-run-2026-09-14.md`） |
 | P2 ①②④ 故障注入 | `node scripts/fault-injection.mjs /tmp/p2-fault.json` | 50 轮中 38 次真 SIGKILL；孤儿挂单 0 / 重复成交 0；同一 `clientOrderId` 提交 10 次→成交 1；保护单在"模型停摆"下仍触发（`docs/p2-fault-injection-2026-09-15.md`） |
-| P2 ③ 外部 watchdog | `node scripts/watchdog-check.mjs /tmp/p2-watchdog.json` | 8/8：真实 `SIGSTOP` → stale → 撤单 → 挂单清空 → halted 落库 → 幂等（`docs/p2-watchdog-2026-09-15.md`） |
+| P2 ③ Docker 重启与启动恢复 | `node scripts/crash-recovery-check.mjs` + `node scripts/fault-injection.mjs /tmp/p2-fault.json` | 启动先恢复在途意图再对账；未知即冻结、恢复幂等、无重复下单。旧 `docs/p2-watchdog-2026-09-15.md` 仅为已退役 watchdog 的历史证据 |
 | §12.2 A 第①步 HTX 只读预检 | `node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs htx BTC/USDT:USDT` | exit 0：认证成功、读到**永续账户**余额 24.914 USDT、空仓空挂单；`executedActions=[]`。**对账为平凡一致**（两边都 0）。实测坑：现货/永续账户分离，见 `docs/htx-preflight-2026-09-15.md` |
 
 **非空跑纪律**（这三条是被真实踩坑逼出来的，永久保留）：① 结算成功率必须报**分母**（机械执行路径曾不登记 `reflection_due_at` ⇒ "100%" 是在 **0 个样本**上通过的）；② 预测市场 novelty 检查必须有 `pm_signals_exercised`（样本曾全是日变化 ≈0.001 的远期政治盘 ⇒ 规则不触发却"通过"）；③ 验收阈值**从真实数据推导**，不写死（写死 3% 时同一脚本会随行情飘）。
@@ -713,7 +719,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T1.10 | ✅ | `trade_prediction_watch` + watch 治理 + pm 规则族 + W3 接线 | §10 专项 ④；novelty 与行情共享同一份预算 |
 | T1.11 | ✅ | `plugins/predictions.ts` + patch 行 + Config | `--dump-config` 列出该行（11 行、exit 0） |
 | T2.1 | ✅ | `CcxtBroker`（**HTX 优先**，venue-agnostic）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | 同一 `gate.ts` 不变；`sandbox` 开关走 OKX（§12 #6）；传输失败必须 throw（意图留在 `created` 交恢复处理）；密钥只进不出。**真 HTX 只读对账待 §12.2 A** |
-| T2.2 | ✅ | 对账 + 外部 watchdog + `/halt` / `/resume` | §10 P2 ③ 8/8（`docs/p2-watchdog-2026-09-15.md`）；撤单成功才置 halted；`inject=['commands']` |
+| T2.2 | ✅ | 对账 + Docker 重启后的启动恢复 + `/halt` / `/resume` | `CrashRecovery` 在普通对账前执行；未知在途意图标 `unknown` 并冻结；`heartbeat.halted` 动态拦截新增敞口；外部 watchdog 退役 |
 | T2.3 | ✅ | 故障注入：`kill -9` × 50、重复提交 × 10 | §10 P2 ①②④ 全部通过（`docs/p2-fault-injection-2026-09-15.md`）；持久化 `sim-exchange` 仅为验收/单测，不是生产 venue |
 | T2.4 | ✅ | 内核指标补全：`adx14` + `funding.rate` + `oi.changePct` + `liq.notional` + `basis.bps`（§12 #16） | 增量=全量逐点相等（ADX 对拍 92 个有效样本）；单位口径各有测试；5 路径移入 `V0_ALLOWED_PATHS` |
 | T2.5 | ✅ | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | 分位定义可复现（边界 0.33/0.67 归 mid）；样本 < 30 一律 `ok:false` |
@@ -739,10 +745,10 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 3 | `REVIEW` 率阈值 | 保留 **7 天滚动 30%**，但补两条：分母 = 该窗口全部决策数；**窗口内决策 < 20 时不触发暂停**（避免冷启动误停）。触发后**只禁 open**，允许 reduce/close | 冷启动期 2 个决策里 1 个 review 就是 50%，按比例停机会误伤。`review` 不阻塞、不等待人类（§6.1） |
 | 4 | DSL 扩展政策 | **两阶段**：① *表达式层*加算子/路径 —— 纯函数 + 单测 + 回放对比即可，无需人审；`§3.2` 红线（禁赋值/循环/字符串/网络/时间）永不动。② *内核指标转正*（组合式 → `features` 一等指标）—— 必须 (a) 增量=全量逐点一致、(b) 90 天回放净 PnL 不降 > 10%、(c) 写入 `decision.md`，**且必须人审** | ②会改变所有计划卡的语义，属于"改宪法"级别。①不改变语义，只需证据 |
 | 5 | 提示词正文 | **主体已完成**（`src/agents/prompts.ts` 覆盖 analyst/reconcile/bull/bear/risk/judge）。补一条：提示词带显式 `PROMPT_VERSION`，并入 C1 宪法哈希 | 版本化必须能回答"这条决策用的是哪版提示词"；C1 的 `partHashes` 已在 `context_snapshots` 里。`trade_review`/`trade_playbook_update` 的提示词随 P4 |
-| 6 | 凭据机制与 venue | **定案**：`EnvironmentFile`（`$DSH_HOME/trading.env`，0600），不做 `dsh-credentials-local`（多一层间接、权限模型更复杂、收益不明）。**HTX = 生产 venue**（用户提供 key；行情/回补已实测）；**OKX = 只读交叉校验 + P2 故障注入的 sandbox venue** | 实测（ccxt 4.5.78）：HTX 的 `createOrder/cancelOrder/fetchOrder/fetchOpenOrders/fetchPositions/fetchBalance/fetchMyTrades` 全 `true`，但 **HTX 在 ccxt 里没有 sandbox 端点**，而 OKX 有（`urls.sandbox`）。P2 的"孤儿订单 = 0"必须在**不亏钱**的环境里做 ⇒ 双 venue。`CcxtBroker` 保持 venue-agnostic（§13 纪律 3）。**权限最小化**：key 只开交易、**禁用提现**、绑 IP；`paper`/`live` 用不同 profile；插件只报"已注入/未注入"布尔，永不打印密钥 |
+| 6 | 凭据机制与 venue | **定案**：Docker secret/env-file（`$DSH_HOME/trading.env`，0600），不做 `dsh-credentials-local`（多一层间接、权限模型更复杂、收益不明）。**HTX = 生产 venue**（用户提供 key；行情/回补已实测）；**OKX = 只读交叉校验 + P2 故障注入的 sandbox venue** | 实测（ccxt 4.5.78）：HTX 的 `createOrder/cancelOrder/fetchOrder/fetchOpenOrders/fetchPositions/fetchBalance/fetchMyTrades` 全 `true`，但 **HTX 在 ccxt 里没有 sandbox 端点**，而 OKX 有（`urls.sandbox`）。P2 的"孤儿订单 = 0"必须在**不亏钱**的环境里做 ⇒ 双 venue。`CcxtBroker` 保持 venue-agnostic（§13 纪律 3）。**权限最小化**：key 只开交易、**禁用提现**、绑 IP；`paper`/`live` 用不同 profile；插件只报"已注入/未注入"布尔，永不打印密钥 |
 | 7 | Python 数值分析 | **不引入 Python 运行时**。只允许**离线批量**通道：Node 导出 → Python 算 → 结果写回静态表；**绝不进热路径、绝不每 bar 调用** | 跨语言会引入第二套时序语义，直接冲突 §7 的确定性要求（回测/实盘同一份代码）。v0 的指标需求 Node 侧已覆盖 |
 | 8 | `headless` bundle | **已落地**：`probe` 与 `trade` profile 均用 `--from-default-profile headless` 创建 | P-1.2 已用该路径创建 probe profile 并跑通探针，无需再议 |
-| 9 | 容器化 | **非目标**。交易进程跑 systemd unit | 我们依赖 `HTTP(S)_PROXY` + `host.docker.internal`，容器会新增网络故障面；§6.3 要求 watchdog 是**进程外独立 unit**，systemd 更直接。例外：一次性回测容器允许，不影响交易进程 |
+| 9 | 容器化 | **采用 Docker 单进程**：dsh 作为主进程，容器 restart policy 负责进程存活；SQLite 数据目录必须挂载持久卷；不部署外部 watchdog | 交易进程与状态恢复必须保持同一生命周期；容器重启后由 CrashRecovery + reconcile 收敛状态。若未来出现跨进程需求，必须另立 ADR，不在本项目暗中增加旁路进程 |
 | 10 | Polymarket WSS | **永久走轮询**（60s 周期）。不引入 `https-proxy-agent` | 实测 WSS 握手超时（HTTPS 正常）；轮询已满足 W3 需求，且 30 天 PIT 回补与验收全通过。收益（延迟）对本系统无意义：动作来自计划卡，是分钟级 |
 | 11 | pm 能否作为 `commitment` 触发 | **永久禁止**。`allowPmCommitment` 默认 `false`，且要打开必须**同时**满足 §10 P1.5 判据 | decision.md 明确警示"市场情绪当信号"；而 A/B 闸门在触发密度解决前（§12.2 #21）给不出有意义证据。保留开关只为将来留门，不是待办 |
 | 12 | negRisk 概率归一化 | **只校验、绝不改写**：同一 negRisk 事件下 token `mid` 之和与 1 的偏差 > 3% ⇒ (a) 该 alias 置信度按 `confidencePenalty` 打折、(b) 发 `info` 告警、(c) 在 Event Pack 标注 | 归一化会掩盖真实的摩擦/套利空间，而那本身是信息。我们要的是"知道这组数不自洽"，不是替市场"修正"数据。实现落 `store.ts` 按 event 分组（T2.x） |
@@ -757,7 +763,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | 21 | 机械执行与判断通道的记录一致性 | 机械执行路径**必须**登记 `reflection_due_at`（`{open, reduce, close}` 成交后）；`isTradeTrigger` 对 pm 信号写死 `false` | 实际踩过：机械路径不登记 ⇒ 反思闭环在回测里根本不跑，而"结算成功率 100%"是在 0 个样本上通过的 |
 | 22 | 宏观事件窗口是否做硬闸 | **不做硬闸（暂不启用）**。`GatePolicy.tradingWindowOpen` 改为**可选**，调用方不传 ⇒ 不拦截；宏观风险改为写进 `news` 分析师的提示词（"高影响宏观事件前后**更密切地评估风险**"），**不写"禁止开仓"这类禁令** —— 主动权留给 agent 与裁决者 | 目前**没有**宏观日历数据源（`trade_news` 未实现、pack 里没有日历条目），硬闸拿不到可靠输入，只能退化成恒真常量（审计 I5 认定的"看起来有"）。推翻条件：出现必须程序化避开宏观时点的需求，**且**有可靠日历源（人工 YAML 或供应商 API），届时按 §6.2 接入并补测试 |
 | 23 | 计划卡 `when` 的触发语义：edge vs 电平（审计 H） | **判为「电平」并改正文档**：每根已收盘 bar 求值一次，`fired` 键含 `barTs` —— 这正是 §3.5 伪代码的语义，`src/plan/match.ts` + `live-engine.#alreadyFired` 的实现与测试都按它，**代码不变**。§3.2 原写"默认 edge 触发"是**文档错误**，已改正 | 依据 §12 #4：改内核语义属"改宪法"级必须人审；edge-default 需要为每个条件**持久化 `last_value`**（否则重启后仍为真的条件会再触发一次），代价与风险都不小。**注意**：需要边沿语义的计划卡必须显式使用 §12.2 I 的 `crossAbove`/`crossBelow`；普通条件仍是电平，不能把持续为真误写成边沿。**反向条件**：若复盘发现"本意只触发一次却被每根 bar 重复执行"，应补齐 `cross*` 的前值来源与缺值 fail-closed 验收，而不是修改默认触发语义 |
-| 24 | 紧急熔断的执行语义 | `heartbeat.halted` 必须动态并入硬闸，冻结全部配置标的的新增敞口；`/resume` 不清对账冻结 | 旧实现只写 heartbeat 表，下单路径从不读它，watchdog/人工 halt 后仍可开仓。回归测试钉住 open deny、reduceOnly allow 与晚到 broker 撤单 |
+| 24 | 紧急熔断的执行语义 | `heartbeat.halted` 必须动态并入硬闸，冻结全部配置标的的新增敞口；`/resume` 不清对账冻结 | 旧实现只写 heartbeat 表，下单路径从不读它，人工 halt 后仍可开仓。回归测试钉住 open deny、reduceOnly allow 与晚到 broker 撤单；进程死亡后的处理交给 Docker 重启与启动恢复，不交给 watchdog |
 | 25 | `live_confirm` 能力边界 | 在结构化逐单确认通道接入之前，创建执行 runtime 一律同步拒绝；只读预检可继续 | 审计确认旧实现没有 ask/token 验证，实际与 `live_auto` 等价。推翻条件：每条真实下单路径在 broker 前校验不可伪造、不可复用的确认 token，且拒绝也落审计 |
 | 26 | REST 行情并发语义 | `MarketFeed.pollOnce` 全入口 single-flight，`onClosedCandle` 必须等待机械执行完成 | 慢请求/慢 broker 时 interval 会重入，多根 bar 可同时用旧账户快照通过敞口硬闸。失败后 guard 必须可清理并允许下一轮 |
 | 27 | 条件失败与去重粒度 | 任一适用条件失败/forbidden 优先 UNCOVERED；规则去重键加 `timeframe` | 旧实现会被后续 true 条件覆盖失败，且同 rule/symbol/barTs 的 1h/4h 互相去重；两者都会把“未知/未处理”伪装成正常 |
@@ -772,7 +778,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | # | 事项 | 需要什么 | 现状与替代路径 |
 |---|---|---|---|
 | A | HTX API key | 用户提供（只开**交易**权限、**禁用提现**、绑 IP 白名单） | **已确认可提供**（2026-09-14）。落地顺序固定为三步，每步都可独立停下：① **只读**——`CcxtBroker` 先接 `fetchBalance`/`fetchPositions`/`fetchOpenOrders`，与本地 `paper` 对账（不需要下任何单）；② **`paper` 模式**跑通全链路（行情仍用真实公开数据）；③ 进 **`live_confirm`**（每单人工 `ask`），稳住后再评估 `live_auto`。**代码状态（2026-09-15）**：T2.1 `CcxtBroker` 已实现（venue-agnostic、注入 exchange、`sandbox` 开关走 OKX），缺凭据时安全降级 `paper`（`resolveExecBroker`）；**第①步已实测通过（2026-09-15）**：`node --env-file=$DSH_HOME/.env scripts/htx-preflight.mjs` → exit 0，私有端点认证成功、`executedActions=[]`（只读保证成立）。★ 实测坑：**HTX 现货与 USDT 永续是两个账户**，不指定 `accountType` 会读到现货的 0（"以为没钱"，会让 sizing 推出 qty=0）——修为 `accountType=swap` 后读到真实永续余额 **24.914 USDT**（无持仓无挂单）。该次"对账一致"是**平凡**的（两边都是 0），非空验证到的是只读链路可用。手册见 `docs/htx-credentials.md`，实测记录见 `docs/htx-preflight-2026-09-15.md`。**第②步已完成；独立真实首单冒烟也已完成，但不代表 `live_confirm` 逐单 ask runtime 已实现（见 §12.1 #25）**（`paper` 全链路见 `docs/paper-e2e-2026-09-16.md`；真实首单见下）。★ **独立真实首单已实测通过（2026-09-16）**：`node scripts/htx-live-smoke.mjs --execute ADA/USDT:USDT` → **18/18 步、exit 0**：市价开仓(filled) → 挂止损+止盈保护单 → getAccount/getPositions/getOpenOrders/按订单号查询 → 撤单(算法单)/cancelAll → reduceOnly 平仓 → 空仓；账户 0 持仓 0 挂单，5 轮往返成本 ≈0.0056 USDT。过程中修掉 4 个实盘缺陷（市价单成交不回填、算法保护单缺 `position_site`→`position_side`、算法单撤不掉、算法挂单看不见），记录 2 条**平台限制**：① HTX 不采用我们传的 `clientOrderId`（生成=订单号）⇒ 恢复对未 ack 意图只能 fail-closed 冻结；② ccxt HTX `fetchOpenOrders` 不返回算法单 ⇒ `getPositions().protectedStopPrice` 在 HTX 上看不到交易所侧保护单，对账"无保护单"会误报。★ **2026-09-17 复核：这条已升级为显式待办** —— 审计 I1 让"冻结"**真正生效**了，所以一旦误报，会直接冻结该标的、禁止新开仓。`CcxtBroker` 已有 `#fetchOpenOrdersMerged()` 去捞算法单，理论上应已缓解，但**从未在真 HTX 上验证过**；进入 P3 前必须用真 key 跑一次"**有持仓 + 已挂算法保护单**"的对账，确认 `protectedStopPrice` 能读到；读不到就补"本地保护单意图兜底"，否则 P3 会被自己的冻结机制卡死。证据见 `docs/htx-live-smoke-2026-09-16.md` |
-| B | 测试网（P2 故障注入用） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 若用户愿意额外提供 OKX demo key ⇒ 用它承担 §10 P2 的破坏性验收（`kill -9`×50、重复提交、`SIGSTOP`）。**若不愿提供**，替代路径（无需新凭据）：`paper` 模式做全部破坏性测试（幂等/孤儿/恢复已可在本地库验证，见 `scripts/crash-recovery-check.mjs`），HTX 侧只做**只读**验收 + 独立最小额单笔冒烟；结构化 `live_confirm` 逐单核对待 §12.1 #25 关闭。**不以"没有测试网"为由跳过验收**，只降低破坏性测试的爆炸半径 |
+| B | 测试网（可选） | **OKX demo key**（HTX 在 ccxt 里无 sandbox 端点，OKX 有） | 可选用于真实 venue 的受控接口验证；P2 的 kill-9/幂等/启动恢复/保护单停摆已由 `paper` 与持久化模拟 venue 覆盖（见 `scripts/crash-recovery-check.mjs`、`scripts/fault-injection.mjs`）。当前不再部署外部 watchdog，也不以 `SIGSTOP` 作为运行模型验收；HTX 侧只做**只读**验收 + 独立最小额单笔冒烟；结构化 `live_confirm` 逐单核对待 §12.1 #25 关闭 |
 | C | 模型凭据（P1.5 的 LLM 判断臂） | `provider/model` 可用 | 闸门已可运行，B 臂现为**确定性替身** `standInJudge`。换上真通道即可复用同一套闸门，其余不动；首轮判定只说明"闸门可运行且默认降级"，**不是对 W2/W3 的最终判决**。★ **澄清（2026-09-17）**：**运行时的 desk 模型不需要单独的 key** —— 它走 DSH 当前提供方（`trade-supervisor.l3 = deepseek-official/deepseek-flash`）。C 只指**离线 A/B 脚本**的 B 臂；而 `scripts/ab-gate.mjs` 是独立 Node 进程，拿不到 DSH 的 provider 插拔，要么给它 env 凭据、要么把 A/B 判断臂放进 DSH 跑。**当前决定：不关 C** —— W2/W3 已按 P1.5 关闭，且 D 不解决就算不出结论（首轮 n=1） |
 | D | A/B 触发密度 | 一套真的会成交的计划卡/规则族（或更长窗口） | 实测 92 天仅 16 次触发、1 笔配对成交 ⇒ 即使换上 LLM 通道也算不出有意义的 CI。方案：`ab-gate.mjs` 增加 `--preset high-freq`（多标的、多 tf、更宽入场条件），目标 ≥ 200 次触发。★ **决策（2026-09-17）：选 `--preset high-freq`，不选"拉长窗口"** —— 要凑到 bootstrap 可用的样本，拉长窗口约需 10× 时间跨度（≈2.5 年），且加密 regime 漂移会让跨年样本的可比性变差；高频 preset 现在就能出样本，而闸门要回答的是"**每笔交易**上判断通道有没有增量"，需要的是**成交笔数**而不是日历跨度。代价：preset 放宽了入场条件，结论只对该高频策略成立，不能直接搬到生产计划卡 —— 但这不影响闸门的用途（它测通道，不测策略赚钱能力）。**实现暂缓**：该脚本要真实行情+网络才能验证，不在无网环境盲改验收脚本 |
 | E | `live_auto` 授权 | 人工决定 + 额度 | **2026-09-15 用户明确授权**，以最小仓位（1×、单笔 ≤12 USDT、日亏 ≤1.25）arm 并完成首轮观测（W1→desk 回合→`no_trade`，**零下单**）。**会话结束已回退 `paper`**（本会话定位=开发/测试，避免误触真实下单）；重新 arm = 把 `trade-exec.mode` 改成 `live_auto`（一行）。证据见 `docs/live-cycle-2026-09-16.md` |
@@ -789,7 +795,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 |---|---|---|
 | P0 | `trade_execute_order` 与 `executeAction` 成交确认/保护单语义分叉；`acked` 超时可漏挂保护单，旧持仓非零还可被误认为本单成交 | 抽出唯一的“下单→成交归因→保护→结算”状态机；用下单前后 position delta + 订单查询归因，未知即冻结；HTX 风格 acked 回归必须证明零裸仓 |
 | P0 | resting limit open 后续成交时没有补挂保护单的常驻监控 | 完整方案是用户数据/对账状态机在 open→filled 时立即挂保护；接入前应禁止 limit open。验收 resting→filled→protective 非空全链路 |
-| P0 | watchdog 先 `cancelAll()` 再写 halted，撤单等待期仍可新开仓 | heartbeat 状态扩成 `halt_requested|halted`：先持久化冻结、再撤单，失败保持 fail-closed 且可重试；验收 cancel promise 未 resolve 时并发 open 必须 deny |
+| P0 | Docker 重启后的恢复顺序缺少独立非空验收 | 增加真实 restart e2e：容器/进程在 `created`、`acked`、保护单已挂等边界退出；重启必须先 CrashRecovery 再 reconcile，未知即冻结，且不重复下单/不把旧仓误归因给新单 |
 | P1 | 显式 `set_stop/set_target/set_trailing` 在 broker 异常时已先记 executed，同一决策无法安全收敛 | 保护意图独立状态机；ack 前不记 executed，未知走查询/冻结，rejected/throw 必须落审计并验证幂等恢复 |
 | P1 | W1 一次扫到多个 fire 时，busy 分支只留痕不入队，cursor 已推进导致永久丢窗 | 增 pending queue，只在接受/完成后推进；fake clock 一次产生两个 fire，最终两个都必须执行 |
 | P1 | liquidation REST 重叠页重复累加；`FeatureEngine` 对同一 candle 重放不幂等/乱序无守卫 | 清算按事件 id/hash + 游标去重；特征层对 `(symbol,timeframe,openTime)` 做单调唯一守卫，重复返回同快照、乱序 fail-closed |

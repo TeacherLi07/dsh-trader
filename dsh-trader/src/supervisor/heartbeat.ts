@@ -1,8 +1,8 @@
 /**
- * 主进程与外部 watchdog 共用的心跳状态。
+ * 主进程持久化的心跳与组合级 halted 状态。
  *
- * 这里故意只依赖 Statements，不依赖 journal 或插件运行时：watchdog 可以在主进程
- * 已经停止后仍然打开同一个 SQLite 文件并完成熔断。
+ * 当前部署是 Docker 单进程；beat_at 只用于 liveness/启动恢复的可观测性，进程死亡后由
+ * Docker 重启 dsh，不能把它解释成外部撤单触发器。
  */
 
 import type Database from 'better-sqlite3'
@@ -36,11 +36,11 @@ export class HeartbeatStore {
   readonly #statements: Statements
 
   constructor(statements: Statements | Database.Database, private readonly audit?: HeartbeatAudit) {
-    // 兼容独立 watchdog 直接传入数据库连接的调用方，但所有 SQL 仍统一经过缓存。
+    // 保留 Database 兼容入口，便于恢复/测试复用；生产只有 dsh 主进程持有该连接。
     this.#statements = statements instanceof Statements ? statements : new Statements(statements)
   }
 
-  /** 心跳只刷新 beat_at，不清除人工/ watchdog 设置的 halted。 */
+  /** 心跳只刷新 beat_at，不清除人工设置的 halted。 */
   beat(at: number): void {
     this.#statements
       .get(
@@ -74,7 +74,7 @@ export class HeartbeatStore {
     })
   }
 
-  /** resume 同时刷新心跳，否则刚人工恢复就会被旧 beat_at 立即判成 stale。 */
+  /** resume 同时刷新心跳，便于重启后的状态面准确显示恢复时刻。 */
   resume(at: number): void {
     this.#statements
       .get(
@@ -90,7 +90,7 @@ export class HeartbeatStore {
     })
   }
 
-  /** 缺失行不是未 halt，而是 watchdog 的 stale 输入；因此这里只返回 false。 */
+  /** 缺失行表示尚未初始化；启动恢复会补齐它，不能把缺失当成安全状态。 */
   isHalted(): boolean {
     return this.read()?.halted ?? false
   }

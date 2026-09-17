@@ -10,8 +10,8 @@
  *   1. **不能在 `apply` 期间调用 `ctx.agents.create/resume`** —— agent factory 由 `dsh-agent-loop`
  *      注册，若在 apply 里 await 等待会死锁 plugin loader。这里只在**窗口触发时**（定时器回调，
  *      早已脱离 apply）才 attach。
- *   2. 心跳的撤单动作不能只放在进程内：进程死亡时本插件自己也死了；真正的撤单由**进程外** watchdog
- *      或交易所原生 dead-man 执行（plan §6.3）。
+ *   2. 心跳只用于持久化 liveness/熔断状态与启动后的可观测性；进程死亡后由 Docker 重启 dsh，
+ *      交易状态由启动时 CrashRecovery + reconcile 收敛，不启动第二个撤单进程（plan §6.3）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -208,7 +208,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     })
   }
 
-  // 先写一条初始心跳，避免刚启动时 watchdog 把"尚未开始循环"误判成数据库缺失。
+  // 先写一条初始心跳，供 Docker 重启后的状态面显示进程已重新进入运行态；心跳不触发外部撤单。
   heartbeat.beat(clock.now())
   checkPriceTableAge()
   const stopHeartbeat = clock.setInterval(() => {

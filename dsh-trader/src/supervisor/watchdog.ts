@@ -1,13 +1,18 @@
 /**
- * 进程外心跳 watchdog（plan §6.3）。
+ * 历史的进程外心跳 watchdog 实现（保留供旧验收证据与迁移参考）。
  *
- * 该模块只接受 Clock、HeartbeatStore 与 Broker 端口，不能从主循环或运行时单例取依赖，
- * 这样它才能被 systemd/独立脚本加载，并在主进程 SIGSTOP/SIGKILL 后继续撤单。
+ * 当前部署是 Docker 单进程：dsh 退出后由容器 restart policy 重启，状态收敛交给启动时
+ * CrashRecovery + reconcile。watchdog 不再属于生产运行路径，且由 ExternalWatchdog
+ * 的硬闸阻止任何独立调用触碰交易所。
  */
 
 import type { Clock } from '../clock.js'
 import type { Broker } from '../exec/broker.js'
 import type { HeartbeatAudit, HeartbeatPort } from './heartbeat.js'
+
+export const WATCHDOG_ENABLED = false as const
+export const WATCHDOG_DISABLED_REASON =
+  '外部 watchdog 已禁用：Docker restart 负责进程存活，启动恢复负责交易状态收敛'
 
 export interface WatchdogDecisionInput {
   readonly now: number
@@ -62,6 +67,8 @@ export class ExternalWatchdog {
   constructor(private readonly deps: ExternalWatchdogDeps) {}
 
   async checkOnce(): Promise<WatchdogCheckResult> {
+    if (!WATCHDOG_ENABLED) throw new Error(WATCHDOG_DISABLED_REASON)
+
     const now = this.deps.clock.now()
     const heartbeat = this.deps.heartbeat.read()
     const decision = watchdogDecision({

@@ -31,7 +31,7 @@
 | T1.4–T1.11 | 结算/反思、context 组装、预算账本、P1.5 闸门、预测市场（§4.4） | ✅ 已完成（`tag: phase-p1`；证据见 `../docs/p1-acceptance-2026-09-14.md`、`../docs/pm-pit-acceptance-2026-09-14.md`、`../docs/p1.5-gate-run-2026-09-14.md`） |
 | — | **P1 验收 + P1.5 通道闸门**（§10 P1 ①–⑥；闸门判定"关闭 W2/W3"） | ✅ `tag: phase-p1` |
 | T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 真 HTX 只读预检与最小额独立冒烟已通过；普通/算法单合并计数与撤单已补测；进 P3 前仍需真 HTX “有持仓 + 保护单”对账验证 |
-| T2.2 | 对账 runner + 外部 watchdog + `/halt` `/resume` | ✅ P2 ③ 8/8（真实 `SIGSTOP`）；持久化 `halted` 已接入新增敞口硬闸，`/resume` 不清对账冻结；证据 `../docs/p2-watchdog-2026-09-15.md` |
+| T2.2 | 对账 runner + Docker 重启后的启动恢复 + `/halt` `/resume` | ✅ 单进程模型：dsh 退出由 Docker 重启；启动先跑 CrashRecovery 再做对账；持久化 `halted` 已接入新增敞口硬闸，`/resume` 不清对账冻结；旧 watchdog 验收仅归档 |
 | T2.3 | 故障注入：`kill -9`×50 / 幂等提交×10 / 保护单停摆仍生效 | ✅ P2 ①②④ 全通过：`../docs/p2-fault-injection-2026-09-15.md` |
 | T2.4 | 内核指标补全：`adx14` + `funding.rate`/`oi.changePct`/`liq.notional`/`basis.bps` | ✅ 增量=全量（ADX 对拍 92 样本）；单位口径有测试；`UNIMPLEMENTED_PATHS` 清空 |
 | T2.5 | `regime` 分桶（§12 #2）+ `trade_regime` 工具 | ✅ 分位定义可复现；样本 < 30 一律 `ok:false` |

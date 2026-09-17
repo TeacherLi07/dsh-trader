@@ -3,7 +3,7 @@
  *
  * 硬闸纯函数在 `src/exec/gate.ts`；CCXT broker 通过组合根注入 exchange。
  *
- * 安全：`apiKey`/`apiSecret` 只从环境注入（DSH 的 `$DSH_HOME/.env` 或 systemd `EnvironmentFile`，0600），
+ * 安全：`apiKey`/`apiSecret` 只从环境注入（Docker secret/env-file 或 DSH 的 `$DSH_HOME/.env`，0600），
  * **绝不**写进仓库、配置或 prompt；插件只输出"已注入/未注入"布尔，**不打印密钥**。
  *
  * 第①步只读预检（plan §12.2 A）：`preflightEnabled: true` 时用真实 venue 读账户/持仓/挂单，

@@ -12,7 +12,7 @@
 | 行情 → 特征 | `bars` / `features` 有 ADA、DOGE 的 1h 已收盘 bar |
 | W1 窗口调度 | `audit_events.kind=w1_wake` ×11（监督期用短窗口观察） |
 | desk agent 回合 | 会话事件：`user/message → assistant/message×3–4 → tool/call×10–14 → tool/result → turn/end`，`idleMs≈10–13s` |
-| 进程外 watchdog | 每 15s 一次健康检查，`action:none / reason:healthy / openOrders:0`，凭据布尔正常 |
+| 进程外 watchdog | **已退役**；本记录中的历史健康检查不代表当前部署会启动该进程 |
 
 ## 首轮产出：4 条 `no_trade` 决策，**零下单**
 
@@ -39,7 +39,7 @@ W1 窗口是否调用 `trade_plan_card` 判出机会，以及承诺是否在下�
 
 本会话定位是**开发与测试**，因此首轮观测结束后已停止常驻进程并把配置回退到开发默认：
 
-- 交易进程与 watchdog **已停止**（端口 3099 释放，进程表无残留）；
+- 交易进程**已停止**（端口 3099 释放）；当前部署不保留第二个 watchdog 进程；
 - `trade-exec.mode` 已回退为 **`paper`**；重新 arm 只需改回 `live_auto` 一行；
 - `heartbeat.halted` 复位为 0（本次从未真正下单，无需人工 `/resume`）；
 - 本地库 `plan_cards`/`order_intents`/`orders`/`fills` 均为 **0**；交易所侧 0 持仓、0 挂单、权益 24.914 USDT。
@@ -48,4 +48,4 @@ W1 窗口是否调用 `trade_plan_card` 判出机会，以及承诺是否在下�
 
 - 价目表在该库为空 ⇒ `price_table_stale` 告警反复出现，成本核算退化为 token 上限（不会静默计 0）。
   停机后跑 `node scripts/seed-prices.mjs "$HOME/.dsh/trading/desk.db"` 即可补种。
-- 后台进程是本会话的 job，不是 7×24 持久方式；持久运行按 `deploy/systemd/*.service` + `docs/live-runbook.md`。
+- 后台进程是本会话的 job，不是 7×24 持久方式；持久运行按 Docker 单进程 + restart policy + `docs/live-runbook.md`。

@@ -239,7 +239,7 @@ START
 | **延迟** | 分钟级，不适合止盈止损 | **止损/止盈必须放交易所侧或插件硬闸**，绝不依赖 LLM |
 | **反思依赖未来数据** | 需要 `holding_days+7` 个自然日之后的 bar 且拒绝部分窗口 | `reflection_due_at` 结算队列（§7.3） |
 | **crypto 支持是"标签级"的** | 只硬编码 11 个币种（BTC/ETH/SOL/XRP/ADA/DOGE/LTC/BCH/DOT/AVAX/LINK），只认 `-USD` 对，**无 funding/OI/盘口/链上**；唯一行为变化是**去掉基本面分析师**；基准默认仍是 **SPY**（拿 7×24 资产对美股指数算 alpha） | 换成 funding、基差、OI、清算、链上、稳定币流；基准用 BTC/ETH（§8.1） |
-| **无调度器** | 全仓无 daemon/cron/scheduler，CLI 是"交互一次然后退出" | 插件常驻 + systemd（§10.1） |
+| **无调度器** | 全仓无 daemon/cron/scheduler，CLI 是"交互一次然后退出" | Docker 单进程常驻 + restart policy（§10.1） |
 
 **值得直接复用（它是这个项目真正的资产）**：
 1. **时点（PIT）纪律**：单一共享的 UTC 半开窗口 `in_window` + `withhold_live_profile` + FRED realtime vintage 钉定 + 财报按日期过滤 + 记忆按 `resolved <= as_of` 门控。有测试支撑，成体系。
@@ -419,7 +419,7 @@ START
 
 | # | 假设 | 核对结论（源码依据） | 若为假的退路 |
 |---|---|---|---|
-| **R1** | 插件进程内 `ctx.agents.resume()` 能拉起**非用户创建**的持久会话，`followup` 能驱动回合 | ✅ `AgentRegistry.resume({ resumeSessionId, agentOptions, setup })` 存在（`dsh-agent/lib/types/index.d.ts`）；`resume` 要求 `ctx.sessionPersistence`——base bundle 默认挂载 `dsh-session-persistence-jsonl`；`Agent.followup(msg)` 存在且语义为"排队独立回合并唤醒"（`runtime-types.d.ts`） | 退化为 `dsh --profile trade-headless` 由外部 cron 唤起，代价是冷启动开销与秒级不可达 |
+| **R1** | 插件进程内 `ctx.agents.resume()` 能拉起**非用户创建**的持久会话，`followup` 能驱动回合 | ✅ `AgentRegistry.resume({ resumeSessionId, agentOptions, setup })` 存在（`dsh-agent/lib/types/index.d.ts`）；`resume` 要求 `ctx.sessionPersistence`——base bundle 默认挂载 `dsh-session-persistence-jsonl`；`Agent.followup(msg)` 存在且语义为"排队独立回合并唤醒"（`runtime-types.d.ts`） | 生产由 Docker restart + dsh 启动恢复承接；不退化为外部 cron/第二个交易进程 |
 | **R2** | 投递消息的 `source` 标签确实区分"非用户输入" | ✅ 存在完整的 `ContextForm` 语义联合（见 §2.3）；`createUserMessage` 要求 `source` | 若渲染不如预期，把状态改走 `systemPrompt.context`（不占消息槽位） |
 | **R3** | `tools/pre-execute` 的 `deny` 对**子 agent 内部**调用生效 | ✅ 文档明示该瀑布"Scope-filtered dispatch：agent-scoped listeners receive only that agent's calls"——即全局监听者收到**每一个** agent 的调用 | 退化为在**每个交易工具内部**做二次硬闸（本来就要做，作为双保险） |
 | **R4** | `agent/pre-step` 返回 `{kind:'reject'}` 不会造成空转 | ✅ 类型为 `{kind:'reject'} \| {kind:'enter', messages, startsRequestSeries?}`，是明确的二选一（`runtime-types.d.ts:92`） | 不使用 reject；改为在组装阶段就把不该有的输入**不投递** |
@@ -586,8 +586,8 @@ LLM 的上下文天然**陈旧**：它看到的是触发时刻的快照，等它
 | `dsh-schedule` | 只在会话内投递；冷会话只积压；最小间隔 5 分钟；语义是"提醒我"而非"持续监控" |
 | `dsh-jobs-local` | 进程内注册表，随 harness 死亡；无法跨重启 |
 | `dsh-goal-round-driver` | 人类显式 resume 才重新武装；有轮次上限 |
-| OS cron 拉起 `dsh --profile headless` | 可作**兜底**（§10.1），但每次冷启动开销大，做不了秒级 |
-| Node 进程内 `setInterval` | 进程死即停 —— 必须配合 supervisor + 状态重建 |
+| OS cron 拉起 `dsh --profile headless` | **不采用**；Docker restart policy 已负责主进程存活，启动恢复负责状态收敛 |
+| Node 进程内 `setInterval` | 进程死即停 —— 由 Docker restart + 启动状态重建承接，不启动第二个交易进程 |
 
 **结论**：盯盘 = 插件内的 `MarketWatcher` 常驻服务（用 `ctx.effect` 管理生命周期），数据源断线自动重连，状态写自己的 SQLite，重启后从 DB 恢复。
 
@@ -1269,7 +1269,7 @@ validateIntent(order, portfolio, config):   // 提议 → 裁决 → 才允许�
 3. **它同时是写入门禁**：通过校验的意图**才**被写入 `order_intents`，因此"日志里的每一条意图都是已通过校验的"是一条可断言的不变量。
 
 另需：
-- **心跳熔断（dead-man switch）**：`HeartbeatGuard` 每 N 秒更新心跳；主循环卡死或进程异常时超时即 `cancelAll()`，可选平仓。
+- **心跳与启动恢复**：主进程每 N 秒更新心跳用于 liveness/审计；dsh 退出由 Docker 重启，启动时先跑 `CrashRecovery` 再跑 `reconcile`，未知状态 fail-closed 冻结，不启动外部 watchdog。
 - **紧急停止**：Web GUI 一个红色按钮（插件注册 command），触发后置 `halted` 并撤单；**恢复必须人工**。
 - **密钥隔离**：API key 走 DSH 凭据机制（`$DSH_HOME/.credentials.yaml` + `dsh-credentials-local`，profile 里用 `!!js process.env.X` 引用），**绝不写进仓库/配置/prompt**；实盘 key 只开交易权限、**禁用提现**；`paper` 与 `live` 用不同 profile。
 - **HTX 保护单窗口**：入场成交后**立即**挂 `stopLossPrice`/`takeProfitPrice`（`reduceOnly: true`）；挂失败即降级（平仓或冻结），并把"有持仓无保护单"列为对账高优先级不一致（§8.2）。
@@ -1288,13 +1288,12 @@ validateIntent(order, portfolio, config):   // 提议 → 裁决 → 才允许�
 ### 10.1 进程模型
 
 ```
-systemd / supervisor
-   └─ dsh --profile trade            # 常驻；插件在 profile 内，随进程启动即开始盯盘
+Docker restart policy
+   └─ dsh --profile trade            # 唯一主进程；插件在 profile 内，随进程启动即开始盯盘
         ├─ MarketWatcher（WS + 规则引擎）
         ├─ DeskSupervisor（会话恢复 + followup 投递）
         ├─ SettlementScheduler（结算 + 反思）
         └─ HeartbeatGuard（熔断）
-   └─ 兜底：cron 每 5 分钟 `dsh --profile trade-headless "healthcheck"`（检测主进程假死）
 ```
 
 - 主进程存活时不依赖浏览器；Web GUI 只作观测与人工干预。

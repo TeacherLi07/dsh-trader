@@ -12,7 +12,12 @@ import {
 import type { OrderAck } from '../src/exec/broker.js'
 import { makeHaltHandler, makeResumeHandler } from '../src/plugins/commands.js'
 import { HeartbeatStore, type HeartbeatAuditEvent } from '../src/supervisor/heartbeat.js'
-import { ExternalWatchdog, watchdogDecision } from '../src/supervisor/watchdog.js'
+import {
+  ExternalWatchdog,
+  WATCHDOG_DISABLED_REASON,
+  WATCHDOG_ENABLED,
+  watchdogDecision,
+} from '../src/supervisor/watchdog.js'
 
 const START = 1_700_000_000_000
 
@@ -70,82 +75,13 @@ describe('HeartbeatStore', () => {
   })
 })
 
-describe('ExternalWatchdog', () => {
-  it('halts only after a successful cancelAll', async () => {
+describe('ExternalWatchdog（已禁用）', () => {
+  it('hard-fails before reading heartbeat or touching the broker', async () => {
+    expect(WATCHDOG_ENABLED).toBe(false)
     const db = heartbeatDb()
     try {
       const heartbeat = new HeartbeatStore(new Statements(db))
       heartbeat.beat(START)
-      let cancelCalls = 0
-      const alerts: { code: string }[] = []
-      const clock = new ReplayClock(START + 301)
-      const watchdog = new ExternalWatchdog({
-        heartbeat,
-        broker: {
-          cancelAll: async () => {
-            cancelCalls += 1
-          },
-        },
-        clock,
-        intervalMs: 100,
-        multiple: 3,
-        onAlert: (alert) => alerts.push(alert),
-      })
-
-      const result = await watchdog.checkOnce()
-      expect(cancelCalls).toBeGreaterThan(0)
-      expect(result.cancelSucceeded).toBe(true)
-      expect(heartbeat.isHalted()).toBe(true)
-      expect(alerts.length).toBeGreaterThan(0)
-      expect(alerts[0]?.code).toBe('watchdog_halted')
-    } finally {
-      db.close()
-    }
-  })
-
-  it('keeps unhalted after cancel failure and retries next round', async () => {
-    const db = heartbeatDb()
-    try {
-      const heartbeat = new HeartbeatStore(new Statements(db))
-      heartbeat.beat(START)
-      let cancelCalls = 0
-      const alerts: { code: string }[] = []
-      const clock = new ReplayClock(START + 301)
-      const watchdog = new ExternalWatchdog({
-        heartbeat,
-        broker: {
-          cancelAll: async () => {
-            cancelCalls += 1
-            if (cancelCalls === 1) throw new Error('exchange unavailable')
-          },
-        },
-        clock,
-        intervalMs: 100,
-        onAlert: (alert) => alerts.push(alert),
-      })
-
-      const first = await watchdog.checkOnce()
-      expect(first.cancelAttempted).toBe(true)
-      expect(first.cancelSucceeded).toBe(false)
-      expect(heartbeat.isHalted()).toBe(false)
-      expect(alerts.length).toBeGreaterThan(0)
-      expect(alerts[0]?.code).toBe('watchdog_cancel_failed')
-
-      const second = await watchdog.checkOnce()
-      expect(second.cancelSucceeded).toBe(true)
-      expect(cancelCalls).toBe(2)
-      expect(heartbeat.isHalted()).toBe(true)
-    } finally {
-      db.close()
-    }
-  })
-
-  it('does not cancel again when already halted', async () => {
-    const db = heartbeatDb()
-    try {
-      const heartbeat = new HeartbeatStore(new Statements(db))
-      heartbeat.beat(START)
-      heartbeat.halt(START + 1)
       let cancelCalls = 0
       const watchdog = new ExternalWatchdog({
         heartbeat,
@@ -154,12 +90,9 @@ describe('ExternalWatchdog', () => {
         intervalMs: 100,
       })
 
-      const first = await watchdog.checkOnce()
-      const second = await watchdog.checkOnce()
-      expect([first, second].length).toBeGreaterThan(0)
-      expect(first.decision).toEqual({ action: 'none', reason: 'already_halted' })
-      expect(second.decision).toEqual({ action: 'none', reason: 'already_halted' })
+      await expect(watchdog.checkOnce()).rejects.toThrow(WATCHDOG_DISABLED_REASON)
       expect(cancelCalls).toBe(0)
+      expect(heartbeat.isHalted()).toBe(false)
     } finally {
       db.close()
     }
@@ -364,7 +297,7 @@ describe('halt/resume command handlers', () => {
         clock,
       })(noOpInvocation())
       expect(unavailableResult.kind).toBe('error')
-      expect(unavailableResult.text).toContain('撤单未执行，需外部 watchdog 兜底')
+      expect(unavailableResult.text).toContain('撤单未执行，需人工核对交易所挂单')
       expect(unavailable.isHalted()).toBe(true)
 
       const failed = new HeartbeatStore(new Statements(db))
@@ -374,7 +307,7 @@ describe('halt/resume command handlers', () => {
         broker: { cancelAll: async () => { throw new Error('cancel failed') } },
       })(noOpInvocation())
       expect(failureResult.kind).toBe('error')
-      expect(failureResult.text).toContain('需外部 watchdog 兜底')
+      expect(failureResult.text).toContain('需人工核对交易所挂单')
       expect(failed.isHalted()).toBe(true)
     } finally {
       db.close()

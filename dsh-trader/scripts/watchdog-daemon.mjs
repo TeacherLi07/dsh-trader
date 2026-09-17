@@ -1,14 +1,10 @@
 #!/usr/bin/env node
 /**
- * 进程外 watchdog 常驻进程（plan §6.3）。
+ * 历史 watchdog 脚本（当前硬禁用）。
  *
- * 它读取主进程写入的 heartbeat，并在超时后把撤单交给 CcxtBroker；把此进程单独放进
- * systemd unit 的原因是主进程死亡后仍必须有一个活着的撤单路径。所有输出都是
- * 单行 JSON，方便 journalctl 采集；凭据永远只从环境读取且只输出注入状态。
- *
- * 用法：
- *   node scripts/watchdog-daemon.mjs [--once] [--interval-ms=5000]
- *     [--multiple=3] [--db=path] [--max-checks=N]
+ * 项目改为 Docker 单进程后，dsh 退出由容器 restart policy 处理，启动恢复由
+ * CrashRecovery + reconcile 处理；此脚本保留供历史审计/迁移识别，但任何调用都只返回
+ * disabled，不读库、不读凭据、不触碰交易所。
  */
 
 import { mkdirSync } from 'node:fs'
@@ -22,7 +18,11 @@ import { applyProxyAwareFetch } from '../lib/market/ccxt-source.js'
 import { CcxtBroker } from '../lib/exec/ccxt-broker.js'
 import { DecisionJournal } from '../lib/exec/journal.js'
 import { HeartbeatStore } from '../lib/supervisor/heartbeat.js'
-import { ExternalWatchdog } from '../lib/supervisor/watchdog.js'
+import {
+  ExternalWatchdog,
+  WATCHDOG_DISABLED_REASON,
+  WATCHDOG_ENABLED,
+} from '../lib/supervisor/watchdog.js'
 
 const DEFAULT_INTERVAL_MS = 5_000
 const DEFAULT_MULTIPLE = 3
@@ -135,6 +135,17 @@ async function main(options) {
         '[--multiple=3] [--db=path] [--max-checks=N]',
     })
     return 0
+  }
+
+  if (!WATCHDOG_ENABLED) {
+    emit({
+      at: Date.now(),
+      action: 'disabled',
+      reason: 'docker_single_process',
+      watchdogEnabled: false,
+      error: WATCHDOG_DISABLED_REASON,
+    })
+    return 78
   }
 
   const apiKey = process.env.TRADER_API_KEY ?? ''

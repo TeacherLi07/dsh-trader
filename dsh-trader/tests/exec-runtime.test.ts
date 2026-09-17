@@ -303,6 +303,50 @@ describe('ExecRuntime 组合根', () => {
     db.close()
   })
 
+  it('Docker 重启恢复先收敛在途意图，再进入普通对账', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const journal = new DecisionJournal(db)
+    journal.recordDecision({
+      decisionId: 'restart-decision',
+      symbol: SYMBOL,
+      decidedAt: NOW - 100,
+      contextHash: 'ctx:restart',
+      action: 'open',
+      executed: false,
+    })
+    journal.recordIntent({
+      intentId: 'restart-intent',
+      clientOrderId: 'restart-client',
+      decisionId: 'restart-decision',
+      venue: 'paper',
+      symbol: SYMBOL,
+      state: 'created',
+      type: 'market',
+      side: 'buy',
+      qty: 1,
+      reduceOnly: false,
+      createdAt: NOW - 100,
+    })
+
+    const runtime = await createExecRuntime(config(), { db, clock })
+    try {
+      const intent = db.prepare(
+        'SELECT state, acked_at FROM order_intents WHERE client_order_id = ?',
+      ).get('restart-client') as { state: string; acked_at: number | null }
+      expect(intent).toEqual({ state: 'unknown', acked_at: null })
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(true)
+
+      const startupKinds = db.prepare(
+        "SELECT kind FROM audit_events WHERE kind IN ('crash_recovery', 'reconcile_report') ORDER BY seq",
+      ).all() as { kind: string }[]
+      expect(startupKinds.map((event) => event.kind)).toEqual(['crash_recovery', 'reconcile_report'])
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
   it('live_confirm 在构造 exchange 前 fail-closed，且不触达下单路由', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)

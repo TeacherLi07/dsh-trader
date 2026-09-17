@@ -1,8 +1,10 @@
-# 实盘运行手册
+# Docker 实盘运行手册
 
-本手册只描述已落地的 systemd、heartbeat 和只读/撤单路径。进入实盘前仍须按
-`plan.md` §12.2 A 的顺序完成 HTX 只读预检、`paper` 全链路和人工确认档；不要因为
-unit 能启动就把 `live_auto` 当成已获授权。
+本项目采用 Docker 单进程部署：dsh 是容器主进程，容器 restart policy 负责进程存活；
+**不启动、不安装、不依赖外部 watchdog**。dsh 退出后，Docker 重启同一个容器，交易状态
+由启动时 `CrashRecovery → reconcile` 收敛。进入实盘前仍须按 `plan.md` §12.2 A 的顺序
+完成 HTX 只读预检、`paper` 全链路和结构化确认通道检查；不要把历史 systemd/watchdog
+证据当成当前运行能力。
 
 ## 0. 部署前检查
 
@@ -23,7 +25,8 @@ $EDITOR ~/.dsh/trading.env
 chmod 600 ~/.dsh/trading.env
 ```
 
-HTX key 只开交易权限、禁用提现并绑定 IP；`TRADER_ACCOUNT_TYPE=swap` 不要删除，除非
+将该文件作为 Docker secret/env-file 注入容器。HTX key 只开交易权限、禁用提现并绑定 IP；
+`TRADER_ACCOUNT_TYPE=swap` 不要删除，除非
 已经明确要读另一种账户。环境文件、命令行和日志中都不要出现 key/secret。
 
 ### 运行模式在**启动时**决定（不在仓库里写死）
@@ -39,8 +42,7 @@ TRADER_MODE=paper dsh --profile trade
 TRADER_MODE=live_auto dsh --profile trade
 ```
 
-生产走 systemd 时写在 `~/.dsh/trading.env`（`EnvironmentFile`）里的 `TRADER_MODE`，改完
-`systemctl restart dsh-trader` 生效。非法模式值会被插件 Config 的 union 校验**拒绝启动**
+生产容器通过 secret/env 注入 `TRADER_MODE`；修改后重启唯一交易容器生效。非法模式值会被插件 Config 的 union 校验**拒绝启动**
 （不会静默退回 paper，避免"以为在实盘、其实在纸面"）。
 
 先执行 §12.2 A 的只读步骤，确认私有端点、永续账户和本地状态都能读到；该命令不下单、
@@ -56,68 +58,46 @@ node --env-file="$HOME/.dsh/trading.env" scripts/htx-preflight.mjs \
 若是首次接入且本地/远端不一致，停在这里人工核对，不要用 `--require-consistent` 失败
 当作“可以忽略”。
 
-安装 unit 前检查两个 unit 中的 `User`、`WorkingDirectory`、Node 路径、`dsh` 路径和
-数据库路径；当前示例默认用户为 `ubuntu`，并使用 `/workspace/dsh-trader`。
+容器必须满足以下部署契约：
 
-```bash
-sudo install -m 644 deploy/systemd/dsh-trader.service /etc/systemd/system/
-sudo install -m 644 deploy/systemd/dsh-watchdog.service /etc/systemd/system/
-sudo systemctl daemon-reload
-```
+- dsh 是 PID 1 或由等价的前台 init 承担唯一主进程；
+- 配置 `restart: always`（或等价 restart policy）；
+- `$DSH_HOME/trading/` 使用持久卷，不能把 SQLite/WAL 放在容器临时层；
+- 不挂载、启用或 sidecar 化 `deploy/systemd/dsh-watchdog.service`；该 unit 已硬禁用。
 
 ## 1. 启动、停止、查看
 
-启动时先启动交易进程，再启动 watchdog；watchdog 的 `After=` 只规定启动顺序，未绑定
-交易进程生命周期：
+启动唯一交易容器；不要再启动第二个交易/撤单进程：
 
 ```bash
-sudo systemctl enable --now dsh-trader.service
-sudo systemctl enable --now dsh-watchdog.service
-systemctl status dsh-trader.service --no-pager
-systemctl status dsh-watchdog.service --no-pager
+docker compose up -d trade
+docker compose ps trade
+docker compose logs --tail=100 -f trade
 ```
 
-查看最近日志或实时跟踪：
+计划内停机：
 
 ```bash
-journalctl -u dsh-trader.service -n 100 --no-pager
-journalctl -u dsh-watchdog.service -n 100 --no-pager
-journalctl -fu dsh-watchdog.service
+docker compose stop trade
 ```
 
-计划内停机时不要先停 watchdog。先停交易进程，等 watchdog 报告撤单成功且挂单计数为
-0，再停 watchdog：
+恢复服务时，先看容器启动日志中的 `crash_recovery` 与 `reconcile_report`，确认交易所
+账户/持仓/挂单/保护单和本地状态一致；旧的 `halted` 不会被心跳自动清除，必须人工执行
+`/resume`。
 
-```bash
-sudo systemctl stop dsh-trader.service
-journalctl -fu dsh-watchdog.service
-# 看到 cancelSucceeded=true、halted=true、openOrders=0 后执行：
-sudo systemctl stop dsh-watchdog.service
-```
+## 2. 心跳与 Docker 重启恢复
 
-恢复服务时，先确认交易所账户，再启动 trader/watchdog；旧的 `halted` 不会被心跳自动
-清除，必须人工执行 `/resume`。
+主进程每个 heartbeat 周期写入 `heartbeat(id=1).beat_at`。它只用于状态面、审计和持久化
+`halted` 熔断，不做 stale 超时撤单；外部 watchdog 已禁用。
 
-## 2. 心跳与 watchdog 判据
+容器重启后必须观察以下启动恢复顺序：
 
-完整语义以 `plan.md` §6.3 为准，这里只列运行时判定。主进程每个 heartbeat 周期写入
-同一 SQLite 的 `heartbeat(id=1).beat_at`；watchdog 使用 `now - beat_at > multiple ×
-interval`，默认是 `3 × 5000ms = 15000ms`，严格大于阈值才算 stale。
-
-watchdog 每轮至少输出如下字段：
-
-```json
-{"action":"none","reason":"healthy","openOrders":0,"halted":false}
-```
-
-超时或缺少心跳时，预期为 `action="halt_cancel"`，随后撤单成功的结果必须包含
-`cancelAttempted=true`、`cancelSucceeded=true`、`halted=true`；成功后再次读到
-`openOrders=0` 才能把“交易所挂单为 0”作为本轮的可计算证据。`reason` 应为
-`stale_heartbeat` 或 `missing_beat`。
-
-撤单失败时预期为 `cancelSucceeded=false`、`halted=false`，同时有告警/审计；不要手工
-把它解释成安全完成，常驻进程会在下一轮重试。watchdog 只输出
-`keyInjected`/`secretInjected` 布尔值，不输出凭据。
+1. SQLite 打开/迁移成功；
+2. 交易所账户、持仓、普通挂单和算法保护单只读重取成功；
+3. `CrashRecovery` 先处理 `created` 且无 ack 的在途意图：可确认则推进，未知则标记
+   `unknown` 并冻结标的；
+4. `reconcile` 再处理孤儿单、未知持仓、数量不一致和无保护单；
+5. 恢复/对账完成后才恢复周期任务。任何失败都要落审计并保持 fail-closed。
 
 本地检查心跳行（需要 sqlite3 命令行工具）：
 
@@ -126,8 +106,8 @@ sqlite3 ~/.dsh/trading/desk.db \
   'SELECT id, beat_at, halted FROM heartbeat WHERE id = 1;'
 ```
 
-`halted=1` 是熔断状态；心跳继续刷新也不会自动清除它。缺少 heartbeat 行不是健康，
-而是 `missing_beat` 输入，应等待 watchdog 完成撤单并落库。
+`halted=1` 是熔断状态；心跳继续刷新也不会自动清除它。缺少 heartbeat 行表示尚未完成
+初始化，应等待 dsh 启动恢复并查看原始错误，不能把缺失当成健康。
 
 ## 3. 人工 `/halt` 与 `/resume`
 
@@ -138,31 +118,18 @@ sqlite3 ~/.dsh/trading/desk.db \
 /resume
 ```
 
-`/halt` 是人工停机动作：暂停自动交易并尝试撤销全部挂单；撤单失败时保持告警并由
-外部 watchdog 兜底。`/resume` 只解除持久化熔断并刷新心跳，不会自动撤单，也不会
-自动开仓。执行 `/resume` 前必须由人工确认：交易所挂单、持仓、保护单和本地对账均已
-一致。恢复责任永远在人，不由 watchdog 或心跳自动恢复。
+`/halt` 是人工停机动作：先持久化暂停状态，再尝试撤销全部挂单；撤单失败时保持
+`halted`、落审计，必须人工在交易所核对并处理。`/resume` 只解除持久化熔断并刷新心跳，
+不会自动撤单，也不会自动开仓。执行 `/resume` 前必须由人工确认：交易所挂单、持仓、
+保护单和本地对账均已一致。
 
 ## 4. 确认“交易所挂单 = 0”
 
 至少做两次独立确认：
 
-1. 查 watchdog 最近一条 JSON：`openOrders=0` 且撤单结果为成功；
-2. 登录 HTX 对应的 USDT 永续账户，逐标的检查 Open Orders 页面/API 为 0；不要只看
+1. 查看 dsh 重启后的 `reconcile_report`，确认普通单与算法保护单的 merged 视图一致；
+2. 登录 HTX 对应的 USDT 永续账户，逐标的检查 Open Orders 页面/API；不要只看
    本地 `order_intents`，也不要把缺少 `clientOrderId` 的远端单当成不存在。
-
-如需重新执行一次检查，先确保环境文件已加载；这会触碰真实交易所的只读挂单查询，
-并在 stale 时执行撤单：
-
-```bash
-set -a; . ~/.dsh/trading.env; set +a
-cd /workspace/dsh-trader
-node scripts/watchdog-daemon.mjs --once --db="$HOME/.dsh/trading/desk.db"
-```
-
-退出码 `0` 表示本次检查完成且撤单（如有）成功；`2` 表示凭据缺失；`1` 表示参数、
-网络、审计、撤单或核验失败。退出码为 0 仍要看 JSON 的 `halted`、`cancelSucceeded`
-和 `openOrders`，不能只看 systemd 的绿色状态。
 
 ## 5. 每日运营检查
 
@@ -208,13 +175,14 @@ sqlite3 ~/.dsh/trading/desk.db \
 
 ## 6. 出事时的降级路径
 
-1. 先 `/halt`，并确认 watchdog 仍在运行；交易所侧直接撤单时保留截图/API 回执。
+1. 先 `/halt`；交易所侧直接撤单时保留截图/API 回执。
 2. 私有接口连续失败时进入“可平不可开”：禁止所有增加敞口的 open/非 reduceOnly 请求，
    只允许 reduceOnly 的减仓、平仓和保护单维护；不要为了恢复开仓而绕过硬闸。
 3. 出现未知持仓、数量不一致、有持仓无保护单或无法证明挂单为 0 时，保持 halted，
    人工对账；必要时使用交易所原生 reduce-only 平仓入口。
-4. 若主进程异常，保持 `dsh-watchdog.service` 活着；不要先停 watchdog，也不要删除
-   SQLite/WAL 文件。检查 key 权限、代理、HTX 永续账户类型和网络后再重试。
+4. 若主进程异常，不启动任何旁路 watchdog，也不要删除 SQLite/WAL 文件。让 Docker 按
+   restart policy 重启 dsh；检查容器启动日志中的恢复/对账审计，以及 key 权限、代理、
+   HTX 永续账户类型和网络后再决定是否 `/resume`。
 
 降级期间仍要记录失败原文、时间、交易所回执和 audit 序号。任何“恢复交易”都必须由
 人工确认；系统不会因为心跳恢复、服务重启或取消一次成功而自动执行 `/resume`。

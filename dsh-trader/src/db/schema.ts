@@ -314,8 +314,8 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 `
 
 /**
- * 建表（幂等）。`PRAGMA journal_mode = WAL` 必须在事务外执行，
- * 且多进程（主进程 + 外部 watchdog）读写依赖 WAL。
+ * 建表（幂等）。`PRAGMA journal_mode = WAL` 必须在事务外执行；WAL 让 dsh 崩溃后重启恢复
+ * 时的提交与读取保持可恢复，不代表项目有第二个 watchdog 进程。
  */
 export function migrate(db: SqliteLike): void {
   db.exec('PRAGMA journal_mode = WAL;')
