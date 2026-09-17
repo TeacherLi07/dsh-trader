@@ -13,24 +13,39 @@ if (!Array.isArray(packageJson.dsh?.client?.inject) || !packageJson.dsh.client.i
 	throw new Error('dsh.client must declare the renderer dependency')
 }
 if (!source.includes('window.__ModuleLoader__.load')) throw new Error('client bundle is not a DSH ModuleLoader registration')
+if (!source.includes('/api/trade/state')) throw new Error('client does not consume the read-only trade state route')
+if (source.includes("'POST'") || source.includes('trade_execute_order')) throw new Error('client contains a write trade path')
 
 let registration
+const fetchRequests = []
 const context = vm.createContext({
-	window: {
+  window: {
 		__ModuleLoader__: {
 			load(value) {
 				registration = value
-			},
-		},
-	},
+      },
+    },
+  },
+  fetch: async (input, init) => {
+    fetchRequests.push({ input: String(input), init: init ?? {} })
+    return { ok: true, status: 200, json: async () => ({ ok: true, state: {} }) }
+  },
+  setInterval: () => 1,
+  clearInterval: () => {},
 })
 vm.runInContext(source, context, { filename: clientPath })
 if (registration?.id !== 'dsh-trader' || typeof registration.factory !== 'function') throw new Error('invalid dsh-trader client registration')
 
 const React = {
-	createElement(type, props, ...children) {
-		return { type, props: props ?? {}, children }
-	},
+  createElement(type, props, ...children) {
+    return { type, props: props ?? {}, children }
+  },
+  useState(initial) {
+    return [initial, () => {}]
+  },
+  useEffect(effect) {
+    effect()
+  },
 }
 const registrations = []
 const mounted = []
@@ -58,12 +73,16 @@ if (main?.options.key !== 'trade-console' || panelIcon?.options.id !== 'trade-co
 if (typeof main.component !== 'function' || typeof panelIcon.component !== 'function') throw new Error('slot components are missing')
 main.component({})
 panelIcon.component({ size: 20, active: false })
+if (fetchRequests.length !== 1 || fetchRequests[0].input !== '/api/trade/state') throw new Error('state route was not fetched')
+if (fetchRequests[0].init.credentials !== 'same-origin' || fetchRequests[0].init.cache !== 'no-store') throw new Error('state fetch is not same-origin no-store')
 
 console.log(JSON.stringify({
 	client_bundle: clientPath,
 	registration_id: registration.id,
 	plugin_inject: plugin.inject,
-	slots: names,
-	read_only: source.includes('read-only probe'),
-	status: 'ok',
+  slots: names,
+  read_only: source.toLowerCase().includes('read-only state') && source.includes('/api/trade/state'),
+  state_route: '/api/trade/state',
+  state_fetch: fetchRequests[0],
+  status: 'ok',
 }, null, 2))

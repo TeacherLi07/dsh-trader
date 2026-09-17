@@ -1,0 +1,16 @@
+{
+  "date": "2026-09-17",
+  "stage": "S2",
+  "route": "/api/trade/state",
+  "client_fetch": {
+    "method": "GET",
+    "credentials": "same-origin",
+    "cache": "no-store",
+    "write_methods": [],
+    "trade_write_tools": [],
+    "status": "pass"
+  },
+  "state_fields": ["mode", "venue", "halted", "account", "positions", "openOrders", "credibility", "error"],
+  "browser_visual_confirmation": false,
+  "secrets_read": false
+}
