@@ -7,6 +7,12 @@
 export const name = 'dsh-trader'
 export const version = '0.0.1'
 
+/**
+ * 纯 UI 包的 host carrier：让 DSH client-modules 发现 ./client。
+ * 这里不能启动交易服务；交易行为仍只由 cordis.patch.yml 的 plugins/* 接线。
+ */
+export function apply(): void {}
+
 export * from './config.js'
 export * from './clock.js'
 export * from './cost.js'

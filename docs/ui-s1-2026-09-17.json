@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-17",
+  "profile": "trade",
+  "mode": "paper",
+  "port": 3099,
+  "production_config": true,
+  "watchdog": "disabled",
+  "route": {
+    "method": "GET",
+    "path": "/api/trade/state",
+    "authenticated": true,
+    "http_status": 200,
+    "mode": "paper",
+    "venue": "paper",
+    "positions": 0,
+    "open_orders": 0,
+    "account_credibility": "exchange-live",
+    "positions_credibility": "exchange-live",
+    "open_orders_credibility": "exchange-live"
+  },
+  "client_s0_check": {
+    "status": "pass",
+    "registration_id": "dsh-trader",
+    "slots": ["main", "sidebar.panellist"],
+    "read_only": true
+  },
+  "secrets_read": false,
+  "executed_actions": []
+}

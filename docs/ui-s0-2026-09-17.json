@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-17",
+  "head_at_review": "ba12260",
+  "profile": {
+    "name": "trade",
+    "bundles": [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "dsh-trader(link:/workspace/dsh-trader)"
+    ],
+    "patch_reload": "live"
+  },
+  "facts": {
+    "client_loader": "window.__ModuleLoader__.load",
+    "client_inject": ["slots"],
+    "slots": ["main", "sidebar.panellist"],
+    "connection_client_surface": ["rpc.call", "rpc.open", "generation", "state", "reconnect", "start"],
+    "desk_session_id": "trade-desk",
+    "agent_message_form": "notice",
+    "cycle_key_present": false,
+    "secrets_read": false
+  },
+  "slice": {
+    "registration_id": "dsh-trader",
+    "panel_id": "trade-console",
+    "read_only": true,
+    "llm_added": false,
+    "trade_tools_added": false,
+    "connection_used": false,
+    "server_endpoint_added": false
+  },
+  "verification": {
+    "pnpm_verify": {"status": "pass", "test_files": 61, "tests": 650},
+    "client_s0_check": {
+      "status": "pass",
+      "registration_id": "dsh-trader",
+      "slots": ["main", "sidebar.panellist"]
+    },
+    "temporary_web_graph_probe": {
+      "status": "pass",
+      "port": 3098,
+      "index_http_status": 200,
+      "dsh_trader_html_reference_count": 1,
+      "dsh_trader_bundle_http_status": 200,
+      "module_loader_registration_count": 53,
+      "trade_console_marker_count": 4,
+      "runtime_error_lines": 0,
+      "production_config": false
+    },
+    "full_trade_profile": {
+      "status": "blocked",
+      "reasons": [
+        "webserver 127.0.0.1:3080 already occupied",
+        "trade-rules.windows rejected by the existing W2/W3 config guard",
+        "trade-supervisor.l2 rejected by the existing W2/W3 config guard"
+      ]
+    }
+  },
+  "concurrent_workspace_commits": ["90d020d", "ba12260"],
+  "git_commit_created_by_this_run": false
+}

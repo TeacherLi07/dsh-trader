@@ -44,7 +44,7 @@
       config:
         # ★ 运行模式由**启动参数**决定，不写死在仓库里（红线「默认 paper」）：
         #   · 交互：`TRADER_MODE=live_auto dsh --profile trade`
-        #   · 生产：写进 systemd 的 EnvironmentFile（见 deploy/systemd/dsh-trader.env.example）
+        #   · 生产：通过 Docker secret/env-file 注入（见部署手册）
         #   未设 ⇒ paper；非法值会被本插件 Config 的 union 校验**拒绝启动**，不会静默降级。
         #   为什么用环境变量而不是 `--patch`：patch 的 `config` 是**整行替换**，用 --patch 覆盖
         #   mode 会把限额一起丢掉；env 是本项目既有的启动参数通道（TRADER_API_KEY/VENUE/ACCOUNT_TYPE）。
@@ -75,7 +75,7 @@
         paperInitialEquityQuote: 24.914
         paperSlippageBps: 5
         paperFeeBps: 5
-        # 密钥只从环境注入，绝不写进仓库/prompt；systemd 用 EnvironmentFile=%h/.dsh/trading.env (0600)
+        # 密钥只从环境注入，绝不写进仓库/prompt；Docker secret/env-file 必须保持 0600
         # 交互式运行：把这两行变量写进 $DSH_HOME/.env（chmod 600），DSH 启动时自动加载
         apiKey: !!js process.env.TRADER_API_KEY
         apiSecret: !!js process.env.TRADER_API_SECRET
@@ -87,6 +87,12 @@
         sandbox: false          # OKX 交叉校验/sandbox 时才置 true；HTX 无 sandbox 端点
         accountType: swap       # ★ HTX 现货与 USDT 永续账户分离；跑永续必须读 swap 账户
         positionSide: both      # ★ HTX 算法保护单必需（单向持仓模式 both）
+
+    # Trade Console 只读状态面；不提供任何交易控制路由
+    - id: trade-ui
+      name: dsh-trader/plugins/ui
+      config:
+        staleAfterMs: 120000
 
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor
@@ -142,3 +148,8 @@
         enabled: false
         sessionId: trade-probe-session
         resultPath: !!js dshHomePath('trading/probe-result.json')
+
+    # 纯 client carrier：空 host apply 只让 dsh.client 的 ./client bundle 进入 Web graph。
+    # 不注入交易服务、不读库、不启动交易 runtime；交易行为仍由上述 plugins/* 接线。
+    - id: trade-ui-client
+      name: dsh-trader

@@ -23,6 +23,7 @@ const target = join(repoRoot, 'node_modules', '@deepseek-ai')
 const PACKAGES = [
   'cordis',
   'dsh-agent',
+  'dsh-client-connection',
   'dsh-tools',
   'dsh-system-prompt',
   'dsh-session',
