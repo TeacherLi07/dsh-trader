@@ -54,13 +54,80 @@ window.__ModuleLoader__.load({
 			return snapshot
 		}
 
+		function useTradeCycles() {
+			const [snapshot, setSnapshot] = React.useState({ status: 'loading', body: null, error: null })
+			React.useEffect(() => {
+				let stopped = false
+				const refresh = async () => {
+					try {
+						const response = await fetch('/api/trade/cycles?limit=8', {
+							cache: 'no-store',
+							credentials: 'same-origin',
+						})
+						const body = await response.json()
+						if (stopped) return
+						if (!response.ok || body?.ok !== true) {
+							setSnapshot({ status: 'error', body, error: String(body?.error ?? `HTTP ${response.status}`) })
+							return
+						}
+						setSnapshot({ status: 'ready', body, error: null })
+					} catch (error) {
+						if (!stopped) setSnapshot({ status: 'error', body: null, error: String(error) })
+					}
+				}
+				void refresh()
+				const timer = setInterval(() => void refresh(), 10_000)
+				return () => {
+					stopped = true
+					clearInterval(timer)
+				}
+			}, [])
+			return snapshot
+		}
+
+		function useTradeCycleDetail(cycleId) {
+			const [snapshot, setSnapshot] = React.useState({ status: 'idle', body: null, error: null })
+			React.useEffect(() => {
+				if (!cycleId) return undefined
+				let stopped = false
+				fetch(`/api/trade/cycles?cycleId=${encodeURIComponent(cycleId)}`, {
+					cache: 'no-store',
+					credentials: 'same-origin',
+				})
+					.then(async (response) => ({ response, body: await response.json() }))
+					.then(({ response, body }) => {
+						if (stopped) return
+						if (!response.ok || body?.ok !== true || body?.cycle === undefined) {
+							setSnapshot({ status: 'error', body, error: String(body?.error ?? `HTTP ${response.status}`) })
+							return
+						}
+						setSnapshot({ status: 'ready', body, error: null })
+					})
+					.catch((error) => {
+						if (!stopped) setSnapshot({ status: 'error', body: null, error: String(error) })
+					})
+				return () => {
+					stopped = true
+				}
+			}, [cycleId])
+			return snapshot
+		}
+
 		function display(value) {
 			return value === null || value === undefined || value === '' ? '—' : String(value)
 		}
 
 		function TradeConsolePanel() {
 			const snapshot = useTradeState()
+			const cyclesSnapshot = useTradeCycles()
+			const [selectedCycleId, setSelectedCycleId] = React.useState(null)
+			const cycleDetailSnapshot = useTradeCycleDetail(selectedCycleId)
 			const state = snapshot.body?.ok === true ? snapshot.body.state : null
+			const startup = snapshot.body?.startup ?? null
+			const cycles = cyclesSnapshot.body?.ok === true && Array.isArray(cyclesSnapshot.body.cycles)
+				? cyclesSnapshot.body.cycles
+				: []
+			const cycleDetail = cycleDetailSnapshot.body?.ok === true ? cycleDetailSnapshot.body.cycle : null
 			const account = state?.account?.value
 			const positions = state?.positions?.value
 			const openOrders = state?.openOrders?.value
@@ -85,6 +152,54 @@ window.__ModuleLoader__.load({
 					React.createElement('section', { style: card },
 						React.createElement('strong', null, snapshot.status === 'ready' ? '状态已读取' : '正在重建'),
 						React.createElement('p', { style: { ...muted, margin: '8px 0 0' } }, snapshot.error ?? '仅允许 GET /api/trade/state；没有交易控制入口。'),
+					),
+					React.createElement('section', { style: card },
+						React.createElement('strong', null, '周期台账'),
+						React.createElement('p', { style: { ...muted, margin: '8px 0 12px' } }, cyclesSnapshot.error ?? '以决策记录为周期根，可下钻到执行与结算事实。'),
+						cycles.length === 0
+							? React.createElement('p', { style: { ...muted, margin: 0 } }, cyclesSnapshot.status === 'loading' ? '正在读取周期…' : '暂无已落库周期。')
+							: React.createElement('div', { style: { display: 'grid', gap: 8 } }, cycles.slice(0, 8).map((cycle) =>
+								React.createElement('button', {
+									key: cycle.cycleId,
+									type: 'button',
+									onClick: () => setSelectedCycleId(cycle.cycleId),
+									style: { ...row, background: 'transparent', border: '0.5px solid var(--dsw-alias-border-l1)', borderRadius: 8, color: 'inherit', cursor: 'pointer', padding: 10, textAlign: 'left' },
+								},
+									React.createElement('span', null, `${display(cycle.symbol)} · ${display(cycle.action)}`),
+									React.createElement('span', { style: muted }, display(cycle.settlement)),
+								),
+							)),
+					),
+					cycleDetail !== null
+						? React.createElement('section', { style: card },
+							React.createElement('strong', null, `周期详情 · ${display(cycleDetail.cycleId)}`),
+							React.createElement('p', { style: { ...muted, margin: '8px 0 0' } }, `${display(cycleDetail.rationale)} · orders=${cycleDetail.orders?.length ?? 0} · fills=${cycleDetail.fills?.length ?? 0} · audits=${cycleDetail.audit?.length ?? 0}`),
+						)
+						: null,
+					React.createElement('section', { style: card },
+						React.createElement('strong', null, '启动恢复'),
+						React.createElement('dl', { style: { display: 'grid', gap: 10, margin: '10px 0 0' } },
+							React.createElement('div', { style: row },
+								React.createElement('dt', { style: muted }, 'Phase'),
+								React.createElement('dd', { style: { margin: 0 } }, display(startup?.phase)),
+							),
+							React.createElement('div', { style: row },
+								React.createElement('dt', { style: muted }, 'Current step'),
+								React.createElement('dd', { style: { margin: 0 } }, display(startup?.currentStep)),
+							),
+							React.createElement('div', { style: row },
+								React.createElement('dt', { style: muted }, 'Uptime'),
+								React.createElement('dd', { style: { margin: 0 } }, startup === null ? '—' : `${Math.floor(startup.uptimeMs / 1000)}s`),
+							),
+							React.createElement('div', { style: row },
+								React.createElement('dt', { style: muted }, 'Restarts 1h / 24h'),
+								React.createElement('dd', { style: { margin: 0 } }, startup === null ? '—' : `${startup.restartCount1h} / ${startup.restartCount24h}`),
+							),
+							React.createElement('div', { style: row },
+								React.createElement('dt', { style: muted }, 'Last failure'),
+								React.createElement('dd', { style: { margin: 0, maxWidth: 540, overflowWrap: 'anywhere', textAlign: 'right' } }, display(startup?.lastFailure)),
+							),
+						),
 					),
 					React.createElement('section', { style: card },
 						React.createElement('dl', { style: { display: 'grid', gap: 10, margin: 0 } },

@@ -11,6 +11,7 @@ import { DecisionJournal } from '../src/exec/journal.js'
 import { createExecRuntime, createRiskStateProvider } from '../src/exec/runtime.js'
 import type { ExecRuntimeConfig } from '../src/exec/ports.js'
 import { HeartbeatStore } from '../src/supervisor/heartbeat.js'
+import { readStartupState } from '../src/ui/startup.js'
 
 const NOW = 1_700_000_000_000
 const SYMBOL = 'BTC/USDT:USDT'
@@ -144,6 +145,11 @@ describe('ExecRuntime 组合根', () => {
     const account = await runtime.broker.getAccount()
     expect(account.equityQuote).toBe(4321)
     expect(account.equityQuote).toBeGreaterThan(0)
+    const startup = readStartupState(db, clock.now())
+    expect(startup).not.toBeNull()
+    expect(startup?.phase).toBe('ready')
+    expect(startup?.restartCount1h).toBeGreaterThan(0)
+    expect(startup?.steps.every((step) => step.status === 'succeeded')).toBe(true)
 
     const first = runtime.reconcileOnce()
     const second = runtime.reconcileOnce()

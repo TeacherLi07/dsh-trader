@@ -11,7 +11,7 @@
  * markdown 只作只读审计产物；权威数据只在这里。
  */
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -322,9 +322,20 @@ export function migrate(db: SqliteLike): void {
   db.exec('PRAGMA foreign_keys = ON;')
   db.exec(SCHEMA_SQL)
   // 增量迁移：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表补列。
-  // 用 PRAGMA table_info 探测而不是 user_version，是为了让迁移本身幂等且可重复执行。
-  if (!hasColumn(db, 'decisions', 'timeframe')) {
-    db.exec('ALTER TABLE decisions ADD COLUMN timeframe TEXT;')
+  // 用 PRAGMA table_info 探测而不是 user_version，是为了让迁移本身幂等且可重复执行；
+  // 不能只补最近新增的 timeframe，否则旧运行库会在读取成本/触发字段时整条查询失败。
+  const decisionColumns: readonly [string, string][] = [
+    ['timeframe', 'ALTER TABLE decisions ADD COLUMN timeframe TEXT;'],
+    ['tokens_in', 'ALTER TABLE decisions ADD COLUMN tokens_in INTEGER;'],
+    ['tokens_out', 'ALTER TABLE decisions ADD COLUMN tokens_out INTEGER;'],
+    ['tokens_cached', 'ALTER TABLE decisions ADD COLUMN tokens_cached INTEGER;'],
+    ['cost_usd', 'ALTER TABLE decisions ADD COLUMN cost_usd REAL;'],
+    ['cost_known', 'ALTER TABLE decisions ADD COLUMN cost_known INTEGER;'],
+    ['duration_ms', 'ALTER TABLE decisions ADD COLUMN duration_ms INTEGER;'],
+    ['trigger_source', 'ALTER TABLE decisions ADD COLUMN trigger_source TEXT;'],
+  ]
+  for (const [column, sql] of decisionColumns) {
+    if (!hasColumn(db, 'decisions', column)) db.exec(sql)
   }
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }

@@ -110,6 +110,7 @@ export interface StartupStep {
 
 export interface StartupProjectionInput {
   readonly bootAt: number
+  readonly asOf: number
   readonly steps: readonly StartupStep[]
   readonly restartCount1h: number
   readonly restartCount24h: number
@@ -118,6 +119,8 @@ export interface StartupProjectionInput {
 
 export interface StartupProjection {
   readonly bootAt: number
+  readonly asOf: number
+  readonly uptimeMs: number
   readonly phase: 'rebuilding' | 'ready' | 'failed'
   readonly currentStep: StartupStepId | null
   readonly steps: readonly StartupStep[]
@@ -133,6 +136,8 @@ export function projectStartupState(input: StartupProjectionInput): StartupProje
   const ready = input.steps.some((step) => step.id === 'ready' && step.status === 'succeeded')
   return {
     bootAt: input.bootAt,
+    asOf: input.asOf,
+    uptimeMs: Math.max(0, input.asOf - input.bootAt),
     phase: failed === undefined ? (ready ? 'ready' : 'rebuilding') : 'failed',
     currentStep: current?.id ?? (failed?.id ?? null),
     steps: input.steps,

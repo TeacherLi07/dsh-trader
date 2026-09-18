@@ -64,6 +64,7 @@ describe('UI state projection', () => {
   it('projects startup rebuild and failure without inventing readiness', () => {
     const rebuilding = projectStartupState({
       bootAt: AS_OF,
+      asOf: AS_OF + 5_000,
       steps: [
         { id: 'database', status: 'succeeded' },
         { id: 'exchange', status: 'running' },
@@ -75,6 +76,7 @@ describe('UI state projection', () => {
     })
     const failed = projectStartupState({
       bootAt: AS_OF,
+      asOf: AS_OF + 5_000,
       steps: [
         { id: 'database', status: 'succeeded' },
         { id: 'exchange', status: 'failed', error: 'network down' },

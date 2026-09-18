@@ -1,15 +1,20 @@
 # dsh-trader 操作台（Trade Console）架构设计
 
-> 状态：**S0 Web 启动/挂载、S1 只读状态路由、S2 client 状态消费已验证；浏览器视觉确认与启动计数仍待做**（v3，2026-09-17）
+> 状态：**S0 Web 启动/挂载、S1 启动恢复投影、S2 client 状态消费已验证；浏览器视觉确认仍待做**（v4，2026-09-18）
 > v3 的修订动因（来自澄清）：① 交易 agent **可能不再有"会话"概念** ⇒ 组织单位必须换；② 重启后数据可信度**本就下降** ⇒ 不假装持久真相，改为可信度标注；③ 形态确认为**同进程**、DSH 是交易 docker 主进程、`restart: unless-stopped` 保活 ⇒ 生存性靠"启动能正确重建且不死锁"，不靠第二个进程；④ 主要风险变成**信息源多且异质导致杂乱** ⇒ 必须给出整合规则。
 
 当前实现：`dsh-trader` 已声明 `dsh.client` 与 `exports["./client"]`，构建产物为 DSH
-`window.__ModuleLoader__.load(...)` bundle；S0 client 只注册 `main` 与
-`sidebar.panellist` 两个只读座位，不读取交易数据、不调用 `connection`、不提供控制操作。
+`window.__ModuleLoader__.load(...)` bundle；client 注册 `main` 与
+`sidebar.panellist` 两个只读座位，轮询状态与周期 GET 投影，不调用 `connection`、不提供
+交易控制操作。
 `scripts/client-s0-check.mjs` 可在无浏览器/无网络条件下验证 bundle 形状、注入面和座位注册；
-服务端已注册只读 `GET /api/trade/state`：通过 DSH authenticated connection 读取当前
-TradePorts 的账户/持仓/挂单与持久化 `halted`，runtime 尚未就绪时返回 503 + 原因；没有
-POST、撤单、模式切换或其它控制路径。真正启动 `trade` profile 查看原生外壳与座位仍是
+服务端已注册只读 `GET /api/trade/state` 与 `GET /api/trade/cycles`：通过 DSH authenticated connection 读取当前
+TradePorts 的账户/持仓/挂单与持久化 `halted`；runtime 启动过程追加到已有
+`audit_events`，状态接口同时投影当前步骤、失败原文、uptime 和近 1h/24h 启动次数，
+所以 runtime 尚未就绪时也能返回 503 + 启动恢复信息；没有 POST、撤单、模式切换或其它
+控制路径。周期台账 v0 以 `decisions.decision_id` 为周期根，通过已有外键/哈希关联计划、
+上下文、订单、成交、结算、教训和精确匹配的审计事件；没有显式关联的事件不强行归入。
+真正启动 `trade` profile 查看原生外壳与座位仍是
 S0 的未完成验收。
 
 ---
@@ -238,9 +243,9 @@ UI 必须显示：当前处于哪一步、失败原因（原样）、`boot_at` /
 | 阶段 | 目标 | 判据 |
 |---|---|---|
 | **S0 事实确认** | ~~真启动一次该 profile 的 Web 面~~；先以可复现 bundle 探针确认 client 契约，再做浏览器实机确认外壳、座位与 agent 面，确认**交易 agent 当前的会话形态到底存不存在**（P4 需要事实而非假设） | **已完成：** bundle 探针 + `paper` trade profile Web 启动 + authenticated HTTP 验证；**待完成：** 浏览器视觉确认，并记录消息/工具调用当前挂在什么键上。证据：`docs/ui-s1-2026-09-17.md` |
-| **S1 启动重建可见化** | 重建状态机 + 启动计数 + 崩溃循环可见 | **基础已完成：** 只读状态路由与 `projectStartupState` 已具备；**待完成：** 将 runtime 的启动步骤/失败次数持久化并在浏览器显示 |
-| **S2 状态面** | 当前状态 + 执行与持仓 + 可信度标注 | **基础已完成：** client 轮询 `/api/trade/state` 并展示 mode/venue、halted、权益、持仓/挂单数量、可信度与错误；**待完成：** 浏览器视觉确认与启动计数接入 |
-| **S3 周期台账与周期详情** | 周期投影 + 上下文快照解释 + 消息归集 | 任一周期能追到：为什么触发、模型看到了什么（含遮蔽清单）、被哪条硬闸拒、结果如何 |
+| **S1 启动重建可见化** | 重建状态机 + 启动计数 + 崩溃循环可见 | **功能已完成：** runtime 将 `boot → database → exchange → recovery → reconcile → ready` 迁移追加到 `audit_events`；状态路由在 ports 尚未就绪时也返回启动投影，含失败原文、uptime、近 1h/24h 计数。浏览器视觉确认待做 |
+| **S2 状态面** | 当前状态 + 执行与持仓 + 可信度标注 | **功能已完成：** client 轮询 `/api/trade/state` 并展示 mode/venue、halted、权益、持仓/挂单数量、可信度、错误和启动恢复卡；浏览器视觉确认待做 |
+| **S3 周期台账与周期详情** | 周期投影 + 上下文快照解释 + 消息归集 | **功能基础已完成：** 只读 `/api/trade/cycles` 返回列表或 `cycleId` 详情，可追到 decision、triggerSource、context snapshot、plan、intent/order/fill、outcome、lesson 与精确引用的 audit；W1/模型消息的显式 cycle key 仍待后续接线 |
 | **S4 横切视图** | 审计与事件 · 成本与预算 · 结算与教训 | 聚合数字与脚本口径逐字段一致；每个数字可下钻到原始行 |
 | **S5 控制面** | 暂停 / 恢复 | 成功与失败都落审计；其它动作一律拒绝 |
 | **S6（可选）** | 告警分级与外发 | P0/P1/P2 有明确投递策略 |

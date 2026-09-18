@@ -34,7 +34,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 61 文件 / 650 测试
+pnpm test                        # vitest run，当前 63 文件 / 655 测试
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来

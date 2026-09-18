@@ -16,6 +16,7 @@ import { PlanStore } from '../plan/store.js'
 import { CcxtBroker, type CcxtProExchangeLike, type RiskStateProvider } from './ccxt-broker.js'
 import type { Broker, Venue } from './broker.js'
 import { DecisionJournal } from './journal.js'
+import { StartupTracker } from './startup.js'
 import { PaperBroker } from './paper.js'
 import { LocalStateReader } from './preflight.js'
 import {
@@ -299,16 +300,26 @@ export async function createExecRuntime(
   config: ExecRuntimeConfig,
   deps: ExecRuntimeDeps,
 ): Promise<ExecRuntime> {
+  const journal = new DecisionJournal(deps.db)
+  const startup = new StartupTracker(journal, deps.clock)
+  startup.start('database')
+
   // 当前没有结构化的逐单人工确认通道；在任何 runtime 参数/交易所处理前失败，
   // 不能把未确认的实盘执行伪装成安全过渡档。
-  assertExecRuntimeMode(config.mode)
-  const limits = limitsFromConfig(config)
-  validateConfig(config, limits)
+  let limits: RiskLimits | null
+  try {
+    assertExecRuntimeMode(config.mode)
+    limits = limitsFromConfig(config)
+    validateConfig(config, limits)
+  } catch (error) {
+    startup.fail('database', error)
+    throw error
+  }
+  startup.succeed('database')
 
   const bars = new BarArchive(deps.db)
   const features = new FeatureArchive(deps.db)
   const plans = new PlanStore(deps.db)
-  const journal = new DecisionJournal(deps.db)
   const local = new LocalStateReader(deps.db)
   const heartbeat = new HeartbeatStore(new Statements(deps.db))
   const riskStateProvider = createRiskStateProvider(deps.db, deps.clock, journal)
@@ -318,38 +329,45 @@ export async function createExecRuntime(
   let exchange: CcxtProExchangeLike | undefined
   let closeExchange: (() => Promise<void>) | undefined
 
-  if (config.mode === 'paper' || !hasCredential(config.apiKey) || !hasCredential(config.apiSecret)) {
-    // 缺凭据的 live 配置安全落到 paper，但保留原 mode；gate 会因 venue=paper deny，
-    // 所以这个降级不会把「想实盘」误变成可下单的纸面授权。
-    const priceOf = deps.priceOf ?? config.priceOf ?? defaultPriceOf(bars, config.symbols, config.timeframes)
-    broker = new PaperBroker({
-      clock: deps.clock,
-      book: { price: priceOf },
-      initialEquityQuote: config.paperInitialEquityQuote,
-      slippageBps: config.paperSlippageBps,
-      feeBps: config.paperFeeBps,
-    })
-  } else {
-    const venue = config.venue as Exclude<Venue, 'paper'>
-    const factory: ExchangeFactory = deps.createExchange ?? defaultCreateExchange
-    exchange = await factory(venue, { enableRateLimit: true, defaultType: config.accountType })
-    applyProxyAwareFetch(exchange)
-    broker = new CcxtBroker({
-      exchange,
-      venue,
-      clock: deps.clock,
-      apiKey: config.apiKey as string,
-      apiSecret: config.apiSecret as string,
-      accountType: config.accountType,
-      positionSide: config.positionSide ?? 'both',
-      spreadSymbol: config.symbols[0],
-      sandbox: config.sandbox === true,
-      riskStateProvider,
-    })
-    closeExchange = async () => {
-      const closable = exchange as CcxtProExchangeLike & { close?: () => Promise<void> }
-      await closable.close?.()
+  startup.start('exchange')
+  try {
+    if (config.mode === 'paper' || !hasCredential(config.apiKey) || !hasCredential(config.apiSecret)) {
+      // 缺凭据的 live 配置安全落到 paper，但保留原 mode；gate 会因 venue=paper deny，
+      // 所以这个降级不会把「想实盘」误变成可下单的纸面授权。
+      const priceOf = deps.priceOf ?? config.priceOf ?? defaultPriceOf(bars, config.symbols, config.timeframes)
+      broker = new PaperBroker({
+        clock: deps.clock,
+        book: { price: priceOf },
+        initialEquityQuote: config.paperInitialEquityQuote,
+        slippageBps: config.paperSlippageBps,
+        feeBps: config.paperFeeBps,
+      })
+    } else {
+      const venue = config.venue as Exclude<Venue, 'paper'>
+      const factory: ExchangeFactory = deps.createExchange ?? defaultCreateExchange
+      exchange = await factory(venue, { enableRateLimit: true, defaultType: config.accountType })
+      applyProxyAwareFetch(exchange)
+      broker = new CcxtBroker({
+        exchange,
+        venue,
+        clock: deps.clock,
+        apiKey: config.apiKey as string,
+        apiSecret: config.apiSecret as string,
+        accountType: config.accountType,
+        positionSide: config.positionSide ?? 'both',
+        spreadSymbol: config.symbols[0],
+        sandbox: config.sandbox === true,
+        riskStateProvider,
+      })
+      closeExchange = async () => {
+        const closable = exchange as CcxtProExchangeLike & { close?: () => Promise<void> }
+        await closable.close?.()
+      }
     }
+    startup.succeed('exchange')
+  } catch (error) {
+    startup.fail('exchange', error)
+    throw error
   }
 
   let unsubscribe: Disposer = () => {}
@@ -359,6 +377,7 @@ export async function createExecRuntime(
     unsubscribe = broker.subscribeUserData(() => undefined)
   } catch (error) {
     await closeExchange?.()
+    startup.fail('exchange', error)
     throw error
   }
 
@@ -556,6 +575,7 @@ export async function createExecRuntime(
   // `order_intents` 里 `created` 且无 ack 的在途意图是"请求可能已发出甚至已成交"的唯一线索，
   // 普通 Reconciler 只看 orders/positions，覆盖不到它。旧实现里 CrashRecovery 只在验收脚本
   // 被 new 出来，常驻进程从不调用 ⇒ 崩溃后 created 意图永不收敛，也不触发"未知即冻结"。
+  startup.start('recovery')
   try {
     const recovered = await new CrashRecovery({
       journal,
@@ -576,6 +596,7 @@ export async function createExecRuntime(
       },
       ts: deps.clock.now(),
     })
+    startup.succeed('recovery')
   } catch (error) {
     // 恢复失败 = 状态未知。fail-closed：冻结全部配置标的；但不阻断启动
     //（交易所短暂不可用不应让进程起不来），与周期对账失败同一处理。
@@ -586,11 +607,14 @@ export async function createExecRuntime(
       payload: { error: String(error), freezeSymbols: [...config.symbols] },
       ts: deps.clock.now(),
     })
+    startup.fail('recovery', error)
   }
 
   try {
     // 启动先对账，再注册周期任务；启动报告失败就不返回看似可用的 runtime。
+    startup.start('reconcile')
     await reconcileOnce()
+    startup.succeed('reconcile')
     if (!disposed) timer = deps.clock.setInterval(() => void reconcileOnce().catch(onPeriodicError), config.reconcileMs)
     if (!disposed) {
       settleTimer = deps.clock.setInterval(
@@ -598,7 +622,10 @@ export async function createExecRuntime(
         config.settleMs ?? 60_000,
       )
     }
+    startup.start('ready')
+    startup.succeed('ready')
   } catch (error) {
+    startup.fail('reconcile', error)
     disposed = true
     timer?.()
     settleTimer?.()

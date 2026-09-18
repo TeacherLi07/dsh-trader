@@ -14,6 +14,8 @@ if (!Array.isArray(packageJson.dsh?.client?.inject) || !packageJson.dsh.client.i
 }
 if (!source.includes('window.__ModuleLoader__.load')) throw new Error('client bundle is not a DSH ModuleLoader registration')
 if (!source.includes('/api/trade/state')) throw new Error('client does not consume the read-only trade state route')
+if (!source.includes('/api/trade/cycles?limit=8')) throw new Error('client does not consume the read-only cycle ledger route')
+if (!source.includes('restartCount1h') || !source.includes('currentStep')) throw new Error('client does not consume startup recovery projection')
 if (source.includes("'POST'") || source.includes('trade_execute_order')) throw new Error('client contains a write trade path')
 
 let registration
@@ -73,8 +75,11 @@ if (main?.options.key !== 'trade-console' || panelIcon?.options.id !== 'trade-co
 if (typeof main.component !== 'function' || typeof panelIcon.component !== 'function') throw new Error('slot components are missing')
 main.component({})
 panelIcon.component({ size: 20, active: false })
-if (fetchRequests.length !== 1 || fetchRequests[0].input !== '/api/trade/state') throw new Error('state route was not fetched')
-if (fetchRequests[0].init.credentials !== 'same-origin' || fetchRequests[0].init.cache !== 'no-store') throw new Error('state fetch is not same-origin no-store')
+const stateRequest = fetchRequests.find((request) => request.input === '/api/trade/state')
+const cyclesRequest = fetchRequests.find((request) => request.input === '/api/trade/cycles?limit=8')
+if (fetchRequests.length !== 2 || stateRequest === undefined || cyclesRequest === undefined) throw new Error('state/cycle routes were not fetched')
+if (stateRequest.init.credentials !== 'same-origin' || stateRequest.init.cache !== 'no-store') throw new Error('state fetch is not same-origin no-store')
+if (cyclesRequest.init.credentials !== 'same-origin' || cyclesRequest.init.cache !== 'no-store') throw new Error('cycle fetch is not same-origin no-store')
 
 console.log(JSON.stringify({
 	client_bundle: clientPath,
@@ -83,6 +88,7 @@ console.log(JSON.stringify({
   slots: names,
   read_only: source.toLowerCase().includes('read-only state') && source.includes('/api/trade/state'),
   state_route: '/api/trade/state',
-  state_fetch: fetchRequests[0],
+  state_fetch: stateRequest,
+  cycles_fetch: cyclesRequest,
   status: 'ok',
 }, null, 2))

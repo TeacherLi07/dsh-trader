@@ -1,0 +1,23 @@
+{
+  "date": "2026-09-18",
+  "stage": "S1",
+  "audit_source": "audit_events",
+  "startup_steps": ["boot", "database", "exchange", "recovery", "reconcile", "ready"],
+  "projection_fields": ["phase", "currentStep", "uptimeMs", "restartCount1h", "restartCount24h", "lastFailure"],
+  "ports_unready_response": {
+    "status": 503,
+    "includes_startup_projection": true
+  },
+  "paper_profile_http": {
+    "index_status": 303,
+    "state_status": 200,
+    "startup_phase": "ready",
+    "startup_succeeded_steps": 6,
+    "restart_count_1h": 1,
+    "restart_count_24h": 1
+  },
+  "new_schema_tables": 0,
+  "write_routes": [],
+  "browser_visual_confirmation": false,
+  "secrets_read": false
+}

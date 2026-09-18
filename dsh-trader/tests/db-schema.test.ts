@@ -80,6 +80,27 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(() => migrate(db)).not.toThrow()
   })
 
+  it('给旧库补齐成本与触发来源列，避免周期/成本读取整条失败', () => {
+    const columns = (): string[] =>
+      (db.prepare('PRAGMA table_info(decisions)').all() as { name: string }[]).map((row) => row.name)
+    for (const column of ['tokens_in', 'tokens_out', 'tokens_cached', 'cost_usd', 'cost_known', 'duration_ms', 'trigger_source']) {
+      db.exec(`ALTER TABLE decisions DROP COLUMN ${column}`)
+    }
+    expect(columns()).not.toContain('trigger_source')
+
+    migrate(db)
+    expect(columns()).toEqual(expect.arrayContaining([
+      'tokens_in',
+      'tokens_out',
+      'tokens_cached',
+      'cost_usd',
+      'cost_known',
+      'duration_ms',
+      'trigger_source',
+    ]))
+    expect(() => migrate(db)).not.toThrow()
+  })
+
   it('allows at most one active plan card per symbol, across symbols independently', () => {
     insertPlan('p1', 'BTC/USDT:USDT')
     expect(() => insertPlan('p2', 'BTC/USDT:USDT')).toThrow()

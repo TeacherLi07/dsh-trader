@@ -1,0 +1,21 @@
+{
+  "date": "2026-09-18",
+  "stage": "S3",
+  "list_route": "GET /api/trade/cycles?limit=8",
+  "detail_route": "GET /api/trade/cycles?cycleId=<decision_id>",
+  "cycle_root": "decisions.decision_id",
+  "joined_sources": ["context_snapshots", "plan_cards", "order_intents", "orders", "fills", "outcomes", "lessons", "audit_events"],
+  "paper_profile_http": {
+    "state_status": 200,
+    "cycles_status": 200,
+    "cycle_count": 8,
+    "detail_status": 200,
+    "detail_ok": true
+  },
+  "legacy_db_migration": {
+    "missing_columns_repaired": ["tokens_in", "tokens_out", "tokens_cached", "cost_usd", "cost_known", "duration_ms", "trigger_source"]
+  },
+  "write_routes": [],
+  "browser_visual_confirmation": false,
+  "secrets_read": false
+}
