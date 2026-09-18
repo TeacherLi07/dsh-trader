@@ -1,0 +1,23 @@
+{
+  "date": "2026-09-18",
+  "task": "T3.4",
+  "schema_version": 4,
+  "verification": {
+    "typecheck": true,
+    "build": true,
+    "test_files": 65,
+    "tests": 662,
+    "all_passed": true
+  },
+  "coverage": {
+    "historical_schema_fixture": true,
+    "w1_persistent_queue": true,
+    "workflow_context_token": true,
+    "fake_htx_startup_recovery": true,
+    "nonempty_acceptance_guards": true
+  },
+  "remaining_external": [
+    "真实 HTX 有持仓+算法保护单 merged 对账",
+    "结构化 live_confirm 逐单确认通道"
+  ]
+}

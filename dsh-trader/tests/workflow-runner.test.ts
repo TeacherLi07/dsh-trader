@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import Database from 'better-sqlite3'
+import { migrate } from '../src/db/schema.js'
 import type { TradePorts } from '../src/exec/ports.js'
 import type { JudgmentResult } from '../src/agents/types.js'
 import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { buildJudgmentPack, createWorkflowTool, runJudgmentWorkflow, workflowFeatureMap } from '../src/plugins/workflow-runner.js'
+import { WorkflowContextStore } from '../src/supervisor/workflow-context.js'
 
 const CLOSE = 100
 const AS_OF = 1_700_000_000_000
@@ -35,7 +38,7 @@ const SNAPSHOT = {
 
 const AUDITS: unknown[] = []
 
-function ports(): TradePorts {
+function ports(database: Database.Database | undefined = undefined): TradePorts {
   AUDITS.length = 0
   return {
     symbols: ['BTC/USDT'],
@@ -52,7 +55,7 @@ function ports(): TradePorts {
       recentLessons: () => [{ lessonId: 'lesson-valid', decisionId: 'd1', symbol: 'BTC/USDT', text: 'x', evidenceRefs: [], regimeBucket: null, createdAt: AS_OF - 100, expiresAt: null }],
       appendAudit: (event: unknown) => { AUDITS.push(event); return 'audit' },
     } as never,
-    db: {} as never,
+    db: (database ?? {}) as never,
     bars: {} as never,
     limits: null,
     mode: 'paper',
@@ -148,5 +151,50 @@ describe('trade_workflow_run production runner', () => {
     const tool = createWorkflowTool(() => testPorts, { start: async () => { throw new Error('fake child unavailable') } })
     await expect(tool.execute({ symbol: 'ETH/USDT', timeframe: '1h' }, { agent: { id: 'desk' } } as never)).rejects.toThrow(/不在配置标的池/)
     expect(AUDITS.some((event) => (event as { kind?: string }).kind === 'judgment_workflow_failed')).toBe(true)
+  })
+
+  it('successful workflow persists a context token hash for later plan/decision binding', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    try {
+      const testPorts = ports(db)
+      const pack = await buildJudgmentPack(testPorts, 'BTC/USDT', '1h')
+      const fake = {
+        start: async (_provider: string, request: SubagentStartRequest): Promise<SubagentRun> => {
+          const label = String(request.label)
+          const value = label === 'market'
+            ? report(pack, 'market', 'bar.close')
+            : label === 'flow'
+              ? report(pack, 'flow', 'funding.rate')
+              : label === 'news'
+                ? report(pack, 'news', 'bar.close')
+                : label === 'onchain'
+                  ? report(pack, 'onchain', 'basis.bps')
+                  : label === 'bull' || label === 'bear'
+                    ? argument(pack.contextHash)
+                    : { contextHash: pack.contextHash, disposition: 'proceed', failureModes: [], missingEvidence: [] }
+          return {
+            id: `child-token-${label}` as never,
+            localAgent: undefined,
+            result: Promise.resolve({ stopReason: 'completed', output: [], structured: value }),
+            dispose: async () => undefined,
+          }
+        },
+      }
+      const result = await runJudgmentWorkflow(testPorts, 'BTC/USDT', '1h', {
+        subagents: fake,
+        parent: { id: 'desk' } as never,
+        signal: new AbortController().signal,
+      })
+      expect(result.contextToken).toMatch(/^[0-9a-f]{64}$/)
+      const verified = new WorkflowContextStore(db).verify(result.contextToken as string, AS_OF, {
+        symbol: 'BTC/USDT',
+        timeframe: '1h',
+        contextHash: result.contextHash,
+      })
+      expect(verified).toMatchObject({ packId: pack.packId, resultHash: expect.stringMatching(/^sha256:/) })
+    } finally {
+      db.close()
+    }
   })
 })

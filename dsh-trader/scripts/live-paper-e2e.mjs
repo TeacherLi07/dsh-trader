@@ -181,6 +181,22 @@ const afterFirst = counts(first.db)
 const executedOpensAfterFirst = first.db
   .prepare("SELECT COUNT(*) AS n FROM decisions WHERE action = 'open' AND executed = 1")
   .get().n
+const executedOpenRows = first.db
+  .prepare("SELECT decision_id, symbol FROM decisions WHERE action = 'open' AND executed = 1")
+  .all()
+const protectiveRows = first.db
+  .prepare(
+    `SELECT decision_id, state
+     FROM order_intents
+     WHERE type = 'protective' AND state IN ('acked', 'filled')`,
+  )
+  .all()
+const protectiveByDecision = new Map(protectiveRows.map((row) => [row.decision_id, row.state]))
+const positionsAfterFirst = await first.broker.getPositions()
+const qtyBySymbol = new Map(positionsAfterFirst.map((position) => [position.symbol, position.qty]))
+const protectionVerifiedOpens = executedOpenRows.filter(
+  (row) => protectiveByDecision.has(row.decision_id) || (qtyBySymbol.get(row.symbol) ?? 0) === 0,
+).length
 const protectiveOpen = await first.broker.getOpenOrders(SYMBOL)
 
 // ── 4a) 幂等（强判据）：**同一引擎、同一根 bar** 再喂一遍 ⇒ 零新增 ─────────────
@@ -241,6 +257,10 @@ const checks = {
   // 每个已执行的开仓都必须有保护单（HTX 无原子括号单，这是 §6.3 的硬要求）
   protective_covers_opens:
     executedOpensAfterFirst > 0 && afterFirst.protectiveIntents >= executedOpensAfterFirst,
+  // 每个 executed open 必须有已确认 ack/filled 的保护意图，或已确认仓位为 flat；
+  // 只数 intent created 会把裸仓误报成通过。
+  protection_ack_or_flat:
+    executedOpensAfterFirst > 0 && protectionVerifiedOpens === executedOpensAfterFirst,
   // 幂等（强）：同一根 bar 同引擎重放零新增
   idempotent_same_bar_no_new_decisions: afterSameBar.decisions === beforeSameBar.decisions,
   idempotent_same_bar_no_new_intents: afterSameBar.intents === beforeSameBar.intents,

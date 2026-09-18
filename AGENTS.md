@@ -22,6 +22,8 @@
 **当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地与安全收口（T2.1–T2.9；Docker 单进程重启 + 启动恢复为故障模型；旧 watchdog 证据仅保留归档）。
 **下一步**：P3 小额实盘前安全收口 —— HTX key/只读预检/最小额独立冒烟均已完成，`live_auto` 也曾获授权但当前已回退 `paper`。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账，并补齐 §12.1 #25 的结构化 `live_confirm` 逐单确认通道（未接入前 runtime fail-closed 拒绝该模式）。
 
+**T3.4 平台运营收口（已实现）**：schema v4 迁移历史触发/价目/预算表并持久化 `bar_processing`、W1 pending/cursor、workflow context token；结算周期配置已接线，P1/live-paper 验收已增加非空与保护单确认门槛。真实 HTX merged 对账与 `live_confirm` 仍按上段保留为外部/能力边界。
+
 **七条红线**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
 

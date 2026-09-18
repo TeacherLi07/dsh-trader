@@ -33,7 +33,8 @@ import { DecisionJournal } from '../exec/journal.js'
 import { RUNTIME_IMPLEMENTED_TOOL_NAMES } from '../agents/tool-roster.js'
 import type { TradePorts } from '../exec/ports.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
-import { dueWindows, validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
+import { validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
+import { SupervisorWindowQueue, type WindowQueueItem } from '../supervisor/window-queue.js'
 import { getExecPorts } from './exec.js'
 import { assertWiredSupervisorConfig } from '../supervisor/config-guard.js'
 import { setupRoleToolRestriction } from './tools-adapter.js'
@@ -223,6 +224,13 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
   }
 
+  // W1 的 cursor/pending fire 是权威运行状态：重启只恢复未完成项，不把 everyMs
+  // 重新锚到新的进程启动时刻，也不会因为 agent 忙或 attach 失败而把窗口吞掉。
+  const windowQueue = new SupervisorWindowQueue(database)
+  const queueNow = clock.now()
+  windowQueue.ensure([...specs], queueNow)
+  windowQueue.recover(queueNow)
+
   let deskAgent: Agent | undefined
   let attaching: Promise<Agent | undefined> | undefined
   let busy = false
@@ -300,13 +308,15 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     }
   }
 
-  const driveWindow = async (fire: WindowFire): Promise<void> => {
+  const driveWindow = async (fire: WindowQueueItem): Promise<void> => {
     const now = clock.now()
     if (busy) {
-      // agent 忙时不打断，只入队/留痕（plan §2：仅 P0 持仓风险允许 steer）
+      // 防御性分支：正常调用方不会 claim pending fire 直到 busy=false；即使未来
+      // 调度方式改变，也必须回到 pending，不能用一条审计代替待处理状态。
+      windowQueue.fail(fire, 'desk agent 忙，窗口保留待重试', now)
       journal.appendAudit({
         actor: 'system',
-        kind: 'w1_skipped_busy',
+        kind: 'w1_deferred_busy',
         payload: { windowId: fire.id, fireTs: fire.fireTs },
         ts: now,
       })
@@ -316,6 +326,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     try {
       const agent = await ensureDeskAgent()
       if (agent === undefined) {
+        windowQueue.fail(fire, 'desk agent 不可用', clock.now())
         journal.appendAudit({
           actor: 'system',
           kind: 'w1_wake_failed',
@@ -333,13 +344,16 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
         followup?: (message: unknown) => unknown
         whenIdle?: () => Promise<void>
       }
-      const hasFollowup = typeof probe.followup === 'function'
-      const hasWhenIdle = typeof probe.whenIdle === 'function'
+      const followup = probe.followup
+      const whenIdle = probe.whenIdle
+      const hasFollowup = typeof followup === 'function'
+      const hasWhenIdle = typeof whenIdle === 'function'
+      if (!hasFollowup || followup === undefined) throw new Error('desk agent 缺少 followup，窗口未被接受')
       let followupError: string | null = null
       // 必须在 followup **之前**清零：wakeDriver 会立刻开跑，事件可能在 followup 返回前就发出。
       resetDeskEvents()
       try {
-        probe.followup?.(
+        followup(
           createUserMessage({
             content: [{ type: 'text', text }],
             source: { kind: 'plugin', plugin: 'trade-supervisor', form: 'notice', summary },
@@ -348,13 +362,15 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
       } catch (error) {
         followupError = String(error)
       }
+      if (followupError !== null) throw new Error(followupError)
       const idleStart = clock.now()
       const timeoutMs = config.wakeTimeoutMs ?? 300_000
-      if (hasWhenIdle) {
-        await Promise.race([
-          probe.whenIdle?.(),
-          new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+      if (hasWhenIdle && whenIdle !== undefined) {
+        const completed = await Promise.race([
+          whenIdle().then(() => true),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
         ])
+        if (!completed) throw new Error(`desk agent 在 ${timeoutMs}ms 内未完成窗口回合`)
       }
       journal.appendAudit({
         actor: 'system',
@@ -377,8 +393,10 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
         `W1 ${fire.id}: agent=${String(probe.id)} followup=${String(hasFollowup)} ` +
           `whenIdle=${String(hasWhenIdle)} idleMs=${String(clock.now() - idleStart)} err=${String(followupError)}`,
       )
+      windowQueue.complete(fire, clock.now())
     } catch (error) {
       logger.error(`W1 唤醒失败：${String(error)}`)
+      windowQueue.fail(fire, error, clock.now())
       journal.appendAudit({
         actor: 'system',
         kind: 'w1_wake_failed',
@@ -390,24 +408,13 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     }
   }
 
-  // 游标 = **上一次已触发的窗口时刻**（不是"上一次扫描时刻"）。
-  //
-  // ★ 这是一个只有真跑才会暴露的 bug：`dueWindows(specs, since, now)` 的 `everyMs` 语义是
-  // "从 since 起算下一发"，因此若每轮把 since 更新成 now，`since + everyMs` 永远在未来 ⇒
-  // W1 **永远不会触发**（agent 永远不被唤醒，看起来在跑、实际零判断）。实测：启动 11 分钟
-  // 无任何 w1_wake 审计。正确做法是只在**真的触发**之后把游标推进到该 fireTs；
-  // 重启后以启动时刻为起点、历史窗口不补跑（判断必须发生在敞口打开之前）。
-  let windowCursor = clock.now()
   const windowScanMs = config.windowScanMs ?? 60_000
   const stopWindows = clock.setInterval(() => {
     const now = clock.now()
-    const fires = dueWindows([...specs], windowCursor, now)
-    if (fires.length > 0) {
-      let latest = windowCursor
-      for (const fire of fires) if (fire.fireTs > latest) latest = fire.fireTs
-      windowCursor = latest
-    }
-    for (const fire of fires) void driveWindow(fire)
+    windowQueue.enqueueDue([...specs], now)
+    if (busy) return
+    const fire = windowQueue.claimOne(now)
+    if (fire !== undefined) void driveWindow(fire)
   }, windowScanMs)
 
   ctx.effect(

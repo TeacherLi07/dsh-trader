@@ -11,7 +11,12 @@
  * markdown 只作只读审计产物；权威数据只在这里。
  */
 
-export const SCHEMA_VERSION = 3
+/**
+ * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
+ * migration 链，才能继续被 runtime 使用。v4 把历史上漏迁的触发/价目/预算表以及
+ * W1/workflow 的持久状态正式纳入版本边界。
+ */
+export const SCHEMA_VERSION = 4
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -41,6 +46,19 @@ CREATE TABLE IF NOT EXISTS features (
   fingerprint TEXT NOT NULL,
   PRIMARY KEY (symbol, timeframe, open_time)
 ) WITHOUT ROWID;
+
+-- 行情归档与机械处理游标分离：bar 已落库不等于 live-engine 已成功处理。
+CREATE TABLE IF NOT EXISTS bar_processing (
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  open_time INTEGER NOT NULL,
+  processed_at INTEGER NOT NULL,
+  PRIMARY KEY (symbol, timeframe, open_time),
+  FOREIGN KEY (symbol, timeframe, open_time)
+    REFERENCES bars (symbol, timeframe, open_time)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS bar_processing_lookup
+  ON bar_processing (symbol, timeframe, open_time);
 
 CREATE TABLE IF NOT EXISTS plan_cards (
   plan_id TEXT PRIMARY KEY,
@@ -306,6 +324,44 @@ CREATE TABLE IF NOT EXISTS pm_watches (
   last_fired_at INTEGER
 );
 
+-- W1 窗口的持久游标与待处理 fire。cursor 只在 fire 完成后推进，重启不会漂移 everyMs 锚点。
+CREATE TABLE IF NOT EXISTS supervisor_window_cursors (
+  window_id TEXT PRIMARY KEY,
+  cursor_ts INTEGER NOT NULL,
+  anchor_ts INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS supervisor_windows (
+  window_id TEXT NOT NULL,
+  fire_ts INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'done')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (window_id, fire_ts)
+);
+CREATE INDEX IF NOT EXISTS supervisor_windows_pending
+  ON supervisor_windows (state, fire_ts, window_id);
+
+-- workflow 成功后才签发的 context token。数据库只存 token hash，不存可复用明文。
+CREATE TABLE IF NOT EXISTS workflow_contexts (
+  token_hash TEXT PRIMARY KEY,
+  pack_id TEXT NOT NULL,
+  context_hash TEXT NOT NULL,
+  result_hash TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  script_version TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'expired'))
+);
+CREATE INDEX IF NOT EXISTS workflow_contexts_lookup
+  ON workflow_contexts (context_hash, symbol, timeframe, state, expires_at);
+
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   beat_at INTEGER NOT NULL,
@@ -320,10 +376,33 @@ CREATE TABLE IF NOT EXISTS heartbeat (
 export function migrate(db: SqliteLike): void {
   db.exec('PRAGMA journal_mode = WAL;')
   db.exec('PRAGMA foreign_keys = ON;')
+  const fromVersion = readUserVersion(db)
+  if (fromVersion > SCHEMA_VERSION) {
+    throw new Error(`数据库 schema 版本 ${fromVersion} 高于当前代码 ${SCHEMA_VERSION}，拒绝降级启动`)
+  }
   db.exec(SCHEMA_SQL)
-  // 增量迁移：`CREATE TABLE IF NOT EXISTS` 不会给**已存在**的表补列。
-  // 用 PRAGMA table_info 探测而不是 user_version，是为了让迁移本身幂等且可重复执行；
-  // 不能只补最近新增的 timeframe，否则旧运行库会在读取成本/触发字段时整条查询失败。
+  // user_version 是主路由，但列探测仍保留：旧测试/运维工具可能在 version 已更新后
+  // 手工恢复了半旧表形状，启动时仍应 fail-closed 修复而不是等热路径报 no such column。
+  if (fromVersion < 4 || needsV4Repair(db)) migrateToV4(db)
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+}
+
+/** 只从 SQLite user_version 取版本；没有 prepare 的极简 fake 视作初始库。 */
+function readUserVersion(db: SqliteLike): number {
+  if (db.prepare === undefined) return 0
+  const rows = db.prepare('PRAGMA user_version').all() as { user_version?: unknown }[]
+  const value = rows[0]?.user_version
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0
+}
+
+/**
+ * v4 历史修复：早期版本只把新增列补到了 decisions，遗漏了已有表的形状变化。
+ * 所有重建均在一个 SQLite 事务内完成；旧行先复制到新表，再切换表名，失败即回滚。
+ */
+function migrateToV4(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+
+  // v2/v3 曾只给新库写这些列；老库必须逐列补齐，且每列探测都可重复执行。
   const decisionColumns: readonly [string, string][] = [
     ['timeframe', 'ALTER TABLE decisions ADD COLUMN timeframe TEXT;'],
     ['tokens_in', 'ALTER TABLE decisions ADD COLUMN tokens_in INTEGER;'],
@@ -337,12 +416,124 @@ export function migrate(db: SqliteLike): void {
   for (const [column, sql] of decisionColumns) {
     if (!hasColumn(db, 'decisions', column)) db.exec(sql)
   }
-  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
+
+  if (!hasColumn(db, 'triggers', 'disposition')) {
+    db.exec(
+      "ALTER TABLE triggers ADD COLUMN disposition TEXT NOT NULL DEFAULT 'info' " +
+        "CHECK (disposition IN ('info', 'novelty', 'judgment', 'cooldown', 'rate_limited', 'executed'));",
+    )
+    db.exec(
+      `UPDATE triggers
+       SET disposition = CASE
+         WHEN purpose = 'novelty' THEN 'novelty'
+         WHEN purpose IN ('commitment', 'invalidation') THEN 'judgment'
+         ELSE 'info'
+       END
+       WHERE disposition = 'info' AND purpose <> 'info'`,
+    )
+  }
+
+  if (needsPriceTableRebuild(db)) {
+    withMigrationTransaction(db, () => {
+      db.exec(`
+        CREATE TABLE price_table_v4 (
+          model TEXT NOT NULL,
+          effective_from INTEGER NOT NULL,
+          tier TEXT NOT NULL DEFAULT 'any' CHECK (tier IN ('any', 'peak', 'off_peak')),
+          in_per_mtok REAL NOT NULL,
+          out_per_mtok REAL NOT NULL,
+          cached_in_per_mtok REAL,
+          source TEXT,
+          PRIMARY KEY (model, effective_from, tier)
+        );
+        INSERT INTO price_table_v4
+          (model, effective_from, tier, in_per_mtok, out_per_mtok, cached_in_per_mtok, source)
+        SELECT model, effective_from, 'any', in_per_mtok, out_per_mtok, cached_in_per_mtok, source
+        FROM price_table;
+        DROP TABLE price_table;
+        ALTER TABLE price_table_v4 RENAME TO price_table;
+      `)
+    })
+  }
+
+  if (needsBudgetLedgerRebuild(db)) {
+    withMigrationTransaction(db, () => {
+      db.exec(`
+        CREATE TABLE budget_ledger_v4 (
+          day TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          tokens_in INTEGER NOT NULL DEFAULT 0,
+          tokens_out INTEGER NOT NULL DEFAULT 0,
+          tokens_cached INTEGER NOT NULL DEFAULT 0,
+          est_usd REAL NOT NULL DEFAULT 0,
+          cost_known INTEGER NOT NULL DEFAULT 0 CHECK (cost_known IN (0, 1)),
+          PRIMARY KEY (day, scope)
+        );
+        INSERT INTO budget_ledger_v4
+          (day, scope, tokens_in, tokens_out, tokens_cached, est_usd, cost_known)
+        SELECT day, scope, tokens_in, tokens_out, tokens_cached, est_usd, cost_known
+        FROM budget_ledger;
+        DROP TABLE budget_ledger;
+        ALTER TABLE budget_ledger_v4 RENAME TO budget_ledger;
+      `)
+    })
+  }
 }
 
-/** 列探测；假实现没有 `prepare` 时保守返回 true（不冒险 ALTER）。 */
+function needsV4Repair(db: SqliteLike): boolean {
+  const decisionColumns = [
+    'timeframe',
+    'tokens_in',
+    'tokens_out',
+    'tokens_cached',
+    'cost_usd',
+    'cost_known',
+    'duration_ms',
+    'trigger_source',
+  ]
+  return (
+    decisionColumns.some((column) => !hasColumn(db, 'decisions', column)) ||
+    !hasColumn(db, 'triggers', 'disposition') ||
+    needsPriceTableRebuild(db) ||
+    needsBudgetLedgerRebuild(db)
+  )
+}
+
+function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknown; dflt_value?: unknown }[] {
+  if (db.prepare === undefined) return []
+  return db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name?: unknown
+    pk?: unknown
+    dflt_value?: unknown
+  }[]
+}
+
 function hasColumn(db: SqliteLike, table: string, column: string): boolean {
-  if (db.prepare === undefined) return true
-  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as { name?: unknown }[]
-  return rows.some((row) => row.name === column)
+  return tableInfo(db, table).some((row) => row.name === column)
+}
+
+function needsPriceTableRebuild(db: SqliteLike): boolean {
+  const rows = tableInfo(db, 'price_table')
+  const tier = rows.find((row) => row.name === 'tier')
+  return tier === undefined || tier.pk !== 3
+}
+
+function needsBudgetLedgerRebuild(db: SqliteLike): boolean {
+  const row = tableInfo(db, 'budget_ledger').find((item) => item.name === 'cost_known')
+  return row?.dflt_value !== '0'
+}
+
+function withMigrationTransaction(db: SqliteLike, work: () => void): void {
+  db.exec('BEGIN IMMEDIATE;')
+  try {
+    work()
+    db.exec('COMMIT;')
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK;')
+    } catch {
+      // 保留原始 migration 错误；回滚失败也不能伪装成功。
+    }
+    throw error
+  }
 }

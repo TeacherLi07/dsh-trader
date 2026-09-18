@@ -132,6 +132,18 @@ function openDatabase(): Database.Database {
 }
 
 describe('ExecRuntime 组合根', () => {
+  it('拒绝零/超范围 riskPct 与非法 settleMs，避免配置失误静默放大风险', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    try {
+      await expect(createExecRuntime(config({ riskPct: 0 }), { db, clock })).rejects.toThrow(/riskPct/)
+      await expect(createExecRuntime(config({ riskPct: 0.051 }), { db, clock })).rejects.toThrow(/riskPct/)
+      await expect(createExecRuntime(config({ settleMs: 0 }), { db, clock })).rejects.toThrow(/settleMs/)
+    } finally {
+      db.close()
+    }
+  })
+
   it('paper runtime 组装非零权益，周期对账可重入，dispose 后取消周期任务', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
@@ -349,6 +361,65 @@ describe('ExecRuntime 组合根', () => {
       expect(startupKinds.map((event) => event.kind)).toEqual(['crash_recovery', 'reconcile_report'])
     } finally {
       await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('fake HTX 非空启动链：先恢复 filled 在途意图，再对账并冻结未知远端持仓', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const journal = new DecisionJournal(db)
+    journal.recordDecision({
+      decisionId: 'htx-restart-decision',
+      symbol: SYMBOL,
+      decidedAt: NOW - 100,
+      contextHash: 'ctx:htx-restart',
+      action: 'open',
+      executed: false,
+    })
+    journal.recordIntent({
+      intentId: 'htx-restart-intent',
+      clientOrderId: 'htx-restart-client',
+      decisionId: 'htx-restart-decision',
+      venue: 'htx',
+      symbol: SYMBOL,
+      state: 'created',
+      type: 'market',
+      side: 'buy',
+      qty: 1,
+      reduceOnly: false,
+      createdAt: NOW - 100,
+    })
+    const exchange = new FakeExchange()
+    exchange.trades = [{
+      id: 'trade-1',
+      order: 'exchange-order-1',
+      clientOrderId: 'htx-restart-client',
+      timestamp: NOW,
+      price: 100,
+      amount: 1,
+      fee: { cost: 0.01 },
+    }]
+    exchange.positions = [{ symbol: 'OTHER/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
+    try {
+      const runtime = await createExecRuntime(
+        config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+        { db, clock, createExchange: () => exchange },
+      )
+      try {
+        expect(db.prepare('SELECT state, exchange_order_id FROM order_intents WHERE client_order_id = ?').get('htx-restart-client')).toEqual({
+          state: 'filled',
+          exchange_order_id: 'exchange-order-1',
+        })
+        expect(runtime.frozenSymbols().has('OTHER/USDT:USDT')).toBe(true)
+        const startupKinds = db.prepare(
+          "SELECT kind FROM audit_events WHERE kind IN ('crash_recovery', 'reconcile_report') ORDER BY seq",
+        ).all() as { kind: string }[]
+        expect(startupKinds.map((event) => event.kind)).toEqual(['crash_recovery', 'reconcile_report'])
+      } finally {
+        await runtime.dispose()
+      }
+    } finally {
       db.close()
     }
   })

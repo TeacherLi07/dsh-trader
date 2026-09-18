@@ -161,7 +161,9 @@ for (let attempt = 1; attempt <= 5; attempt += 1) {
 }
 const settledFinal = db.prepare('SELECT COUNT(*) AS n FROM outcomes').get().n
 const pendingFinal = db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE reflection_due_at IS NOT NULL AND outcome_id IS NULL').get().n
-const settlementRate = dueTotal === 0 ? 1 : settledFinal / dueTotal
+const executedTotal = db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE executed = 1').get().n
+// 反空跑：没有到期/执行样本时，成功率不是 100%，而是验收无效并失败。
+const settlementRate = dueTotal > 0 ? settledFinal / dueTotal : 0
 
 const sql = {
   duplicate_client_order_ids: db
@@ -221,6 +223,8 @@ const checks = {
       daily.cost.windows.filter((w) => w.scope === 'global').reduce((sum, w) => sum + w.usd, 0) &&
     typeof daily.cost.costKnown === 'boolean',
   // ④ 结算成功率 ≥99% + 每条决策至多一条反思
+  executed_sample_nonempty: executedTotal > 0,
+  due_sample_nonempty: dueTotal > 0,
   settlement_rate_ge_99: settlementRate >= 0.99,
   one_outcome_per_decision: sql.decisions_with_multiple_outcomes === 0,
   one_lesson_per_decision: sql.decisions_with_multiple_lessons === 0,
@@ -236,6 +240,7 @@ const report = {
   replay: executed.counters,
   settlement: {
     dueTotal,
+    executedTotal,
     settled: settledFinal,
     pending: pendingFinal,
     rate: settlementRate,

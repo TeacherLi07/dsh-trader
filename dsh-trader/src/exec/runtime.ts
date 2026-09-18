@@ -228,8 +228,8 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
   if (!['paper', 'live_confirm', 'live_auto'].includes(config.mode)) {
     throw new Error('mode 非法：' + String(config.mode))
   }
-  if (!Number.isFinite(config.riskPct) || config.riskPct < 0) {
-    throw new Error('riskPct 必须是非负有限数')
+  if (!Number.isFinite(config.riskPct) || config.riskPct <= 0 || config.riskPct > 0.05) {
+    throw new Error('riskPct 必须在 (0, 0.05] 内')
   }
   if (!Array.isArray(config.symbols) || config.symbols.length === 0) throw new Error('symbols 不能为空')
   if (!Array.isArray(config.timeframes) || config.timeframes.length === 0) {
@@ -240,6 +240,9 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
   }
   if (!Number.isFinite(config.reconcileMs) || config.reconcileMs <= 0) {
     throw new Error('reconcileMs 必须是有限正数')
+  }
+  if (config.settleMs !== undefined && (!Number.isFinite(config.settleMs) || config.settleMs <= 0)) {
+    throw new Error('settleMs 必须是有限正数')
   }
   if (config.mode !== 'paper') {
     if (!LIVE_VENUES.includes(config.venue as Exclude<Venue, 'paper'>)) {

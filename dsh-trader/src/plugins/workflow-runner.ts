@@ -25,6 +25,8 @@ import {
 import { PROMPT_VERSION } from '../agents/prompts.js'
 import type { JudgmentPack, JudgmentResult } from '../agents/types.js'
 import type { TradePorts } from '../exec/ports.js'
+import { canonicalJson, sha256Hex } from '../util/canonical.js'
+import { WorkflowContextStore } from '../supervisor/workflow-context.js'
 
 const WORKFLOW_OUTPUT_SCHEMA = {
   type: 'object',
@@ -195,13 +197,19 @@ export interface WorkflowRunnerDeps {
   readonly signal: AbortSignal
 }
 
+export type JudgmentWorkflowArtifact = JudgmentResult & {
+  /** 明文只回给当前 desk；SQLite 只保存 contextTokenHash。 */
+  readonly contextToken?: string
+  readonly contextTokenHash?: string
+}
+
 /** 运行固定 workflow；单测可以注入 fake subagents，不需要启动完整 DSH。 */
 export async function runJudgmentWorkflow(
   ports: TradePorts,
   symbol: string,
   timeframe: string,
   deps: WorkflowRunnerDeps,
-): Promise<JudgmentResult> {
+): Promise<JudgmentWorkflowArtifact> {
   const pack = await buildJudgmentPack(ports, symbol, timeframe)
   const script = buildJudgmentWorkflowScript()
   let childCount = 0
@@ -230,12 +238,30 @@ export async function runJudgmentWorkflow(
   })
 
   assertJudgmentResult(result, pack)
+  const resultHash = `sha256:${sha256Hex(canonicalJson(result))}`
+  // workflow-runner 的 fake ports 在纯单测中可能没有真实 DB；生产 TradePorts 一定有
+  // better-sqlite3 connection。只有校验成功后才签发 token，失败路径不会留下可用上下文。
+  const dbLike = ports.db as unknown as { prepare?: unknown }
+  const issued = typeof dbLike.prepare === 'function'
+    ? new WorkflowContextStore(ports.db).issue({
+        packId: pack.packId,
+        contextHash: pack.contextHash,
+        resultHash,
+        symbol: pack.symbol,
+        timeframe: pack.timeframe,
+        scriptVersion: WORKFLOW_SCRIPT_VERSION,
+        promptVersion: PROMPT_VERSION,
+        createdAt: pack.asOf,
+      })
+    : undefined
   ports.journal.appendAudit({
     actor: 'system',
     kind: 'judgment_workflow_result',
     payload: {
       packId: pack.packId,
       contextHash: pack.contextHash,
+      resultHash,
+      contextTokenHash: issued?.record.tokenHash ?? null,
       scriptVersion: WORKFLOW_SCRIPT_VERSION,
       promptVersion: PROMPT_VERSION,
       agentsCount: childCount,
@@ -252,7 +278,9 @@ export async function runJudgmentWorkflow(
     },
     ts: pack.asOf,
   })
-  return result
+  return issued === undefined
+    ? result
+    : { ...result, contextToken: issued.token, contextTokenHash: issued.record.tokenHash }
 }
 
 export function createWorkflowTool(

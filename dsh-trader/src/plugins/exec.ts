@@ -60,6 +60,8 @@ export const Config = z.object({
   paperSlippageBps: z.number().default(5),
   paperFeeBps: z.number().default(5),
   reconcileMs: z.number().default(60_000),
+  /** 结算扫描周期；必须和 runtime config 一起转发，避免 patch 看似可热改但实际被忽略。 */
+  settleMs: z.number().default(60_000),
   /** 组合根启动所需的运行时参数；未齐全时拒绝启动 runtime，不猜默认值。 */
   riskPct: z.number(),
   symbols: z.array(z.string()),
@@ -92,6 +94,7 @@ export interface ExecConfig {
   paperSlippageBps?: number
   paperFeeBps?: number
   reconcileMs?: number
+  settleMs?: number
   riskPct?: number
   symbols?: readonly string[]
   timeframes?: readonly string[]
@@ -210,6 +213,7 @@ function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | un
     apiSecret: config.apiSecret,
     sandbox: config.sandbox,
     reconcileMs: config.reconcileMs ?? 60_000,
+    settleMs: config.settleMs ?? 60_000,
     liveAckOrphans: config.liveAckOrphans ?? false,
     paperInitialEquityQuote: config.paperInitialEquityQuote ?? 10_000,
     paperSlippageBps: config.paperSlippageBps ?? 5,

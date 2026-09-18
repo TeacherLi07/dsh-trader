@@ -313,6 +313,33 @@ CREATE TABLE pm_watches(                       -- LLM 设定的"关心事件/提
   created_by TEXT NOT NULL CHECK(created_by IN('model','human')),
   created_at INTEGER NOT NULL, last_fired_at INTEGER);
 
+CREATE TABLE bar_processing(                    -- 已归档 ≠ 已成功处理；机械执行单独幂等
+  symbol TEXT NOT NULL, timeframe TEXT NOT NULL, open_time INTEGER NOT NULL,
+  processed_at INTEGER NOT NULL,
+  PRIMARY KEY(symbol,timeframe,open_time),
+  FOREIGN KEY(symbol,timeframe,open_time) REFERENCES bars(symbol,timeframe,open_time));
+CREATE INDEX bar_processing_lookup ON bar_processing(symbol,timeframe,open_time);
+
+CREATE TABLE supervisor_window_cursors(         -- W1 everyMs 的持久锚点/完成游标
+  window_id TEXT PRIMARY KEY, cursor_ts INTEGER NOT NULL,
+  anchor_ts INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE supervisor_windows(                 -- W1 pending/running/done 队列
+  window_id TEXT NOT NULL, fire_ts INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN('pending','running','done')),
+  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  PRIMARY KEY(window_id,fire_ts));
+CREATE INDEX supervisor_windows_pending ON supervisor_windows(state,fire_ts,window_id);
+
+CREATE TABLE workflow_contexts(                  -- workflow 成功后签发的 token（只存 hash）
+  token_hash TEXT PRIMARY KEY, pack_id TEXT NOT NULL, context_hash TEXT NOT NULL,
+  result_hash TEXT NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+  script_version TEXT NOT NULL, prompt_version TEXT NOT NULL,
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN('active','consumed','expired')));
+CREATE INDEX workflow_contexts_lookup
+  ON workflow_contexts(context_hash,symbol,timeframe,state,expires_at);
+
 CREATE TABLE heartbeat(id INTEGER PRIMARY KEY CHECK(id=1), beat_at INTEGER NOT NULL,
   halted INTEGER NOT NULL DEFAULT 0);
 ```
@@ -727,6 +754,7 @@ patch 引用的子路径必须在 `exports` 里可达：
 | T2.7 | ✅ | §5.4 结构化证据账本 + 单一 `RiskCritic` + judge 去直接下单权 | 伪造/未知路径报告不进辩论；所有论点/失败模式引用已验证路径；workflow 仅 1 个 risk 调用；judge 白名单无 `trade_execute_order` |
 | T2.8 | ✅ | 真实 agent 运行时权限收窄 | create/resume 都通过同一 `setupRoleToolRestriction(role, availableTools)` 安装 scoped `restrict`；测试捕获并执行两条 options 的 setup，断言只读角色不含副作用工具、judge 不含 `trade_execute_order` 且可见固化 `trade_workflow_run` |
 | T2.9 | ✅ | 固化 `trade_workflow_run` 生产接线 | 参数只有 symbol/tf，pack 由代码组装；脚本由代码固定/版本化；workflow child 零副作用工具；W1 notice 明确要求先跑 workflow 再裁决；真实 `ctx.subagents.start('spawn')` + 假 subagent/ports 单测证明 result 回到 judge；失败/结果均落审计 |
+| T3.4 | ✅ | 平台运营安全收口：版本化 schema migration、W1 持久 pending queue、workflow context token、结算配置接线与非空验收 | 历史 v3 fixture 可幂等升级；窗口失败/重启可重试；workflow 成功才签 token；`p1-acceptance`/`live-paper-e2e` 拒绝空跑 |
 | T3.* | ⏳ | 限额与告警打磨、`live_confirm` → `live_auto` | §10 P3 |
 | T4.* | ⏳ | 周级复盘、playbook 提案、regime 检索、M3 版本化 | §10 P4 |
 

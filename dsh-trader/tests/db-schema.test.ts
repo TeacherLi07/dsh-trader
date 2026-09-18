@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION, migrate } from '../src/db/schema.js'
 
@@ -38,6 +39,7 @@ describe('schema (plan §4.1 invariants)', () => {
     const tables = names('table')
     for (const table of [
       'bars',
+      'bar_processing',
       'features',
       'plan_cards',
       'decisions',
@@ -53,6 +55,9 @@ describe('schema (plan §4.1 invariants)', () => {
       'price_table',
       'budget_ledger',
       'heartbeat',
+      'supervisor_window_cursors',
+      'supervisor_windows',
+      'workflow_contexts',
       'pm_markets',
       'pm_series',
       'pm_quotes',
@@ -216,5 +221,27 @@ describe('schema 与 plan §4.1 同步（审计修复）', () => {
     db.prepare(`INSERT INTO budget_ledger (day, scope) VALUES ('2026-01-01', 'global')`).run()
     const row = db.prepare(`SELECT cost_known FROM budget_ledger`).get() as { cost_known: number }
     expect(row.cost_known).toBe(0)
+  })
+
+  it('从历史 v3 fixture 迁移到当前版本：保留数据、补齐列/主键形状且可重复执行', () => {
+    const historical = readFileSync(new URL('./fixtures/schema-v3.sql', import.meta.url), 'utf8')
+    const old = new Database(':memory:')
+    old.exec(historical)
+
+    migrate(old)
+    expect(old.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+    expect(old.prepare('SELECT disposition FROM triggers WHERE trigger_id = ?').get('old-trigger')).toMatchObject({
+      disposition: 'novelty',
+    })
+    expect(old.prepare('SELECT tier FROM price_table WHERE model = ?').get('old-model')).toMatchObject({ tier: 'any' })
+    expect(old.prepare('SELECT cost_known FROM budget_ledger WHERE day = ?').get('2026-01-01')).toMatchObject({
+      cost_known: 1,
+    })
+
+    const priceInfo = old.prepare('PRAGMA table_info(price_table)').all() as { name: string; pk: number }[]
+    expect(priceInfo.find((column) => column.name === 'tier')?.pk).toBe(3)
+    expect(old.prepare('PRAGMA table_info(bar_processing)').all()).toHaveLength(4)
+    expect(() => migrate(old)).not.toThrow()
+    old.close()
   })
 })
