@@ -13,7 +13,7 @@ import { applyProxyAwareFetch } from '../market/ccxt-source.js'
 import { BarArchive } from '../market/archive.js'
 import { FeatureArchive } from '../market/feature-archive.js'
 import { PlanStore } from '../plan/store.js'
-import { CcxtBroker, type CcxtProExchangeLike, type RiskStateProvider } from './ccxt-broker.js'
+import { HtxBroker, type CcxtProExchangeLike, type RiskStateProvider } from './ccxt-broker.js'
 import type { Broker, Venue } from './broker.js'
 import { DecisionJournal } from './journal.js'
 import { StartupTracker } from './startup.js'
@@ -32,7 +32,7 @@ import { SettlementScheduler } from '../memory/settle.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
 
 const DAY_MS = 86_400_000
-const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx', 'okx']
+const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx']
 const LIMIT_KEYS: readonly (keyof RiskLimits)[] = [
   'perOrderCapUsd',
   'maxExposureUsd',
@@ -92,7 +92,7 @@ const RISK_OUTCOME_SQL = [
   '        ORDER BY f.ts ASC, f.fill_id ASC LIMIT 1) AS entry_fill_qty',
   'FROM outcomes o',
   'JOIN decisions d ON d.decision_id = o.decision_id',
-  'WHERE o.settled_at <= ?',
+  'WHERE o.settled_at <= ? AND EXISTS (SELECT 1 FROM order_intents ri WHERE ri.decision_id = d.decision_id AND (? = \'*\' OR ri.venue = ?))',
   'ORDER BY o.settled_at ASC, o.outcome_id ASC',
 ].join('\n')
 
@@ -109,21 +109,33 @@ export function createRiskStateProvider(
   db: Database.Database,
   clock: Clock,
   journal?: DecisionJournal,
+  options: { readonly venue?: string } = {},
 ): RiskStateProvider {
   // 保留 journal 参数是为了让调用方明确这是同一份 journal 的数据源；查询走 Statements
   // 缓存，避免高频 getAccount() 不断 prepare 新语句。
   void journal
   const statements = new Statements(db)
+  let emptyAudited = false
 
   return () => {
-    const rows = statements.get(RISK_OUTCOME_SQL).all(clock.now()) as RiskOutcomeRow[]
+    const venueFilter = options.venue ?? '*'
+    const rows = statements.get(RISK_OUTCOME_SQL).all(clock.now(), venueFilter, venueFilter) as RiskOutcomeRow[]
     if (rows.length === 0) {
-      throw new Error('RiskStateProvider：journal 没有已结算 outcome，无法计算已实现风险状态')
+      if (!emptyAudited && journal !== undefined) {
+        emptyAudited = true
+        journal.appendAudit({
+          actor: 'system',
+          kind: 'risk_state_empty',
+          payload: { venue: options.venue ?? 'htx', dailyLossUsd: 0, drawdownUsd: 0, consecutiveLosses: 0 },
+          ts: clock.now(),
+        })
+      }
+      return { dailyLossUsd: 0, drawdownUsd: 0, consecutiveLosses: 0 }
     }
 
     const pnl: { settledAt: number; usd: number }[] = []
     for (const row of rows) {
-      const qty = row.size_qty !== null && Math.abs(row.size_qty) > 0 ? row.size_qty : row.entry_fill_qty
+      const qty = row.entry_fill_qty !== null && Math.abs(row.entry_fill_qty) > 0 ? row.entry_fill_qty : row.size_qty
       if (
         qty === null ||
         qty === undefined ||
@@ -257,17 +269,17 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
   finiteNonNegative(config.paperFeeBps, 'paperFeeBps')
 }
 
-type ExchangeFactory = NonNullable<ExecRuntimeDeps['createExchange']>
+type ExchangeFactory = (venue: 'htx', options?: Readonly<Record<string, unknown>>) => CcxtProExchangeLike | Promise<CcxtProExchangeLike>
 
 async function defaultCreateExchange(
-  venue: Exclude<Venue, 'paper'>,
+  venue: 'htx',
   options?: Readonly<Record<string, unknown>>,
 ): Promise<CcxtProExchangeLike> {
   const mod = (await import('ccxt')) as unknown as {
     default?: Record<string, new (options: unknown) => CcxtProExchangeLike>
   }
   const ccxt = mod.default ?? (mod as unknown as Record<string, new (options: unknown) => CcxtProExchangeLike>)
-  const Exchange = ccxt[venue]
+  const Exchange = ccxt.htx
   if (Exchange === undefined) throw new Error('未知交易所：' + venue)
   return new Exchange(options ?? {})
 }
@@ -325,7 +337,9 @@ export async function createExecRuntime(
   const plans = new PlanStore(deps.db)
   const local = new LocalStateReader(deps.db)
   const heartbeat = new HeartbeatStore(new Statements(deps.db))
-  const riskStateProvider = createRiskStateProvider(deps.db, deps.clock, journal)
+  const riskStateProvider = createRiskStateProvider(deps.db, deps.clock, journal, {
+    venue: config.mode === 'paper' ? 'paper' : 'htx',
+  })
   const acknowledgeOrphans = config.liveAckOrphans ?? config.acknowledgeOrphans ?? false
 
   let broker: Broker
@@ -346,11 +360,11 @@ export async function createExecRuntime(
         feeBps: config.paperFeeBps,
       })
     } else {
-      const venue = config.venue as Exclude<Venue, 'paper'>
+      const venue = config.venue as 'htx'
       const factory: ExchangeFactory = deps.createExchange ?? defaultCreateExchange
       exchange = await factory(venue, { enableRateLimit: true, defaultType: config.accountType })
       applyProxyAwareFetch(exchange)
-      broker = new CcxtBroker({
+      broker = new HtxBroker({
         exchange,
         venue,
         clock: deps.clock,
@@ -389,6 +403,15 @@ export async function createExecRuntime(
   // 于是"已冻结"的同时照常开仓（审计说冻结、行为没冻结）。
   const frozen = new Set<string>()
 
+  const freezeSymbol = (symbol: string): void => {
+    frozen.add(symbol)
+  }
+
+  const halt = (): void => {
+    heartbeat.halt(deps.clock.now())
+    for (const symbol of config.symbols) frozen.add(symbol)
+  }
+
   const frozenSymbols = (): ReadonlySet<string> => {
     const current = new Set(frozen)
     if (heartbeat.isHalted()) {
@@ -419,6 +442,8 @@ export async function createExecRuntime(
     ...(config.pm === undefined ? {} : { pm: config.pm }),
     ...(config.allowPmCommitment === undefined ? {} : { allowPmCommitment: config.allowPmCommitment }),
     frozenSymbols,
+    freezeSymbol,
+    halt,
   }
 
   let disposed = false
@@ -432,16 +457,39 @@ export async function createExecRuntime(
 
   const reconcileOperation = async (): Promise<ExecReconciliationReport> => {
     const ranAt = deps.clock.now()
+    // HTX 市价/算法单可能先 ack 后成交；每轮对账先按 exchangeOrderId 查询，
+    // 把 delayed fill 走同一 journal 状态机，避免只更新远端仓位却丢本地成交链。
+    if (broker.findOrderByExchangeOrderId !== undefined) {
+      for (const intent of journal.pollableIntents()) {
+        try {
+          const ack = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
+          if (ack !== undefined) {
+            const applied = journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now(), {
+              fallbackQty: intent.qty,
+              fallbackPrice: intent.price ?? undefined,
+            })
+            if (applied.unknown) frozen.add(intent.symbol)
+          }
+        } catch (error) {
+          frozen.add(intent.symbol)
+          journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+        }
+      }
+    }
     if (!acknowledgeOrphans) {
       const [remoteOrders, remotePositions] = await Promise.all([broker.getOpenOrders(), broker.getPositions()])
       const result = reconcile({
         localOrders: local.orders(),
         remoteOrders: remoteOrders.map((order) => ({
-          clientOrderId: order.clientOrderId,
+          ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
           ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
         })),
         localPositions: local.positions(),
-        remotePositions: remotePositions.map((position) => ({ symbol: position.symbol, qty: position.qty })),
+        remotePositions: remotePositions.map((position) => ({
+          symbol: position.symbol,
+          qty: position.qty,
+          ...(position.protectedStopPrice === undefined ? {} : { protectedStopPrice: position.protectedStopPrice }),
+        })),
       })
       updateFrozen(result.actions)
       // 第①步只报告不撤单；仍写入完整审计，方便解释为何没有执行动作。
@@ -564,6 +612,16 @@ export async function createExecRuntime(
       }
     }
   }
+  let settling: Promise<void> | undefined
+  const runSettlementsSingleFlight = (): Promise<void> => {
+    if (settling !== undefined) return settling
+    const operation = runSettlements()
+    settling = operation
+    void operation.finally(() => {
+      if (settling === operation) settling = undefined
+    }).catch(() => undefined)
+    return operation
+  }
 
   const onSettlementError = (error: unknown): void => {
     journal.appendAudit({
@@ -621,7 +679,7 @@ export async function createExecRuntime(
     if (!disposed) timer = deps.clock.setInterval(() => void reconcileOnce().catch(onPeriodicError), config.reconcileMs)
     if (!disposed) {
       settleTimer = deps.clock.setInterval(
-        () => void runSettlements().catch(onSettlementError),
+        () => void runSettlementsSingleFlight().catch(onSettlementError),
         config.settleMs ?? 60_000,
       )
     }

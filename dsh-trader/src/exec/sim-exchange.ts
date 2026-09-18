@@ -445,6 +445,11 @@ export class SimExchange implements Broker, ClientOrderLookup {
     return order === undefined ? undefined : this.#ack(order)
   }
 
+  async findOrderByExchangeOrderId(exchangeOrderId: string): Promise<OrderAck | undefined> {
+    const order = this.#orderByExchangeId(exchangeOrderId)
+    return order === undefined ? undefined : this.#ack(order)
+  }
+
   /** 供故障注入报告使用的非异步挂单快照。 */
   openOrders(symbol?: string): readonly SimOpenOrder[] {
     return this.#openOrderRows(symbol).map((order) => ({
@@ -727,6 +732,7 @@ export class SimExchange implements Broker, ClientOrderLookup {
       state: order.status,
       ts: order.updated_seq,
       ...(order.avg_price === null ? {} : { avgPrice: order.avg_price }),
+      filledQty: order.filled_qty,
       ...(order.fee === 0 ? {} : { fee: order.fee }),
     }
   }

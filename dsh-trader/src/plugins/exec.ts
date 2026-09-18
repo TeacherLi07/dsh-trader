@@ -229,8 +229,8 @@ async function loadCcxt(): Promise<CcxtModule> {
   return (mod.default ?? mod) as CcxtModule
 }
 
-function isCcxtVenue(value: string): value is 'htx' | 'okx' {
-  return value === 'htx' || value === 'okx'
+function isCcxtVenue(value: string): value is 'htx' {
+  return value === 'htx'
 }
 
 export function apply(ctx: Context, config: ExecConfig): void {
@@ -322,7 +322,7 @@ export function apply(ctx: Context, config: ExecConfig): void {
   void (async () => {
     try {
       const venue = config.preflightVenue ?? 'htx'
-      if (!isCcxtVenue(venue)) throw new Error(`不支持的预检 venue：${venue}（只允许 htx | okx）`)
+      if (!isCcxtVenue(venue)) throw new Error(`不支持的预检 venue：${venue}（生产只允许 htx）`)
       const ccxt = await loadCcxt()
       const Exchange = ccxt[venue]
       if (Exchange === undefined) throw new Error(`未知交易所：${venue}`)

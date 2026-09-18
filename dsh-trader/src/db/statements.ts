@@ -31,6 +31,17 @@ export class Statements {
     return statement
   }
 
+  /**
+   * 用同一连接执行一个原子状态迁移。
+   *
+   * 订单状态、决策与成交是同一条事实链；调用方若分开提交，SIGKILL 可以把
+   * decision 留下却丢掉 intent，重启时反而无法判断是否应该继续执行。事务本身
+   * 不调用 prepare，因此不破坏热路径语句缓存纪律。
+   */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)()
+  }
+
   /** 已缓存的语句数（诊断用；应当是一个很小的常数）。 */
   get size(): number {
     return this.#cache.size

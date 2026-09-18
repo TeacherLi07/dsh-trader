@@ -79,7 +79,7 @@ describe('CrashRecovery：在途意图（plan §4.2 / P1 ⑤）', () => {
       clock,
       broker: brokerStub({
         lookup: (clientOrderId) =>
-          Promise.resolve({ intentId: `oi:${clientOrderId}`, clientOrderId, exchangeOrderId: 'ex-1', state: 'filled', ts: NOW }),
+          Promise.resolve({ intentId: `oi:${clientOrderId}`, clientOrderId, exchangeOrderId: 'ex-1', state: 'filled', filledQty: 1, avgPrice: 100, ts: NOW }),
       }),
     })
     const result = await recovery.run()
@@ -87,6 +87,11 @@ describe('CrashRecovery：在途意图（plan §4.2 / P1 ⑤）', () => {
     expect(result.resolved[0]?.outcome).toMatchObject({ kind: 'resolved', state: 'filled' })
     expect(result.freezeSymbols).toEqual([])
     expect(journal.inFlightIntents()).toHaveLength(0)
+    expect(journal.fillIds()).toEqual(['fill:ex-1:1700000000000'])
+    expect(journal.recentDecisions()[0]?.outcomeId).toBeNull()
+    const recoveredDecision = db.prepare('SELECT executed, reflection_due_at FROM decisions WHERE decision_id = ?').get('dec:co-1') as { executed: number; reflection_due_at: number | null }
+    expect(recoveredDecision.executed).toBe(1)
+    expect(recoveredDecision.reflection_due_at).not.toBeNull()
     // 恢复绝不产生新决策、新意图
     expect(journal.decisionIds()).toEqual(['dec:co-1'])
     expect(journal.intentIds()).toEqual(['oi:co-1'])

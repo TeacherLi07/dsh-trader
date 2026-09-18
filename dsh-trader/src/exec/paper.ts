@@ -84,6 +84,7 @@ export class PaperBroker implements Broker {
   #peakEquity: number
   #consecutiveLosses = 0
   #sequence = 0
+  readonly #subscribers = new Set<(event: UserDataEvent) => void>()
 
   constructor(private readonly options: PaperBrokerOptions) {
     this.venue = options.venue ?? 'paper'
@@ -106,6 +107,16 @@ export class PaperBroker implements Broker {
       const trigger = this.#triggerPrice(order, candle)
       if (trigger === undefined) continue
       acks.push(this.#fill(order, trigger, this.options.clock.now()))
+    }
+    for (const ack of acks) {
+      for (const subscriber of this.#subscribers) {
+        subscriber({
+          kind: 'fill',
+          symbol,
+          payload: ack as unknown as Record<string, unknown>,
+          ts: ack.ts,
+        })
+      }
     }
     return acks
   }
@@ -180,6 +191,16 @@ export class PaperBroker implements Broker {
     return this.#openOrders()
       .filter((order) => symbol === undefined || order.symbol === symbol)
       .map((order) => this.#ack(order))
+  }
+
+  async findOrderByExchangeOrderId(exchangeOrderId: string): Promise<OrderAck | undefined> {
+    const order = this.#orders.get(exchangeOrderId)
+    return order === undefined ? undefined : this.#ack(order)
+  }
+
+  async findOrderByClientOrderId(clientOrderId: string): Promise<OrderAck | undefined> {
+    const orderId = this.#byClientId.get(clientOrderId)
+    return orderId === undefined ? undefined : this.findOrderByExchangeOrderId(orderId)
   }
 
   async placeOrder(request: OrderRequest): Promise<OrderAck> {
@@ -279,9 +300,8 @@ export class PaperBroker implements Broker {
   }
 
   subscribeUserData(_onEvent: (event: UserDataEvent) => void): () => void {
-    return () => {
-      /* 纸面撮合是同步的，没有用户数据流 */
-    }
+    this.#subscribers.add(_onEvent)
+    return () => this.#subscribers.delete(_onEvent)
   }
 
   // ── 内部 ─────────────────────────────────────────────────────────────────
@@ -395,6 +415,7 @@ export class PaperBroker implements Broker {
       exchangeOrderId: order.orderId,
       state: order.status,
       ts: this.options.clock.now(),
+      filledQty: order.filledQty,
       ...(order.avgPrice === undefined ? {} : { avgPrice: order.avgPrice }),
       ...(order.feePaid > 0 ? { fee: order.feePaid } : {}),
     }

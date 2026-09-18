@@ -101,6 +101,11 @@ describe('validateIntent (hard gate)', () => {
     })
   })
 
+  it('账户快照含 NaN 时 fail-closed，而不是让比较运算静默放行', () => {
+    const malformed = { ...account, totalExposureUsd: Number.NaN, dailyLossUsd: Number.NaN, spreadBps: Number.NaN }
+    expect(validateIntent(intent(), malformed, policy()).kind).toBe('deny')
+  })
+
   it('冻结标的禁止增加敞口，但平/减仓永远放行（plan §4.2/§6.3）', () => {
     const frozenSymbols = new Set(['BTC/USDT:USDT'])
 

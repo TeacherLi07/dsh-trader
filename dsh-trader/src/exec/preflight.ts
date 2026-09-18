@@ -88,10 +88,17 @@ export async function runReadOnlyPreflight(
 
   const result: ReconciliationResult = reconcile({
     localOrders: deps.localOrders,
-    // `reconcile()` 只按 clientOrderId 比对挂单，不用 symbol；OrderAck 里也没有 symbol。
-    remoteOrders: openOrders.map((order) => ({ clientOrderId: order.clientOrderId })),
+    // HTX 不保证 client id 回显；exchangeOrderId 是主匹配键。
+    remoteOrders: openOrders.map((order) => ({
+      ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
+      ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
+    })),
     localPositions: deps.localPositions,
-    remotePositions: positions.map((position) => ({ symbol: position.symbol, qty: position.qty })),
+    remotePositions: positions.map((position) => ({
+      symbol: position.symbol,
+      qty: position.qty,
+      ...(position.protectedStopPrice === undefined ? {} : { protectedStopPrice: position.protectedStopPrice }),
+    })),
   })
 
   const actionKinds: Record<string, number> = {}
@@ -158,13 +165,14 @@ export class LocalStateReader {
   orders(): readonly LocalOrderSnapshot[] {
     const rows = this.#statements
       .get(
-        `SELECT client_order_id, symbol, state FROM order_intents
+         `SELECT client_order_id, symbol, state, exchange_order_id FROM order_intents
          WHERE state IN ('created', 'acked')
          ORDER BY created_at ASC, client_order_id ASC`,
       )
-      .all() as { client_order_id: string; symbol: string; state: string }[]
+      .all() as { client_order_id: string; symbol: string; state: string; exchange_order_id: string | null }[]
     return rows.map((row) => ({
       clientOrderId: row.client_order_id,
+      ...(row.exchange_order_id === null ? {} : { exchangeOrderId: row.exchange_order_id }),
       symbol: row.symbol,
       state: row.state === 'created' ? 'pending' : 'open',
     }))
@@ -173,18 +181,22 @@ export class LocalStateReader {
   positions(): readonly LocalPositionSnapshot[] {
     const rows = this.#statements
       .get(
-        `SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price, COALESCE(oi.side, 'buy') AS side
+        `SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price, COALESCE(oi.side, 'buy') AS side,
+                (SELECT p.stop_price FROM order_intents p
+                 WHERE p.symbol = oi.symbol AND p.reduce_only = 1 AND p.stop_price IS NOT NULL
+                   AND p.state IN ('created', 'acked')
+                 ORDER BY p.created_at DESC LIMIT 1) AS protected_stop_price
          FROM fills f
          JOIN orders o ON o.order_id = f.order_id
          JOIN order_intents oi ON oi.client_order_id = o.client_order_id
          ORDER BY f.ts ASC, f.fill_id ASC`,
       )
-      .all() as { symbol: string; qty: number; price: number; side: string }[]
+      .all() as { symbol: string; qty: number; price: number; side: string; protected_stop_price: number | null }[]
 
-    const bySymbol = new Map<string, { qty: number; price: number; side: string }[]>()
+    const bySymbol = new Map<string, { qty: number; price: number; side: string; protectedStopPrice: number | null }[]>()
     for (const row of rows) {
       const list = bySymbol.get(row.symbol) ?? []
-      list.push({ qty: row.qty, price: row.price, side: row.side })
+      list.push({ qty: row.qty, price: row.price, side: row.side, protectedStopPrice: row.protected_stop_price })
       bySymbol.set(row.symbol, list)
     }
 
@@ -192,7 +204,8 @@ export class LocalStateReader {
     for (const [symbol, fills] of bySymbol) {
       const position = reconstructPosition(fills)
       if (position.qty === 0) continue
-      out.push({ symbol, qty: position.qty })
+      const protectedStopPrice = fills.find((fill) => fill.protectedStopPrice !== null)?.protectedStopPrice ?? null
+      out.push({ symbol, qty: position.qty, ...(protectedStopPrice === null ? {} : { protectedStopPrice }) })
     }
     return out.sort((a, b) => a.symbol.localeCompare(b.symbol))
   }

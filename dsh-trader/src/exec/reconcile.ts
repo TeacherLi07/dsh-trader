@@ -15,12 +15,13 @@ import type { OrderAck, PositionSnapshot } from './broker.js'
 
 export interface LocalOrderSnapshot {
   readonly clientOrderId: string
+  readonly exchangeOrderId?: string
   readonly symbol: string
   readonly state: 'pending' | 'open' | 'filled' | 'canceled'
 }
 
 export interface RemoteOrderSnapshot {
-  readonly clientOrderId: string
+  readonly clientOrderId?: string
   /**
    * 撤单端点的契约参数（`Broker.cancelOrder(exchangeOrderId)`）。
    * **不能**用 `clientOrderId` 顶替：交易所不一定回显我们传入的 client id（HTX 实测就是
@@ -45,6 +46,7 @@ export interface LocalPositionSnapshot {
 export interface RemotePositionSnapshot {
   readonly symbol: string
   readonly qty: number
+  readonly protectedStopPrice?: number
 }
 
 export interface ReconciliationInput {
@@ -92,13 +94,24 @@ function severityOf(action: ReconciliationAction): SeverityClass {
 export function reconcile(input: ReconciliationInput): ReconciliationResult {
   const actions: ReconciliationAction[] = []
 
-  const remoteByClientId = new Map(input.remoteOrders.map((order) => [order.clientOrderId, order]))
+  const remoteByExchangeId = new Map(
+    input.remoteOrders.filter((order) => order.exchangeOrderId !== undefined).map((order) => [order.exchangeOrderId as string, order]),
+  )
+  const remoteByClientId = new Map(
+    input.remoteOrders.filter((order) => order.clientOrderId !== undefined).map((order) => [order.clientOrderId as string, order]),
+  )
+  const localByExchangeId = new Map(
+    input.localOrders.filter((order) => order.exchangeOrderId !== undefined).map((order) => [order.exchangeOrderId as string, order]),
+  )
   const localByClientId = new Map(input.localOrders.map((order) => [order.clientOrderId, order]))
 
   // 本地认为还挂着的单，但交易所没有 → 可能已被成交/撤销，必须查证而不是假设
   for (const order of input.localOrders) {
     if (order.state !== 'pending' && order.state !== 'open') continue
-    if (!remoteByClientId.has(order.clientOrderId)) {
+    const present =
+      (order.exchangeOrderId !== undefined && remoteByExchangeId.has(order.exchangeOrderId)) ||
+      remoteByClientId.has(order.clientOrderId)
+    if (!present) {
       actions.push({
         kind: 'alert_missing_order',
         clientOrderId: order.clientOrderId,
@@ -109,11 +122,13 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
 
   // 交易所有、本地没有 → 孤儿单，撤销（绝不让不受本地状态约束的单继续挂着）
   for (const order of input.remoteOrders) {
-    const local = localByClientId.get(order.clientOrderId)
+    const local =
+      (order.exchangeOrderId === undefined ? undefined : localByExchangeId.get(order.exchangeOrderId)) ??
+      (order.clientOrderId === undefined ? undefined : localByClientId.get(order.clientOrderId))
     if (local === undefined || local.state === 'canceled' || local.state === 'filled') {
       actions.push({
         kind: 'cancel_orphan',
-        clientOrderId: order.clientOrderId,
+        clientOrderId: order.clientOrderId ?? order.exchangeOrderId ?? 'unknown-order',
         ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
         reason: local === undefined ? '本地无记录' : `本地状态为 ${local.state}`,
       })
@@ -136,7 +151,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
         remote: remote.qty,
       })
     }
-    if (remote.qty !== 0 && local.protectedStopPrice === undefined) {
+    if (remote.qty !== 0 && remote.protectedStopPrice === undefined && local.protectedStopPrice === undefined) {
       actions.push({ kind: 'alert_unprotected_position', symbol: remote.symbol })
     }
   }
@@ -155,7 +170,11 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     }
   }
 
-  const freezeTrading = actions.some((action) => action.kind === 'alert_unknown_position')
+  const freezeTrading = actions.some((action) =>
+    action.kind === 'alert_unknown_position' ||
+    action.kind === 'alert_unprotected_position' ||
+    action.kind === 'alert_qty_mismatch',
+  )
 
   return {
     actions,
@@ -312,16 +331,20 @@ export class Reconciler {
 }
 
 type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId'> & { readonly symbol?: string }
-type BrokerPosition = Pick<PositionSnapshot, 'symbol' | 'qty'>
+type BrokerPosition = Pick<PositionSnapshot, 'symbol' | 'qty' | 'protectedStopPrice'>
 
 function toRemoteOrder(order: BrokerOpenOrder): RemoteOrderSnapshot {
   return {
-    clientOrderId: order.clientOrderId,
+    ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
     ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
     symbol: order.symbol ?? '',
   }
 }
 
 function toRemotePosition(position: BrokerPosition): RemotePositionSnapshot {
-  return { symbol: position.symbol, qty: position.qty }
+  return {
+    symbol: position.symbol,
+    qty: position.qty,
+    ...(position.protectedStopPrice === undefined ? {} : { protectedStopPrice: position.protectedStopPrice }),
+  }
 }

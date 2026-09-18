@@ -52,6 +52,10 @@ export interface ExecuteActionArgs {
   readonly alreadyIntended: (clientOrderId: string) => boolean
   /** 冻结标的（plan §4.2/§6.3）；由调用方从组合根取，透传给硬闸。 */
   readonly frozenSymbols?: ReadonlySet<string>
+  /** unknown ack 必须立即冻结标的，不能等下一次进程重启才收敛。 */
+  readonly freezeSymbol?: (symbol: string) => void
+  /** 计划卡 halt 与人工 halt 共用同一持久化熔断。 */
+  readonly halt?: () => void
 }
 
 export interface ExecuteActionResult {
@@ -89,12 +93,6 @@ function actionClientOrderId(plan: PlanCard, conditionId: string, barTs: number,
   return undefined
 }
 
-function ackIntentState(ack: OrderAck): 'acked' | 'filled' | 'rejected' {
-  // 保持回放原有的意图迁移语义：未完成/未拒绝的 ack 统一视为已确认挂出，
-  // 同时不把 broker 的真实订单状态丢在 orders 表里。
-  return ack.state === 'filled' ? 'filled' : ack.state === 'rejected' ? 'rejected' : 'acked'
-}
-
 /**
  * 将 broker ack 写进订单链。成交价和手续费优先取 ack 的实值；只有 broker 明确没提供时才使用
  * 调用方传入的保底值，因为旧 venue 适配器的 ack 契约允许字段暂缺，不能凭空制造价格。
@@ -105,38 +103,22 @@ function recordAck(
   ack: OrderAck,
   fallbackPrice: number,
   now: number,
-): void {
-  args.journal.markIntentAcked(
-    intent.clientOrderId,
-    ackIntentState(ack),
-    ack.exchangeOrderId,
-    now,
-  )
-  if (ack.exchangeOrderId === undefined) return
-
-  args.journal.recordOrder({
-    orderId: ack.exchangeOrderId,
-    venue: args.broker.venue,
-    exchangeOrderId: ack.exchangeOrderId,
-    clientOrderId: intent.clientOrderId,
-    symbol: intent.symbol,
-    status: ack.state,
-    qty: intent.qty,
-    filledQty: ack.state === 'filled' ? intent.qty : 0,
-    ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
-    updatedAt: now,
+): { readonly unknown: boolean; readonly filled: boolean } {
+  const applied = args.journal.applyOrderAck(ack, now, {
+    fallbackQty: intent.qty,
+    fallbackPrice,
+    reflectionHorizonMs: args.reflectionHorizonMs,
   })
-  if (ack.state !== 'filled') return
-
-  args.journal.recordFill({
-    fillId: `fill:${ack.exchangeOrderId}`,
-    orderId: ack.exchangeOrderId,
-    qty: intent.qty,
-    price: ack.avgPrice ?? fallbackPrice,
-    fee: ack.fee ?? 0,
-    feeCurrency: 'USDT',
-    ts: now,
-  })
+  if (applied.unknown) {
+    args.freezeSymbol?.(intent.symbol)
+    args.journal.appendAudit({
+      actor: 'system',
+      kind: 'order.unknown',
+      payload: { clientOrderId: intent.clientOrderId, symbol: intent.symbol, reason: applied.reason ?? null },
+      ts: now,
+    })
+  }
+  return { unknown: applied.unknown, filled: applied.filled }
 }
 
 function auditDenied(args: ExecuteActionArgs, decisionId: string, reason: string, now: number): void {
@@ -176,9 +158,24 @@ async function degradeUnprotectedOpen(
 ): Promise<void> {
   const qty = Math.abs(openQty)
   try {
-    await args.broker.placeOrder({
+    const clientOrderId = numericClientOrderId(`degrade:${decisionId}`)
+    args.journal.recordIntent({
       intentId: `degrade:${decisionId}`,
-      clientOrderId: numericClientOrderId(`degrade:${decisionId}`),
+      clientOrderId,
+      decisionId,
+      venue: args.broker.venue,
+      symbol: args.symbol,
+      state: 'created',
+      type: 'market',
+      side: openSide === 'buy' ? 'sell' : 'buy',
+      qty,
+      notionalUsd: qty * args.referencePrice,
+      reduceOnly: true,
+      createdAt: now,
+    })
+    const ack = await args.broker.placeOrder({
+      intentId: `degrade:${decisionId}`,
+      clientOrderId,
       decisionId,
       symbol: args.symbol,
       type: 'market',
@@ -187,13 +184,32 @@ async function degradeUnprotectedOpen(
       notionalUsd: qty * args.referencePrice,
       reduceOnly: true,
     })
-    args.journal.appendAudit({
-      actor: 'system',
-      kind: 'protection_degrade_closed',
-      payload: { decisionId, symbol: args.symbol, reason, qty },
-      ts: now,
-    })
+    args.journal.applyOrderAck(ack, now, { fallbackQty: qty, fallbackPrice: args.referencePrice })
+    if (ack.state !== 'filled') {
+      args.freezeSymbol?.(args.symbol)
+      args.journal.appendAudit({
+        actor: 'system',
+        kind: 'protection_degrade_failed',
+        payload: { decisionId, symbol: args.symbol, reason, qty, ackState: ack.state },
+        ts: now,
+      })
+      return
+    }
+    const positions = await args.broker.getPositions()
+    const remaining = positions.find((position) => position.symbol === args.symbol)?.qty ?? 0
+    if (remaining !== 0) {
+      args.freezeSymbol?.(args.symbol)
+      args.journal.appendAudit({
+        actor: 'system',
+        kind: 'protection_degrade_failed',
+        payload: { decisionId, symbol: args.symbol, reason, qty, ackState: ack.state, remainingQty: remaining },
+        ts: now,
+      })
+      return
+    }
+    args.journal.appendAudit({ actor: 'system', kind: 'protection_degrade_closed', payload: { decisionId, symbol: args.symbol, reason, qty }, ts: now })
   } catch (error) {
+    args.freezeSymbol?.(args.symbol)
     args.journal.appendAudit({
       actor: 'system',
       kind: 'protection_degrade_failed',
@@ -262,6 +278,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     return { executed: false, denied: false, reason: `escalate:${action.reason}`, decisionId }
   }
   if (action.action === 'halt') {
+    args.halt?.()
     record(true, { rationale: action.reason ?? 'halt' })
     return { executed: true, denied: false, decisionId }
   }
@@ -283,9 +300,20 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
           : { trailingPercent: (action as TrailingAction).percent }
     const protectiveClientId = protectiveClientOrderId(args.plan.planId, args.conditionId, args.barTs)
 
-    // order_intents.decision_id 有外键，所以决策必须先写；保护单也必须有本地意图。
-    record(true)
-    const inserted = args.journal.recordIntent({
+    // decision + protective intent 必须一次提交；否则 crash 恰在两次写入之间会留下
+    // executed decision 却没有保护意图，恢复无法知道要查询哪一张单。
+    const inserted = args.journal.recordDecisionAndIntent(
+      {
+        decisionId,
+        symbol: args.symbol,
+        ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
+        planId: args.plan.planId,
+        decidedAt: now,
+        contextHash,
+        action: toDecisionAction(action.action),
+        executed: false,
+      },
+      {
       intentId: `pi:${decisionId}`,
       clientOrderId: protectiveClientId,
       decisionId,
@@ -297,8 +325,10 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
       qty: Math.abs(args.position.qty),
       reduceOnly: true,
       createdAt: now,
-    })
-    if (!inserted) {
+        stopPrice: action.action === 'set_stop' ? (action as LevelAction).price : undefined,
+      },
+    )
+    if (!inserted.intentInserted) {
       return { executed: false, denied: false, reason: 'already_intended', decisionId, alreadyIntended: true }
     }
 
@@ -311,7 +341,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
       action.action === 'set_stop' || action.action === 'set_target'
         ? (action as LevelAction).price
         : args.referencePrice
-    recordAck(
+    const protectiveResult = recordAck(
       args,
       {
         clientOrderId: protectiveClientId,
@@ -324,7 +354,9 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
       now,
     )
     // 保护动作的成功标准是 broker 已接受挂单；即使它后来在 bar 内成交，fills 也已由 ack 记录。
-    return { executed: true, denied: ack.state === 'rejected', decisionId }
+    const protectiveAccepted = !protectiveResult.unknown && ack.state !== 'rejected'
+    if (protectiveAccepted) args.journal.markDecisionExecuted(decisionId)
+    return { executed: protectiveAccepted, denied: protectiveResult.unknown || ack.state === 'rejected', decisionId }
   }
 
   // ── 订单动作：先定仓、再过硬闸、最后下单 ──────────────────────────────────
@@ -335,6 +367,10 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
 
   if (action.action === 'open') {
     const open = action as OpenAction
+    if (open.method === 'limit' && args.mode !== 'paper') {
+      record(false, { rationale: '增加敞口的限价单在成交监控接入前禁止提交' })
+      return { executed: false, denied: true, reason: '增加敞口的限价单在成交监控接入前禁止提交', decisionId }
+    }
     const entry = args.referencePrice
     const derivedStop = stopPriceFor(entry, open.side, open.stop, args.atr)
     if (derivedStop === undefined) {
@@ -429,52 +465,79 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     return { executed: false, denied: true, reason, decisionId }
   }
 
-  // 先记决策和意图，再发请求；created 且没有 ack 是崩溃恢复唯一可靠的线索。
-  args.journal.recordDecision({
-    decisionId,
-    symbol: args.symbol,
-    ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
-    planId: args.plan.planId,
-    decidedAt: now,
-    contextHash,
-    action: toDecisionAction(action.action),
-    executed: false,
-    ...(sizeQty === undefined ? {} : { sizeQty }),
-    ...(stopPrice === undefined ? {} : { stopPrice }),
-    ...(takeProfit === undefined ? {} : { takeProfit }),
-  })
-  const inserted = args.journal.recordIntent({
-    intentId: `oi:${decisionId}`,
-    clientOrderId: intent.clientOrderId,
-    decisionId,
-    venue: args.broker.venue,
-    symbol: args.symbol,
-    state: 'created',
-    type: intent.type,
-    side: intent.side,
-    qty: intent.qty,
-    notionalUsd: intent.notionalUsd,
-    reduceOnly: intent.reduceOnly === true,
-    createdAt: now,
-    ...(intent.price === undefined ? {} : { price: intent.price }),
-  })
-  if (!inserted) {
+  // 决策与 created intent 必须一次提交；这是 crash recovery 唯一可靠的边界。
+  const inserted = args.journal.recordDecisionAndIntent(
+    {
+      decisionId,
+      symbol: args.symbol,
+      ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
+      planId: args.plan.planId,
+      decidedAt: now,
+      contextHash,
+      action: toDecisionAction(action.action),
+      executed: false,
+      ...(sizeQty === undefined ? {} : { sizeQty }),
+      ...(stopPrice === undefined ? {} : { stopPrice }),
+      ...(takeProfit === undefined ? {} : { takeProfit }),
+    },
+    {
+      intentId: `oi:${decisionId}`,
+      clientOrderId: intent.clientOrderId,
+      decisionId,
+      venue: args.broker.venue,
+      symbol: args.symbol,
+      state: 'created',
+      type: intent.type,
+      side: intent.side,
+      qty: intent.qty,
+      notionalUsd: intent.notionalUsd,
+      reduceOnly: intent.reduceOnly === true,
+      createdAt: now,
+      ...(intent.price === undefined ? {} : { price: intent.price }),
+      ...(intent.stopLossPrice === undefined ? {} : { stopPrice: intent.stopLossPrice }),
+    },
+  )
+  if (!inserted.intentInserted) {
     return { executed: false, denied: false, reason: 'already_intended', decisionId, alreadyIntended: true }
   }
 
   const ack = await args.broker.placeOrder(intent)
-  recordAck(args, intent, ack, args.referencePrice, now)
+  const primaryAck = recordAck(args, intent, ack, args.referencePrice, now)
 
   // ★ 成交回填可能超时（HTX 市价单实测：createOrder 只回 open/new，靠有界轮询 fetchOrder 回填）。
   // 若轮询到点仍未确认，ack.state 是 'acked'；**绝不能据此断定"没成交"** —— 那会留下
   // 无止损裸仓、且不登记结算。对 open：向交易所重取持仓来确认（"执行前重取状态"同一原则）。
-  let openConfirmed = ack.state === 'filled'
+  let openConfirmed = primaryAck.filled
   if (action.action === 'open' && ack.state !== 'filled') {
     try {
       const positions = await args.broker.getPositions()
-      openConfirmed = (positions.find((candidate) => candidate.symbol === args.symbol)?.qty ?? 0) !== 0
+      const beforeQty = args.position?.qty ?? 0
+      const afterQty = positions.find((candidate) => candidate.symbol === args.symbol)?.qty ?? 0
+      const delta = afterQty - beforeQty
+      const expectedDirection = (action as OpenAction).side === 'long' ? 1 : -1
+      // 只接受本次请求造成的同向仓位增量；旧仓非零不能替本单背书。
+      openConfirmed = expectedDirection * delta > 1e-12
+      if (openConfirmed) {
+        const lookup = args.broker.findOrderByExchangeOrderId
+        const refreshed =
+          ack.exchangeOrderId === undefined || lookup === undefined
+            ? undefined
+            : await lookup.call(args.broker, ack.exchangeOrderId, args.symbol)
+        if (refreshed?.state === 'filled') {
+          recordAck(args, intent, refreshed, args.referencePrice, now)
+        } else if (refreshed === undefined && args.broker.venue === 'paper') {
+          // paper broker 的撮合结果已经由 getPositions 反映，测试/回放适配器可能
+          // 没有 exchange-id 查询能力；真实 HTX 路径绝不走这个分支。
+          openConfirmed = true
+        } else {
+          // 只有持仓 delta 而没有可核验的交易所订单，不得把旧/并发仓位归因给本单。
+          openConfirmed = false
+          args.freezeSymbol?.(args.symbol)
+        }
+      }
     } catch {
       openConfirmed = false
+      args.freezeSymbol?.(args.symbol)
     }
     args.journal.appendAudit({
       actor: 'system',
@@ -546,8 +609,25 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     }
   }
 
-  // close = 全平 + cancelAll(symbol)，否则残留保护单可能在平仓后反向开仓。
-  if (action.action === 'close') await args.broker.cancelAll(args.symbol)
+  // close 只有确认远端 flat 后才能撤保护；ack 但未平仓时撤保护会制造裸仓。
+  if (action.action === 'close' && ack.state === 'filled') {
+    try {
+      const remaining = (await args.broker.getPositions()).find((position) => position.symbol === args.symbol)?.qty ?? 0
+      if (remaining === 0) await args.broker.cancelAll(args.symbol)
+      else {
+        args.freezeSymbol?.(args.symbol)
+        args.journal.appendAudit({
+          actor: 'system',
+          kind: 'close_not_flat',
+          payload: { decisionId, symbol: args.symbol, remainingQty: remaining },
+          ts: now,
+        })
+      }
+    } catch (error) {
+      args.freezeSymbol?.(args.symbol)
+      args.journal.appendAudit({ actor: 'system', kind: 'close_not_flat', payload: { decisionId, symbol: args.symbol, error: String(error) }, ts: now })
+    }
+  }
 
   return { executed: action.action === 'open' ? openConfirmed : ack.state === 'filled', denied: ack.state === 'rejected', decisionId }
 }

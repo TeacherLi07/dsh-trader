@@ -53,6 +53,8 @@ export interface SettlementInputs {
   readonly direction: 1 | -1
   readonly bars: readonly { readonly openTime: number; readonly high: number; readonly low: number; readonly close: number }[]
   readonly benchmarkBars: readonly { readonly openTime: number; readonly close: number }[]
+  /** 已确认的真实出场成交；缺失时才使用 horizon mark。 */
+  readonly exitPrice?: number
 }
 
 export interface SettlementComputation {
@@ -86,7 +88,7 @@ export function computeSettlement(
   const feesPct = notional > 0 ? (feesQuote / notional) * 100 : 0
   const slippagePct = 2 * (options.slippageBps / 10_000) * 100
 
-  const exitPrice = bars.length > 0 ? (bars[bars.length - 1] as { close: number }).close : entryPrice
+  const exitPrice = inputs.exitPrice ?? (bars.length > 0 ? (bars[bars.length - 1] as { close: number }).close : entryPrice)
   const grossPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 * direction : 0
   const netPct = grossPct - feesPct - slippagePct
 
@@ -345,8 +347,20 @@ export class SettlementScheduler {
           { since: decision.decidedAt, until: horizonEnd },
         )
 
+        const exitFill =
+          (isExit || fills.length > 1) && fills.length > 0
+            ? fills[fills.length - 1]
+            : undefined
         const computation = computeSettlement(
-          { decision, fills, entryPrice, direction, bars, benchmarkBars },
+          {
+            decision,
+            fills,
+            entryPrice,
+            direction,
+            bars,
+            benchmarkBars,
+            ...(exitFill === undefined ? {} : { exitPrice: exitFill.price }),
+          },
           { slippageBps: this.deps.slippageBps },
         )
 
@@ -361,11 +375,11 @@ export class SettlementScheduler {
         }
 
         const inserted = this.deps.journal.recordOutcome(outcome)
-        this.deps.journal.markDecisionOutcome(decision.decisionId, outcome.outcomeId)
         if (!inserted) {
           skipped += 1
           continue
         }
+        this.deps.journal.markDecisionOutcome(decision.decisionId, outcome.outcomeId)
         settled += 1
 
         if (this.deps.reflector === undefined) continue

@@ -73,8 +73,16 @@ export function stopPriceFor(
   stop: StopSpec,
   atr: number | null | undefined,
 ): number | undefined {
-  if (stop.method === 'structure') return stop.level
+  if (
+    stop.method === 'structure'
+  ) {
+    if (!Number.isFinite(stop.level) || !(stop.level > 0)) return undefined
+    if (side === 'long' && !(stop.level < entryPrice)) return undefined
+    if (side === 'short' && !(stop.level > entryPrice)) return undefined
+    return stop.level
+  }
   if (typeof atr !== 'number' || !Number.isFinite(atr) || !(atr > 0)) return undefined
+  if (!Number.isFinite(stop.k) || !(stop.k > 0)) return undefined
   const distance = stop.k * atr
   const price = side === 'long' ? entryPrice - distance : entryPrice + distance
   return price > 0 ? price : undefined
@@ -89,5 +97,6 @@ export function takeProfitFor(
 ): number | undefined {
   if (rMultiple === undefined || !(rMultiple > 0)) return undefined
   const distance = Math.abs(entryPrice - stopPrice) * rMultiple
-  return side === 'long' ? entryPrice + distance : entryPrice - distance
+  const target = side === 'long' ? entryPrice + distance : entryPrice - distance
+  return target > 0 && Number.isFinite(target) ? target : undefined
 }

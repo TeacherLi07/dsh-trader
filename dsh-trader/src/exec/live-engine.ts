@@ -49,6 +49,8 @@ export interface LiveEngineDeps {
   readonly queue?: TriggerQueue
   /** 冻结标的（对账/恢复未决，plan §4.2/§6.3）；透传给硬闸，禁止增加敞口。 */
   readonly frozenSymbols?: () => ReadonlySet<string>
+  readonly freezeSymbol?: (symbol: string) => void
+  readonly halt?: () => void
 }
 
 export interface ClosedBarInput {
@@ -217,6 +219,8 @@ export class LiveEngine {
         this.deps.reflectionHorizonMs ?? horizonMsForTimeframe(input.timeframe),
       alreadyIntended: (clientOrderId) => this.deps.journal.hasClientOrderId(clientOrderId),
       ...(this.deps.frozenSymbols === undefined ? {} : { frozenSymbols: this.deps.frozenSymbols() }),
+      ...(this.deps.freezeSymbol === undefined ? {} : { freezeSymbol: this.deps.freezeSymbol }),
+      ...(this.deps.halt === undefined ? {} : { halt: this.deps.halt }),
     })
 
     this.#markFired(plan, outcome, input, execution, now)

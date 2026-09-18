@@ -5,6 +5,7 @@
  * 与 `Broker` 接口，避免"回测能跑、实盘不能跑"。
  */
 
+/** 生产执行只允许 HTX；paper 仅用于回放/本地撮合。OKX 不再是生产 Broker。 */
 export type Venue = 'paper' | 'htx' | 'okx'
 
 export type OrderSide = 'buy' | 'sell'
@@ -68,6 +69,8 @@ export interface OrderAck {
    * 结算必须用它，而不是"信号 bar 的收盘价" —— 否则滑点从未进入账本（plan §5.3）。
    */
   readonly avgPrice?: number
+  /** 部分成交时的真实成交数量；缺失不允许把请求量当成成交量。 */
+  readonly filledQty?: number
   /** 本单实际支付的手续费（计价货币金额）。缺省表示 broker 未提供。 */
   readonly fee?: number
 }
@@ -98,6 +101,10 @@ export interface Broker {
   /** HTX 不支持原子括号单 ⇒ 入场与保护单分两步，中间存在"已成交但未受保护"的窗口。 */
   placeOrder(request: OrderRequest): Promise<OrderAck>
   placeProtective(request: ProtectiveRequest): Promise<OrderAck>
+  /** 按 HTX 返回的交易所订单号查询，恢复/成交轮询不得依赖 clientOrderId 回显。 */
+  findOrderByExchangeOrderId?(exchangeOrderId: string, symbol?: string): Promise<OrderAck | undefined>
+  /** 兼容仅能按 client id 查询的 paper/sim 适配器；生产 HTX 优先使用 exchange id。 */
+  findOrderByClientOrderId?(clientOrderId: string, symbol?: string): Promise<OrderAck | undefined>
   cancelOrder(exchangeOrderId: string): Promise<void>
   cancelAll(symbol?: string): Promise<void>
   subscribeUserData(onEvent: (event: UserDataEvent) => void): () => void

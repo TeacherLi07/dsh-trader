@@ -144,4 +144,31 @@ describe('DecisionJournal', () => {
       }),
     ).toThrow()
   })
+
+  it('decision + intent 是原子幂等根，unknown ack 不会变成 acked', () => {
+    const result = journal.recordDecisionAndIntent(
+      decision({ executed: false }),
+      {
+        intentId: 'atomic-i',
+        clientOrderId: 'atomic-c',
+        decisionId: 'd1',
+        venue: 'htx',
+        symbol: 'BTC/USDT',
+        state: 'created',
+        type: 'market',
+        side: 'buy',
+        qty: 1,
+        notionalUsd: 100,
+        reduceOnly: false,
+        createdAt: NOW,
+      },
+    )
+    expect(result).toEqual({ decisionInserted: true, intentInserted: true })
+    const ack = journal.applyOrderAck(
+      { intentId: 'atomic-i', clientOrderId: 'atomic-c', state: 'unknown', exchangeOrderId: 'ex-1', ts: NOW },
+      NOW,
+    )
+    expect(ack.unknown).toBe(true)
+    expect(journal.inFlightIntents()[0]?.state).toBe('unknown')
+  })
 })

@@ -14,6 +14,8 @@ import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
 import { canonicalJson, fingerprint } from '../util/canonical.js'
 import type { DecisionAction } from '../plan/schema.js'
+import type { OrderAck, OrderState } from './broker.js'
+import { canTransitionOrder } from './order-state.js'
 
 export interface DecisionRecord {
   readonly decisionId: string
@@ -46,6 +48,7 @@ export interface InFlightIntent {
   readonly side: string | null
   readonly qty: number | null
   readonly price: number | null
+  readonly exchangeOrderId: string | null
   readonly reduceOnly: boolean
   readonly createdAt: number
 }
@@ -61,10 +64,18 @@ export interface OrderIntentRecord {
   readonly side: string
   readonly qty: number
   readonly price?: number
+  readonly stopPrice?: number
   readonly notionalUsd?: number
   readonly reduceOnly: boolean
   readonly createdAt: number
   readonly exchangeOrderId?: string
+}
+
+export interface ApplyOrderAckResult {
+  readonly state: OrderState
+  readonly filled: boolean
+  readonly unknown: boolean
+  readonly reason?: string
 }
 
 export interface OrderRecord {
@@ -442,10 +453,10 @@ export class DecisionJournal {
     const result = this.#statements.get(
         `INSERT INTO order_intents
            (intent_id, client_order_id, decision_id, venue, symbol, state, type, side, qty,
-            price, notional_usd, reduce_only, created_at, exchange_order_id)
+            price, stop_price, notional_usd, reduce_only, created_at, exchange_order_id)
          VALUES
            (@intentId, @clientOrderId, @decisionId, @venue, @symbol, @state, @type, @side, @qty,
-            @price, @notionalUsd, @reduceOnly, @createdAt, @exchangeOrderId)
+            @price, @stopPrice, @notionalUsd, @reduceOnly, @createdAt, @exchangeOrderId)
          ON CONFLICT (client_order_id) DO NOTHING`,
       )
       .run({
@@ -459,12 +470,28 @@ export class DecisionJournal {
         side: intent.side,
         qty: intent.qty,
         price: intent.price ?? null,
+        stopPrice: intent.stopPrice ?? null,
         notionalUsd: intent.notionalUsd ?? null,
         reduceOnly: intent.reduceOnly ? 1 : 0,
         createdAt: intent.createdAt,
         exchangeOrderId: intent.exchangeOrderId ?? null,
       })
     return Number(result.changes) > 0
+  }
+
+  /**
+   * 决策与第一条 intent 的唯一原子提交入口。
+   * 已存在 decision 但缺 intent 时允许补齐，这是崩溃发生在两次写入之间时的
+   * 收敛路径；已存在 intent 则保持幂等，不触发第二次 broker 调用。
+   */
+  recordDecisionAndIntent(record: DecisionRecord, intent: OrderIntentRecord): {
+    readonly decisionInserted: boolean
+    readonly intentInserted: boolean
+  } {
+    return this.#statements.transaction(() => ({
+      decisionInserted: this.recordDecision(record),
+      intentInserted: this.recordIntent(intent),
+    }))
   }
 
   recordOrder(order: OrderRecord): boolean {
@@ -755,15 +782,132 @@ export class DecisionJournal {
   /** 收到交易所 ack 后推进意图状态；`created` 且无 ack 的记录是崩溃恢复的查询线索。 */
   markIntentAcked(
     clientOrderId: string,
-    state: 'acked' | 'filled' | 'rejected' | 'canceled',
+    state: OrderState,
     exchangeOrderId: string | undefined,
     ackedAt: number,
   ): void {
+    const acked = state === 'unknown' || state === 'created' ? null : ackedAt
     this.#statements
       .get(
-        'UPDATE order_intents SET state = ?, acked_at = ?, exchange_order_id = ? WHERE client_order_id = ?',
+        'UPDATE order_intents SET state = ?, acked_at = ?, exchange_order_id = COALESCE(?, exchange_order_id) WHERE client_order_id = ?',
       )
-      .run(state, ackedAt, exchangeOrderId ?? null, clientOrderId)
+      .run(state, acked, exchangeOrderId ?? null, clientOrderId)
+  }
+
+  /**
+   * 唯一的订单 ack 状态迁移入口。
+   * unknown 必须原样保留且继续留在 in-flight；filled 必须有 exchangeOrderId、成交量、
+   * 成交价，否则降为 unknown，避免用请求量/信号价伪造成交。订单、成交、决策执行与
+   * reflection_due_at 在同一事务内提交，恢复/轮询可安全重复调用。
+   */
+  applyOrderAck(
+    ack: OrderAck,
+    now: number,
+    options: {
+      readonly fallbackQty?: number
+      readonly fallbackPrice?: number
+      readonly reflectionHorizonMs?: number
+    } = {},
+  ): ApplyOrderAckResult {
+    return this.#statements.transaction(() => {
+      const intent = this.#statements
+        .get(
+          `SELECT client_order_id, decision_id, venue, symbol, qty, side, price, state
+           FROM order_intents WHERE client_order_id = ?`,
+        )
+        .get(ack.clientOrderId) as
+        | {
+            client_order_id: string
+            decision_id: string | null
+            venue: string
+            symbol: string
+            qty: number | null
+            side: string | null
+            price: number | null
+            state: OrderState
+          }
+        | undefined
+      if (intent === undefined) return { state: 'unknown', filled: false, unknown: true, reason: '本地没有对应 intent' }
+
+      if (!canTransitionOrder(intent.state, ack.state)) {
+        return { state: intent.state, filled: intent.state === 'filled', unknown: intent.state === 'unknown', reason: `非法状态迁移 ${intent.state} -> ${ack.state}` }
+      }
+
+      const exchangeOrderId = ack.exchangeOrderId
+      if (ack.state === 'unknown' || ack.state === 'created') {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: `交易所返回未定状态 ${ack.state}` }
+      }
+      if (exchangeOrderId === undefined) {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', undefined, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: 'ack 缺少 exchangeOrderId' }
+      }
+
+      const requestedQty = options.fallbackQty ?? intent.qty ?? 0
+      const filledQty = ack.filledQty ?? (ack.state === 'filled' ? requestedQty : 0)
+      if (ack.state === 'filled') {
+        const price = ack.avgPrice ?? options.fallbackPrice ?? intent.price ?? undefined
+        if (!(filledQty > 0) || price === undefined || !Number.isFinite(price) || !(price > 0)) {
+          this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+          return { state: 'unknown', filled: false, unknown: true, reason: 'filled ack 缺少可核验成交量/价格' }
+        }
+      }
+
+      this.markIntentAcked(ack.clientOrderId, ack.state, exchangeOrderId, now)
+      this.recordOrder({
+        orderId: exchangeOrderId,
+        venue: intent.venue,
+        exchangeOrderId,
+        clientOrderId: intent.client_order_id,
+        symbol: intent.symbol,
+        status: ack.state,
+        qty: requestedQty,
+        filledQty: ack.state === 'filled' ? filledQty : 0,
+        ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
+        updatedAt: now,
+      })
+      // recordOrder 是幂等插入；状态刷新必须覆盖之前的 acked 行。
+      this.#statements
+        .get(
+          `UPDATE orders SET status = ?, filled_qty = ?, avg_price = COALESCE(?, avg_price), updated_at = ?
+           WHERE order_id = ? OR (venue = ? AND exchange_order_id = ?)`,
+        )
+        .run(
+          ack.state,
+          ack.state === 'filled' ? filledQty : 0,
+          ack.avgPrice ?? null,
+          now,
+          exchangeOrderId,
+          intent.venue,
+          exchangeOrderId,
+        )
+
+      if (ack.state !== 'filled') return { state: ack.state, filled: false, unknown: false }
+      const price = ack.avgPrice ?? options.fallbackPrice ?? intent.price as number
+      this.recordFill({
+        fillId: `fill:${exchangeOrderId}:${ack.ts}`,
+        orderId: exchangeOrderId,
+        qty: filledQty,
+        price,
+        fee: ack.fee ?? 0,
+        feeCurrency: 'USDT',
+        ts: ack.ts,
+      })
+
+      if (intent.decision_id !== null) {
+        this.markDecisionExecuted(intent.decision_id)
+        const action = this.#statements
+          .get('SELECT action FROM decisions WHERE decision_id = ?')
+          .get(intent.decision_id) as { action: string } | undefined
+        if (action !== undefined && (action.action === 'open' || action.action === 'reduce' || action.action === 'close')) {
+          this.markDecisionReflectionDue(
+            intent.decision_id,
+            now + (options.reflectionHorizonMs ?? 4 * 3_600_000),
+          )
+        }
+      }
+      return { state: 'filled', filled: true, unknown: false }
+    })
   }
 
   /**
@@ -774,7 +918,7 @@ export class DecisionJournal {
     const rows = this.#statements
       .get(
         `SELECT client_order_id, intent_id, decision_id, symbol, venue, state, type, side, qty,
-                price, reduce_only, created_at
+                price, reduce_only, created_at, exchange_order_id
          FROM order_intents
          WHERE acked_at IS NULL AND state IN ('created', 'unknown')
          ORDER BY created_at ASC, client_order_id ASC`,
@@ -790,6 +934,7 @@ export class DecisionJournal {
       side: string | null
       qty: number | null
       price: number | null
+      exchange_order_id: string | null
       reduce_only: number
       created_at: number
     }[]
@@ -804,8 +949,40 @@ export class DecisionJournal {
       side: row.side,
       qty: row.qty,
       price: row.price,
+      exchangeOrderId: row.exchange_order_id,
       reduceOnly: row.reduce_only === 1,
       createdAt: row.created_at,
+    }))
+  }
+
+  /** 已拿到 exchange id 的非终态订单；启动/周期轮询用它补齐 delayed fill。 */
+  pollableIntents(): readonly {
+    readonly clientOrderId: string
+    readonly exchangeOrderId: string
+    readonly symbol: string
+    readonly qty: number
+    readonly price: number | null
+  }[] {
+    const rows = this.#statements
+      .get(
+        `SELECT client_order_id, exchange_order_id, symbol, qty, price
+         FROM order_intents
+         WHERE exchange_order_id IS NOT NULL AND state IN ('created', 'acked', 'unknown')
+         ORDER BY created_at ASC, client_order_id ASC`,
+      )
+      .all() as {
+      client_order_id: string
+      exchange_order_id: string
+      symbol: string
+      qty: number
+      price: number | null
+    }[]
+    return rows.map((row) => ({
+        clientOrderId: row.client_order_id,
+        exchangeOrderId: row.exchange_order_id,
+        symbol: row.symbol,
+        qty: row.qty,
+        price: row.price,
     }))
   }
 

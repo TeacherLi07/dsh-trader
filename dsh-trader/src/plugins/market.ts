@@ -143,6 +143,8 @@ export function apply(ctx: Context, config: MarketConfig): void {
             limits: ports.limits,
             riskPct: ports.riskPct,
             ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols }),
+            ...(ports.freezeSymbol === undefined ? {} : { freezeSymbol: ports.freezeSymbol }),
+            ...(ports.halt === undefined ? {} : { halt: ports.halt }),
           })
           try {
             const outcome = await liveEngine.onClosedBar({

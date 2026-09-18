@@ -100,6 +100,23 @@ export function validateIntent(
     return deny('notionalUsd 必须由下单前重取的实时盘口估算得出')
   }
 
+  // 账户快照也是不可信输入。NaN 会让所有 `>` 比较返回 false，若不先拒绝会把
+  // “无法读取风控状态”误判成“没有风险”。unknown/Infinity 一律 fail-closed。
+  const accountNumbers: readonly [string, number][] = [
+    ['equityQuote', account.equityQuote],
+    ['totalExposureUsd', account.totalExposureUsd],
+    ['openOrders', account.openOrders],
+    ['leverage', account.leverage],
+    ['dailyLossUsd', account.dailyLossUsd],
+    ['drawdownUsd', account.drawdownUsd],
+    ['consecutiveLosses', account.consecutiveLosses],
+    ['spreadBps', account.spreadBps],
+    ['observedAt', account.observedAt],
+  ]
+  for (const [name, value] of accountNumbers) {
+    if (!Number.isFinite(value) || value < 0) return deny(`账户状态 ${name} 非有限非负数，拒绝执行`)
+  }
+
   const limits = policy.limits
   if (limits === null) return ALLOW // 用户显式放弃风控：安全机制（幂等/对账/心跳）仍然生效
 

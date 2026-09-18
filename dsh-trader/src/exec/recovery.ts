@@ -20,10 +20,11 @@ import type { DecisionJournal, InFlightIntent } from './journal.js'
 /** 可选的交易所查询能力；不实现就只能判定为"未知"。 */
 export interface ClientOrderLookup {
   findOrderByClientOrderId?(clientOrderId: string): Promise<OrderAck | undefined>
+  findOrderByExchangeOrderId?(exchangeOrderId: string, symbol?: string): Promise<OrderAck | undefined>
 }
 
 export type RecoveryOutcome =
-  | { readonly kind: 'resolved'; readonly state: OrderAck['state']; readonly exchangeOrderId?: string }
+  | { readonly kind: 'resolved'; readonly state: OrderAck['state']; readonly exchangeOrderId?: string; readonly ack: OrderAck }
   | { readonly kind: 'unknown'; readonly reason: string }
 
 export interface RecoveryAlert {
@@ -81,17 +82,18 @@ export class CrashRecovery {
         })
         continue
       }
-
-      if (outcome.state === 'rejected' || outcome.state === 'canceled') {
-        journal.markIntentAcked(intent.clientOrderId, outcome.state, outcome.exchangeOrderId, this.deps.clock.now())
-        continue
+      const applied = journal.applyOrderAck(outcome.ack, this.deps.clock.now(), {
+        fallbackQty: intent.qty ?? undefined,
+        fallbackPrice: intent.price ?? undefined,
+      })
+      if (applied.unknown) {
+        freeze.add(intent.symbol)
+        alerts.push({
+          level: 'critical',
+          code: 'filled_ack_unverifiable',
+          message: `在途意图 ${intent.clientOrderId} 的交易所状态 ${outcome.state} 缺少可核验成交证据 ⇒ 冻结 ${intent.symbol}：${applied.reason ?? 'unknown'}`,
+        })
       }
-      journal.markIntentAcked(
-        intent.clientOrderId,
-        outcome.state === 'filled' ? 'filled' : 'acked',
-        outcome.exchangeOrderId,
-        this.deps.clock.now(),
-      )
     }
 
     // 孤儿订单：交易所挂着、本地没有对应意图 —— 属于必须撤销的 P0 不一致
@@ -133,15 +135,25 @@ export class CrashRecovery {
   }
 
   async #classify(intent: InFlightIntent): Promise<RecoveryOutcome> {
-    const lookup = this.deps.broker.findOrderByClientOrderId?.bind(this.deps.broker)
+    const exchangeLookup = this.deps.broker.findOrderByExchangeOrderId?.bind(this.deps.broker)
+    const clientLookup = this.deps.broker.findOrderByClientOrderId?.bind(this.deps.broker)
+    const lookup = this.deps.broker.venue === 'htx' && intent.exchangeOrderId === null
+      ? undefined
+      : intent.exchangeOrderId !== null && exchangeLookup !== undefined
+      ? () => exchangeLookup(intent.exchangeOrderId as string, intent.symbol)
+      : clientLookup === undefined
+        ? undefined
+        : () => clientLookup(intent.clientOrderId)
     if (lookup === undefined) {
       return {
         kind: 'unknown',
-        reason: 'broker 不支持按 client_order_id 查询（无法区分"没发出去"与"已成交"）',
+        reason: intent.exchangeOrderId === null
+          ? 'broker 不支持按 client_order_id 查询；intent 尚无 exchangeOrderId，HTX 不保证 client_order_id 回显，无法安全查询'
+          : 'broker 不支持按 exchange_order_id 查询（无法区分"没发出去"与"已成交"）',
       }
     }
     try {
-      const ack = await lookup(intent.clientOrderId)
+      const ack = await lookup()
       if (ack === undefined) {
         return { kind: 'unknown', reason: '交易所查不到该 client_order_id' }
       }
@@ -153,6 +165,7 @@ export class CrashRecovery {
       return {
         kind: 'resolved',
         state: ack.state,
+        ack: { ...ack, clientOrderId: intent.clientOrderId },
         ...(ack.exchangeOrderId === undefined ? {} : { exchangeOrderId: ack.exchangeOrderId }),
       }
     } catch (error) {

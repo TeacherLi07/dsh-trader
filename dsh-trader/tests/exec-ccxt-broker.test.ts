@@ -234,8 +234,8 @@ describe('CcxtBroker', () => {
     ])
 
     const open = await broker.getOpenOrders()
-    expect(open).toHaveLength(2)
-    expect(open.map((item) => item.clientOrderId)).toEqual(['protect-1', 'client-2'])
+    expect(open).toHaveLength(3)
+    expect(open.map((item) => item.clientOrderId)).toEqual(['protect-1', 'client-2', 'ghost'])
     expect(exchange.loads).toBe(1)
   })
 

@@ -21,7 +21,8 @@ import type {
   Venue,
 } from './broker.js'
 
-export type CcxtVenue = Exclude<Venue, 'paper'>
+/** 生产执行领域只承认 HTX；ccxt 仍只是 HTX 的签名/HTTP/market metadata 传输层。 */
+export type CcxtVenue = 'htx'
 export type CcxtParams = Record<string, unknown>
 
 /** CCXT 余额的最小结构；字段值保留 unknown，因为不同交易所会返回数字字符串。 */
@@ -416,7 +417,7 @@ function addParam(params: CcxtParams, key: string, value: number | string | bool
   if (value !== undefined) params[key] = value
 }
 
-export class CcxtBroker implements Broker {
+export class HtxBroker implements Broker {
   readonly venue: CcxtVenue
   readonly #exchange: CcxtProExchangeLike
   readonly #clock: Clock
@@ -550,7 +551,15 @@ export class CcxtBroker implements Broker {
       if (symbol !== undefined && order['symbol'] !== symbol) continue
       const ack = this.#orderAck(order, undefined, 'acked')
       if (ack !== undefined) acks.push(ack)
-      // 没有 clientOrderId 的远端单不能安全纳入本地审计映射；这里跳过而非编造 id。
+      else {
+        const exchangeOrderId = exchangeOrderIdFrom(order)
+        // HTX 算法单常不回显 client id；exchangeOrderId 是对账主键，使用它作为
+        // 仅用于展示/孤儿检测的占位 client id，绝不拿它去做本地意图匹配。
+        if (exchangeOrderId !== undefined) {
+          const synthetic = this.#orderAck(order, { clientOrderId: exchangeOrderId }, 'acked')
+          if (synthetic !== undefined) acks.push(synthetic)
+        }
+      }
     }
     return acks
   }
@@ -591,8 +600,8 @@ export class CcxtBroker implements Broker {
     }
 
     const params: CcxtParams = { clientOrderId, reduceOnly: true }
-    // HTX 线性永续的算法触发单必须显式带 position_side（实测 code 1067）；其它 venue 不传。
-    if (this.venue === 'htx') params['position_side'] = this.#positionSide
+    // HTX 线性永续的算法触发单必须显式带 position_side（实测 code 1067）。
+    params['position_side'] = this.#positionSide
     addParam(params, 'stopLossPrice', request.stopLossPrice)
     addParam(params, 'takeProfitPrice', request.takeProfitPrice)
     addParam(params, 'trailingPercent', request.trailingPercent)
@@ -776,6 +785,19 @@ export class CcxtBroker implements Broker {
     return undefined
   }
 
+  async findOrderByExchangeOrderId(exchangeOrderId: string, symbol?: string): Promise<OrderAck | undefined> {
+    await this.#ensureMarketsLoaded()
+    if (!this.#can('fetchOrder')) return undefined
+    try {
+      const order = await this.#exchange.fetchOrder(exchangeOrderId, symbol)
+      if (order === undefined || exchangeOrderIdFrom(order) !== exchangeOrderId) return undefined
+      return this.#orderAck(order, { clientOrderId: exchangeOrderId }, 'acked')
+    } catch (error) {
+      if (lookupMiss(error)) return undefined
+      throw this.#safeError(error)
+    }
+  }
+
   async #placeOrder(request: OrderRequest): Promise<OrderAck> {
     // 传输失败/不确定失败必须 throw：调用方已落库的 created 意图要留给 CrashRecovery 收敛。
     // 不能返回 { state: 'unknown' }，现有 tools.ts 会把 unknown 误当 acked，进而丢掉在途信号。
@@ -886,16 +908,13 @@ export class CcxtBroker implements Broker {
       }
     }
     push(await this.#call(() => this.#exchange.fetchOpenOrders(symbol)))
-    if (this.venue === 'htx') {
-      // ccxt/HTX 的 SL 与 TP 查询共用 stopLossTakeProfit；保留旧版分拆 flag 兼容精简 fake/其它适配器。
-      for (const flag of ['stopLossTakeProfit', 'stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
-        try {
-          const algo = await this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true })
-          if (Array.isArray(algo)) push(algo)
-        } catch (error) {
-          // 没有该类型算法单时 HTX 可能返回 not-found；这不是故障。其它错误照旧抛。
-          if (!lookupMiss(error)) throw this.#safeError(error)
-        }
+    // HTX 的普通挂单端点看不到算法单；五种标志都走同一 merged 视图。
+    for (const flag of ['stopLossTakeProfit', 'stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
+      try {
+        const algo = await this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true })
+        if (Array.isArray(algo)) push(algo)
+      } catch (error) {
+        if (!lookupMiss(error)) throw this.#safeError(error)
       }
     }
     return collected
@@ -978,13 +997,21 @@ export class CcxtBroker implements Broker {
     if (this.#marketsLoaded) return
     if (this.#marketsLoading !== undefined) return this.#marketsLoading
     this.#marketsLoading = (async () => {
-      try {
-        await this.#exchange.loadMarkets()
-        this.#marketsLoaded = true
-      } catch (error) {
-        throw this.#safeError(error)
+      let lastError: unknown
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await this.#exchange.loadMarkets()
+          this.#marketsLoaded = true
+          return
+        } catch (error) {
+          lastError = error
+        }
       }
+      throw this.#safeError(lastError)
     })()
+    this.#marketsLoading.finally(() => {
+      this.#marketsLoading = undefined
+    }).catch(() => undefined)
     return this.#marketsLoading
   }
 
@@ -1106,6 +1133,7 @@ export class CcxtBroker implements Broker {
     const state = orderState(raw, defaultState)
     const timestamp = firstNumber(raw, ['timestamp', 'lastTradeTimestamp']) ?? this.#clock.now()
     const average = firstNumber(raw, ['average', 'avgPrice'])
+    const filled = firstNumber(raw, ['filled', 'filledQty', 'filled_qty'])
     const fee = feeFrom(raw)
     const exchangeOrderId = exchangeOrderIdFrom(raw)
     return {
@@ -1115,6 +1143,7 @@ export class CcxtBroker implements Broker {
       ts: timestamp,
       ...(exchangeOrderId === undefined ? {} : { exchangeOrderId }),
       ...(average === undefined ? {} : { avgPrice: average }),
+      ...(filled === undefined ? {} : { filledQty: filled }),
       ...(fee === undefined ? {} : { fee }),
     }
   }
@@ -1130,6 +1159,7 @@ export class CcxtBroker implements Broker {
           : undefined
     const timestamp = firstNumber(raw, ['timestamp']) ?? this.#clock.now()
     const price = firstNumber(raw, ['price'])
+    const filled = firstNumber(raw, ['amount', 'filled', 'qty'])
     const fee = feeFrom(raw)
     return {
       intentId: clientOrderId,
@@ -1138,6 +1168,7 @@ export class CcxtBroker implements Broker {
       state: 'filled',
       ts: timestamp,
       ...(price === undefined ? {} : { avgPrice: price }),
+      ...(filled === undefined ? {} : { filledQty: filled }),
       ...(fee === undefined ? {} : { fee }),
     }
   }
@@ -1157,3 +1188,6 @@ export class CcxtBroker implements Broker {
     )
   }
 }
+
+/** 旧测试/内部导入名只作为类型别名保留；生产组合根实例化 HtxBroker。 */
+export { HtxBroker as CcxtBroker }

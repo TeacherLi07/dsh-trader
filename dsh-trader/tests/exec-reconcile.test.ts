@@ -85,6 +85,25 @@ describe('reconcile', () => {
     expect(severityOf(result.actions[0]!)).toBe('P0')
   })
 
+  it('远端 merged protection 足够时不因本地缺 stop 误报', () => {
+    const result = reconcile({
+      ...clean,
+      localPositions: [{ symbol: 'BTC/USDT', qty: 1 }],
+      remotePositions: [{ symbol: 'BTC/USDT', qty: 1, protectedStopPrice: 95 }],
+    })
+    expect(result.actions).toEqual([])
+    expect(result.freezeTrading).toBe(false)
+  })
+
+  it('数量不一致与无保护都属于冻结级结果', () => {
+    const result = reconcile({
+      ...clean,
+      localPositions: [{ symbol: 'BTC/USDT', qty: 1 }],
+      remotePositions: [{ symbol: 'BTC/USDT', qty: 2 }],
+    })
+    expect(result.freezeTrading).toBe(true)
+  })
+
   it('flags a quantity mismatch in both directions', () => {
     const result = reconcile({
       ...clean,

@@ -69,6 +69,9 @@ export interface ToolPorts {
    * 只读；未提供视为空集。平/减仓不受影响。
    */
   readonly frozenSymbols?: () => ReadonlySet<string>
+  /** 执行层状态未知时立即冻结，而不是等下一次重启。 */
+  readonly freezeSymbol?: (symbol: string) => void
+  readonly halt?: () => void
 }
 
 /** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
@@ -526,6 +529,7 @@ const tradeExecuteOrder: ToolDefinition = {
       const method = requireEnum(args, 'method', ['market', 'limit'] as const)
       const stopMethod = requireEnum(args, 'stopMethod', ['atr', 'structure'] as const)
       const stopValue = requireNumber(args, 'stopValue')
+      if (method === 'limit' && ports.mode !== 'paper') return refuse('增加敞口的限价单在成交监控接入前禁止提交')
       const snapshot = ports.features.latest(symbol, timeframe)
       if (snapshot === undefined) {
         return refuse(`没有 ${symbol} ${timeframe} 的特征快照`)
@@ -534,9 +538,6 @@ const tradeExecuteOrder: ToolDefinition = {
       const stop: StopSpec =
         stopMethod === 'atr' ? { method: 'atr', k: stopValue } : { method: 'structure', level: stopValue }
       const limitPrice = optionalNumber(args, 'limitPrice')
-      if (method === 'limit' && limitPrice === undefined) {
-        return refuse('限价单必须提供 limitPrice（不替你猜价格）')
-      }
       const derived = stopPriceFor(entryPrice, side, stop, snapshot.values.atr14)
       if (derived === undefined) return refuse('无法推导止损价')
       const sizing = computeSize({
@@ -560,7 +561,7 @@ const tradeExecuteOrder: ToolDefinition = {
         qty: sizing.qty,
         notionalUsd: sizing.notionalUsd,
         reduceOnly: false,
-        ...(method === 'limit' && limitPrice !== undefined ? { price: limitPrice } : {}),
+        ...(limitPrice === undefined ? {} : { price: limitPrice }),
         stopLossPrice: derived,
         ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
       }
@@ -604,72 +605,71 @@ const tradeExecuteOrder: ToolDefinition = {
     }
 
     // ④ 意图先落库（created），再发请求；崩溃时按 clientOrderId 去交易所查询
-    ports.journal.recordDecision({
-      decisionId: effectiveDecisionId,
-      symbol,
-      timeframe,
-      decidedAt: ports.clock.now(),
-      contextHash: ports.contextHash ?? `unassembled-exec:${decisionId}`,
-      action,
-      executed: false,
-      ...(sizeQty === undefined ? {} : { sizeQty }),
-      ...(stopPrice === undefined ? {} : { stopPrice }),
-      ...(takeProfit === undefined ? {} : { takeProfit }),
-      ...(rationale === undefined ? {} : { rationale }),
-    })
-    ports.journal.recordIntent({
-      intentId: intent.intentId,
-      clientOrderId: intent.clientOrderId,
-      decisionId: effectiveDecisionId,
-      venue: ports.broker.venue,
-      symbol,
-      state: 'created',
-      type: intent.type,
-      side: intent.side,
-      qty: intent.qty,
-      notionalUsd: intent.notionalUsd,
-      reduceOnly: intent.reduceOnly === true,
-      createdAt: ports.clock.now(),
-      ...(intent.price === undefined ? {} : { price: intent.price }),
-    })
+    const inserted = ports.journal.recordDecisionAndIntent(
+      {
+        decisionId: effectiveDecisionId,
+        symbol,
+        timeframe,
+        decidedAt: ports.clock.now(),
+        contextHash: ports.contextHash ?? `unassembled-exec:${decisionId}`,
+        action,
+        executed: false,
+        ...(sizeQty === undefined ? {} : { sizeQty }),
+        ...(stopPrice === undefined ? {} : { stopPrice }),
+        ...(takeProfit === undefined ? {} : { takeProfit }),
+        ...(rationale === undefined ? {} : { rationale }),
+      },
+      {
+        intentId: intent.intentId,
+        clientOrderId: intent.clientOrderId,
+        decisionId: effectiveDecisionId,
+        venue: ports.broker.venue,
+        symbol,
+        state: 'created',
+        type: intent.type,
+        side: intent.side,
+        qty: intent.qty,
+        notionalUsd: intent.notionalUsd,
+        reduceOnly: intent.reduceOnly === true,
+        createdAt: ports.clock.now(),
+        ...(intent.price === undefined ? {} : { price: intent.price }),
+        ...(intent.stopLossPrice === undefined ? {} : { stopPrice: intent.stopLossPrice }),
+      },
+    )
+    if (!inserted.intentInserted) return { executed: false, reason: 'already_intended' }
 
     const ack = await ports.broker.placeOrder(intent)
-    ports.journal.markIntentAcked(
-      intent.clientOrderId,
-      ack.state === 'filled' ? 'filled' : ack.state === 'rejected' ? 'rejected' : 'acked',
-      ack.exchangeOrderId,
-      ports.clock.now(),
-    )
+    const applied = ports.journal.applyOrderAck(ack, ports.clock.now(), {
+      fallbackQty: intent.qty,
+      fallbackPrice: intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+      reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
+    })
+    if (applied.unknown) ports.freezeSymbol?.(symbol)
 
-    if (ack.exchangeOrderId !== undefined) {
-      ports.journal.recordOrder({
-        orderId: ack.exchangeOrderId,
-        venue: ports.broker.venue,
-        exchangeOrderId: ack.exchangeOrderId,
-        clientOrderId: intent.clientOrderId,
-        symbol,
-        status: ack.state,
-        qty: intent.qty,
-        filledQty: ack.state === 'filled' ? intent.qty : 0,
-        ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
-        updatedAt: ports.clock.now(),
-      })
-      if (ack.state === 'filled') {
-        const fallbackPrice = intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? 0
-        ports.journal.recordFill({
-          fillId: `fill:${ack.exchangeOrderId}`,
-          orderId: ack.exchangeOrderId,
-          qty: intent.qty,
-          // 结算必须用真实成交价与手续费（plan §5.3），不能写"信号价 + 0 费"
-          price: ack.avgPrice ?? fallbackPrice,
-          fee: ack.fee ?? 0,
-          feeCurrency: 'USDT',
-          ts: ports.clock.now(),
-        })
+    let executed = applied.filled
+    if (action === 'open' && !executed && ack.state !== 'rejected') {
+      try {
+        const before = position?.qty ?? 0
+        const after = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
+        const direction = intent.side === 'buy' ? 1 : -1
+        const deltaConfirmed = direction * (after - before) > 1e-12
+        if (deltaConfirmed && ports.broker.venue === 'paper') executed = true
+        else if (deltaConfirmed && ack.exchangeOrderId !== undefined) {
+          const refreshed = await ports.broker.findOrderByExchangeOrderId?.(ack.exchangeOrderId, symbol)
+          if (refreshed?.state === 'filled') {
+            const refreshedResult = ports.journal.applyOrderAck(refreshed, ports.clock.now(), {
+              fallbackQty: intent.qty,
+              fallbackPrice: intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+              reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
+            })
+            executed = refreshedResult.filled
+          }
+        }
+        if (deltaConfirmed && !executed) ports.freezeSymbol?.(symbol)
+      } catch {
+        ports.freezeSymbol?.(symbol)
       }
     }
-
-    const executed = ack.state === 'filled'
     if (executed) {
       ports.journal.markDecisionExecuted(effectiveDecisionId)
       // 只有成交的决策才进结算队列（plan §7.9 ④）：到期时刻与"何时重跑该标的"无关。
@@ -708,29 +708,13 @@ const tradeExecuteOrder: ToolDefinition = {
           stopLossPrice: stopPrice,
           ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
         })
-        ports.journal.markIntentAcked(
-          protectiveClientId,
-          // ★ 不能把 rejected 记成 acked：那会把"交易所拒绝了保护单"伪装成"已挂出"，
-          // 与 execute-action 的 ackIntentState 语义不一致，也违反"失败逐字保留"（plan §1）。
-          pAck.state === 'filled' ? 'filled' : pAck.state === 'rejected' ? 'rejected' : 'acked',
-          pAck.exchangeOrderId,
-          ports.clock.now(),
-        )
-        if (pAck.exchangeOrderId !== undefined) {
-          ports.journal.recordOrder({
-            orderId: pAck.exchangeOrderId,
-            venue: ports.broker.venue,
-            exchangeOrderId: pAck.exchangeOrderId,
-            clientOrderId: protectiveClientId,
-            symbol,
-            status: pAck.state,
-            qty: intent.qty,
-            filledQty: 0,
-            updatedAt: ports.clock.now(),
-          })
-        }
+        const protectiveResult = ports.journal.applyOrderAck(pAck, ports.clock.now(), {
+          fallbackQty: intent.qty,
+          fallbackPrice: stopPrice,
+          reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
+        })
         protectiveAck = pAck
-        if (pAck.state === 'rejected') {
+        if (pAck.state === 'rejected' || protectiveResult.unknown) {
           await degradeUnprotectedOpen(
             ports,
             symbol,
@@ -760,7 +744,12 @@ const tradeExecuteOrder: ToolDefinition = {
 
     // `close` = 全平 + cancelAll(symbol)（plan §3.3）
     if (action === 'close' && executed) {
-      await ports.broker.cancelAll(symbol)
+      const remaining = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
+      if (remaining === 0) await ports.broker.cancelAll(symbol)
+      else {
+        ports.freezeSymbol?.(symbol)
+        ports.journal.appendAudit({ actor: 'system', kind: 'close_not_flat', payload: { decisionId: effectiveDecisionId, symbol, remainingQty: remaining }, ts: ports.clock.now() })
+      }
     }
 
     return {
@@ -787,9 +776,24 @@ async function degradeUnprotectedOpen(
 ): Promise<void> {
   const qty = Math.abs(intent.qty)
   try {
-    await ports.broker.placeOrder({
+    const clientOrderId = numericClientOrderId(`degrade:${decisionId}`)
+    ports.journal.recordIntent({
       intentId: `degrade:${decisionId}`,
-      clientOrderId: numericClientOrderId(`degrade:${decisionId}`),
+      clientOrderId,
+      decisionId,
+      venue: ports.broker.venue,
+      symbol,
+      state: 'created',
+      type: 'market',
+      side: intent.side === 'buy' ? 'sell' : 'buy',
+      qty,
+      notionalUsd: qty * (price ?? 0),
+      reduceOnly: true,
+      createdAt: ports.clock.now(),
+    })
+    const ack = await ports.broker.placeOrder({
+      intentId: `degrade:${decisionId}`,
+      clientOrderId,
       decisionId,
       symbol,
       type: 'market',
@@ -798,6 +802,18 @@ async function degradeUnprotectedOpen(
       notionalUsd: qty * (price ?? 0),
       reduceOnly: true,
     })
+    ports.journal.applyOrderAck(ack, ports.clock.now(), { fallbackQty: qty, fallbackPrice: price })
+    if (ack.state !== 'filled') {
+      ports.freezeSymbol?.(symbol)
+      ports.journal.appendAudit({ actor: 'system', kind: 'protection_degrade_failed', payload: { decisionId, symbol, reason, qty, ackState: ack.state }, ts: ports.clock.now() })
+      return
+    }
+    const remaining = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
+    if (remaining !== 0) {
+      ports.freezeSymbol?.(symbol)
+      ports.journal.appendAudit({ actor: 'system', kind: 'protection_degrade_failed', payload: { decisionId, symbol, reason, qty, remainingQty: remaining }, ts: ports.clock.now() })
+      return
+    }
     ports.journal.appendAudit({
       actor: 'system',
       kind: 'protection_degrade_closed',
