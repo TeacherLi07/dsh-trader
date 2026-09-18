@@ -100,6 +100,18 @@ describe('FeatureEngine vs full recomputation', () => {
     expect(() => engine.onClosedCandle({ ...open!, closed: false })).toThrow(MarketSourceError)
   })
 
+  it('重复 bar 幂等、乱序与历史修正 fail-closed', () => {
+    const bars = candles(3)
+    const engine = new FeatureEngine()
+    const first = engine.onClosedCandle(bars[0]!)
+    expect(engine.onClosedCandle({ ...bars[0]! })).toBe(first)
+    expect(engine.bars).toBe(1)
+    expect(() => engine.onClosedCandle(bars[1]!)).not.toThrow()
+    // 已消费第二根后，再送回第一根才是明确的乱序输入。
+    expect(() => engine.onClosedCandle(bars[0]!)).toThrow(MarketSourceError)
+    expect(() => engine.onClosedCandle({ ...bars[1]!, close: bars[1]!.close + 1 })).toThrow(MarketSourceError)
+  })
+
   it('is deterministic: same bars, fresh engine, same fingerprints', () => {
     const bars = candles(30)
     const run = (): string[] => {
@@ -136,6 +148,7 @@ describe('FeatureEngine vs full recomputation', () => {
     expect(missing['funding.rate']).toBeUndefined()
     expect(missing['adx14']).toBeUndefined()
   })
+
 })
 
 describe('FeaturePipeline', () => {
@@ -182,5 +195,22 @@ describe('FeaturePipeline', () => {
     pipeline.warmUp([...bars, { ...bars[9]!, openTime: bars[9]!.openTime + HOUR, closed: false }])
     expect(pipeline.engineCount()).toBe(1)
     expect(archive.count()).toBe(0) // warmUp 只重建状态，不写归档
+  })
+
+  it('warm-up restores persisted derivative observations for OI/liq windows', () => {
+    const bars = candles(3)
+    const observations = [
+      { timestamp: bars[0]!.closeTime, openInterest: 100, liquidations: [{ id: 'liq-1', volume: 3 }] },
+      { timestamp: bars[1]!.closeTime, openInterest: 110, liquidations: [] },
+      { timestamp: bars[2]!.closeTime, openInterest: 121, liquidations: [] },
+    ]
+    const reference = new FeatureEngine()
+    const snapshots = bars.map((bar, index) => reference.onClosedCandle(bar, observations[index]))
+    expect(snapshots[1]?.values.oiChangePct).toBe(10)
+
+    const restored = new FeaturePipeline(archive)
+    restored.warmUp(bars.slice(0, 2), snapshots.slice(0, 2))
+    const next = restored.onClosedCandle(bars[2]!, observations[2])
+    expect(next.values.oiChangePct).toBe(snapshots[2]?.values.oiChangePct)
   })
 })

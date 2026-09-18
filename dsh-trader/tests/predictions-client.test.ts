@@ -110,6 +110,22 @@ describe('PmHttp：令牌桶（plan §10 专项 ⑤）', () => {
     expect(stats.tokens['gamma:markets']).toBeLessThan(60)
     expect(stats.tokens['clob:book']).toBeUndefined()
   })
+
+  it('注入时钟停滞时限流必须 fail-closed，不能把一次 sleep 当成已取到令牌', async () => {
+    const { http, calls } = harness([json(200, [])])
+    // harness 的 sleep 会推进时钟；这里显式替换成冻结时钟，模拟错误的 Clock/Sleep 接线。
+    const frozen = new PmHttp({
+      fetch: fakeFetch([json(200, [])]).fetch,
+      clock: new ReplayClock(NOW),
+      sleep: () => Promise.resolve(),
+      maxRetries: 0,
+    })
+    for (let index = 0; index < 60; index += 1) await markets(frozen)
+    await expect(markets(frozen)).rejects.toThrow(/时钟未前进/)
+    expect(frozen.stats().requests).toBe(60)
+    expect(http.stats().requests).toBe(0)
+    expect(calls).toHaveLength(0)
+  })
 })
 
 describe('PmHttp：热路径禁止 as_of（plan §10 专项 ⑦）', () => {

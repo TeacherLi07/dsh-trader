@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defaultFunctions, parseExpression, referencedPaths } from '../src/plan/dsl.js'
+import { MAX_AST_NODES, defaultFunctions, parseExpression, referencedPaths } from '../src/plan/dsl.js'
 import { V0_ALLOWED_PATHS, createDslContext, evaluateWhen, unknownPaths } from '../src/plan/evaluate.js'
 
 const ctx = createDslContext({
@@ -44,6 +44,11 @@ describe('when DSL v0', () => {
     expect(() => parseExpression('(bar.close > 1')).toThrow()
     expect(() => parseExpression('bar.close $ 1')).toThrow()
     expect(() => parseExpression('')).toThrow()
+  })
+
+  it('rejects expressions over the bounded AST size', () => {
+    const expression = Array.from({ length: Math.ceil(MAX_AST_NODES / 2) + 1 }, () => '1').join(' + ') + ' > 0'
+    expect(() => parseExpression(expression)).toThrow(/复杂度超过上限/)
   })
 
   it('reports referenced paths for vocabulary admission', () => {

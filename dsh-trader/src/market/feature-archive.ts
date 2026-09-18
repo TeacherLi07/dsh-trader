@@ -74,6 +74,18 @@ export class FeatureArchive {
     return row === undefined ? undefined : toSnapshot(row)
   }
 
+  /** 最近快照按时间升序返回；重启恢复衍生品 tracker 时与 bar 游标对齐。 */
+  recent(symbol: string, timeframe: string, limit: number): readonly FeatureSnapshot[] {
+    const rows = this.#statements
+      .get(
+        `SELECT symbol, timeframe, open_time, snapshot_json, fingerprint
+         FROM features WHERE symbol = ? AND timeframe = ?
+         ORDER BY open_time DESC LIMIT ?`,
+      )
+      .all(symbol, timeframe, limit) as FeatureRow[]
+    return rows.map(toSnapshot).reverse()
+  }
+
   /**
    * 读取指定时间范围内的快照；查询仍走 Statements，避免轮询/工具调用不断 prepare 新语句。
    * limit 默认 1 万、上限 20 万：既限制一次读入的 JSON 规模，又覆盖 90 天 1m 的约 12.96 万根。

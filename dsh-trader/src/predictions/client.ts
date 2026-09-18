@@ -188,9 +188,11 @@ export class PmHttp {
         const before = this.options.clock.now()
         await this.options.sleep(acquire.waitMs)
         acquire = bucket.tryAcquire()
-        // 睡眠必须让注入时钟前进（生产是 systemClock）。若时钟不动（例如误用冻结的
-        // ReplayClock + 真实 sleep），再循环只会空转 ⇒ 睡过一次就放行，保证活性。
-        if (!acquire.ok && this.options.clock.now() <= before) break
+        // 睡眠必须让注入时钟前进（生产是 systemClock）。时钟不动时不能“睡过一次就放行”，
+        // 否则令牌桶会被绕过；直接 fail-closed，调用方可在时钟恢复后重试。
+        if (!acquire.ok && this.options.clock.now() <= before) {
+          throw new PmHttpError('限流等待期间注入时钟未前进，拒绝放行请求')
+        }
       }
 
       this.#requests += 1
@@ -206,6 +208,7 @@ export class PmHttp {
           // `{"error":"No orderbook exists for the requested token id"}`），
           // 不是服务故障 ⇒ 不能计入降级计数，否则新市场会把客户端打到降级。
           this.#consecutiveFailures = 0
+          this.#degraded = false
           return null
         }
         if (response.status < 200 || response.status >= 300) {
@@ -522,7 +525,7 @@ export class ClobClient {
       const point = item as Record<string, unknown>
       const ts = Number(point.t)
       const price = Number(point.p)
-      if (!Number.isFinite(ts) || !Number.isFinite(price)) return []
+      if (!Number.isFinite(ts) || !Number.isFinite(price) || price < 0 || price > 1) return []
       return [{ ts: normalizeSourceSeconds(ts), price }]
     })
   }
@@ -609,7 +612,7 @@ function readV2Series(body: unknown): readonly PmSeriesPoint[] {
     const point = item as Record<string, unknown>
     const ts = Number(point.timestamp)
     const price = Number(point.price)
-    if (!Number.isFinite(ts) || !Number.isFinite(price)) return []
+    if (!Number.isFinite(ts) || !Number.isFinite(price) || price < 0 || price > 1) return []
     return [{ ts: normalizeSourceSeconds(ts), price }]
   })
 }

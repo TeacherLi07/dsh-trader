@@ -3,6 +3,7 @@ import { createDslContext } from '../src/plan/evaluate.js'
 import { UNIMPLEMENTED_PATHS, V0_ALLOWED_PATHS, unknownPaths } from '../src/plan/evaluate.js'
 import {
   RULE_PACKS,
+  RuleWatch,
   buildRules,
   evaluateRules,
   ruleDedupKey,
@@ -107,6 +108,17 @@ describe('evaluateRules', () => {
     expect(result.hits).toEqual([])
     expect(result.failures.map((failure) => failure.ruleId)).toEqual(['warmup', 'bad'])
     expect(result.failures[0]?.reason).toContain('未知取值')
+  })
+
+  it('failure audit hook receives every unevaluable rule', () => {
+    const failures: string[] = []
+    const governor = { submit: () => ({}) } as never
+    const watch = new RuleWatch([rule({ id: 'missing', when: 'adx14 > 25' })], governor, {
+      onFailure: (failure) => failures.push(failure.ruleId),
+    })
+    const outcome = watch.onBar({ symbol: SYMBOL, timeframe: TF, barTs: NOW, context: context() })
+    expect(outcome.failures).toHaveLength(1)
+    expect(failures).toEqual(['missing'])
   })
 
   it('is pure: identical input gives identical output', () => {

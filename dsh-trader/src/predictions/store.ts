@@ -285,6 +285,9 @@ export class PmStore {
         if (!Number.isSafeInteger(point.ts)) {
           throw new Error(`pm_series.ts 必须是毫秒整数，收到 ${String(point.ts)}`)
         }
+        if (!Number.isFinite(point.price) || point.price < 0 || point.price > 1) {
+          throw new Error(`pm_series.price 必须在 [0,1] 内，收到 ${String(point.price)}`)
+        }
         const result = this.#statements
           .get(
             `INSERT INTO pm_series (token_id, ts, price, resolution_seconds, source, observed_at)
@@ -359,7 +362,7 @@ export class PmStore {
         `alias 必须匹配 ${ALIAS_PATTERN.source}（要能写进 pm.<alias>.prob），收到 ${JSON.stringify(spec.alias)}`,
       )
     }
-    if (!(spec.expiresAt > now)) {
+    if (!Number.isFinite(spec.expiresAt) || !(spec.expiresAt > now)) {
       throw new WatchError(`expires_at 必须在未来：${spec.expiresAt} <= now ${now}（不允许无期限关注）`)
     }
     if (spec.kind === 'threshold' && (spec.expr === undefined || spec.expr.trim() === '')) {
@@ -370,14 +373,15 @@ export class PmStore {
     }
     const cooldownMs = spec.cooldownMs ?? 15 * 60_000
     const maxTriggers = spec.maxTriggers ?? 10
-    if (!(cooldownMs > 0)) throw new WatchError(`cooldown_ms 必须是正数：${cooldownMs}`)
-    if (!(maxTriggers > 0)) throw new WatchError(`max_triggers 必须是正数：${maxTriggers}`)
+    if (!Number.isFinite(cooldownMs) || !(cooldownMs > 0)) throw new WatchError(`cooldown_ms 必须是正数：${cooldownMs}`)
+    if (!Number.isInteger(maxTriggers) || !(maxTriggers > 0)) throw new WatchError(`max_triggers 必须是正整数：${maxTriggers}`)
 
     const contentHash = watchContentHash(spec, cooldownMs, maxTriggers)
     const existing = this.watchByContentHash(contentHash)
     if (existing !== undefined) {
-      // 曾被 cancel 的同一规格：原地重新激活（否则"cancel 后再登记同一规格"会静默无效）
-      if (existing.state === 'disabled') {
+      // disabled/expired/额度耗尽的同一规格：原地重新激活；否则唯一键会让
+      // 达到 maxTriggers 的关注永久占住名额，重复登记只能静默 no-op。
+      if (existing.state !== 'active' || existing.expiresAt <= now || existing.triggerCount >= existing.maxTriggers) {
         this.#statements
           .get(
             `UPDATE pm_watches
@@ -422,7 +426,9 @@ export class PmStore {
     // 可读的领域错误 —— 工具层只把 WatchError 转成 ToolArgumentError。
     const aliasOwner = this.watchByAlias(spec.alias)
     if (aliasOwner !== undefined) {
-      if (aliasOwner.state !== 'disabled') {
+      const aliasReusable =
+        aliasOwner.state !== 'active' || aliasOwner.expiresAt <= now || aliasOwner.triggerCount >= aliasOwner.maxTriggers
+      if (!aliasReusable) {
         throw new WatchError(
           `alias ${spec.alias} 已被一个规格不同的关注占用（kind/purpose/expr/冷却等不一致）；先 cancel 再重新登记`,
         )
@@ -524,7 +530,13 @@ export class PmStore {
     if (watch.lastFiredAt !== null && now - watch.lastFiredAt < watch.cooldownMs) return false
     if (watch.triggerCount >= watch.maxTriggers) return false
     this.#statements
-      .get('UPDATE pm_watches SET trigger_count = trigger_count + 1, last_fired_at = ? WHERE watch_id = ?')
+      .get(
+        `UPDATE pm_watches
+         SET trigger_count = trigger_count + 1,
+             last_fired_at = ?,
+             state = CASE WHEN trigger_count + 1 >= max_triggers THEN 'expired' ELSE state END
+         WHERE watch_id = ?`,
+      )
       .run(now, watch.watchId)
     return true
   }

@@ -40,6 +40,9 @@ export type EvalResult =
 
 type BinOp = '+' | '-' | '*' | '/' | '<' | '<=' | '>' | '>=' | '==' | '!=' | 'and' | 'or'
 
+/** 计划卡来自模型；限制 AST 规模避免深递归/超长表达式拖垮每根 bar 的求值。 */
+export const MAX_AST_NODES = 500
+
 export type Expr =
   | { readonly kind: 'num'; readonly value: number }
   | { readonly kind: 'path'; readonly path: string }
@@ -99,6 +102,7 @@ function tokenize(input: string): Token[] {
 class Parser {
   #tokens: readonly Token[]
   #index = 0
+  #nodes = 0
 
   constructor(tokens: readonly Token[]) {
     this.#tokens = tokens
@@ -124,6 +128,14 @@ class Parser {
     return token.type === 'op' && token.value === value
   }
 
+  #node<T extends Expr>(node: T): T {
+    this.#nodes += 1
+    if (this.#nodes > MAX_AST_NODES) {
+      throw new DslError(`表达式复杂度超过上限 ${MAX_AST_NODES} 个 AST 节点`, this.#peek().pos)
+    }
+    return node
+  }
+
   parse(): Expr {
     const expr = this.#parseOr()
     const token = this.#peek()
@@ -135,7 +147,7 @@ class Parser {
     let left = this.#parseAnd()
     while (this.#isKeyword('or')) {
       this.#next()
-      left = { kind: 'binary', op: 'or', left, right: this.#parseAnd() }
+      left = this.#node({ kind: 'binary', op: 'or', left, right: this.#parseAnd() })
     }
     return left
   }
@@ -144,7 +156,7 @@ class Parser {
     let left = this.#parseNot()
     while (this.#isKeyword('and')) {
       this.#next()
-      left = { kind: 'binary', op: 'and', left, right: this.#parseNot() }
+      left = this.#node({ kind: 'binary', op: 'and', left, right: this.#parseNot() })
     }
     return left
   }
@@ -152,7 +164,7 @@ class Parser {
   #parseNot(): Expr {
     if (this.#isKeyword('not')) {
       this.#next()
-      return { kind: 'unary', op: 'not', operand: this.#parseNot() }
+      return this.#node({ kind: 'unary', op: 'not', operand: this.#parseNot() })
     }
     return this.#parseComparison()
   }
@@ -162,7 +174,7 @@ class Parser {
     const token = this.#peek()
     if (token.type === 'op' && (COMPARISONS as readonly string[]).includes(token.value)) {
       this.#next()
-      return { kind: 'binary', op: token.value as BinOp, left, right: this.#parseAdditive() }
+      return this.#node({ kind: 'binary', op: token.value as BinOp, left, right: this.#parseAdditive() })
     }
     return left
   }
@@ -171,7 +183,7 @@ class Parser {
     let left = this.#parseMultiplicative()
     while (this.#isOp('+') || this.#isOp('-')) {
       const op = this.#next().value as BinOp
-      left = { kind: 'binary', op, left, right: this.#parseMultiplicative() }
+      left = this.#node({ kind: 'binary', op, left, right: this.#parseMultiplicative() })
     }
     return left
   }
@@ -180,7 +192,7 @@ class Parser {
     let left = this.#parseUnary()
     while (this.#isOp('*') || this.#isOp('/')) {
       const op = this.#next().value as BinOp
-      left = { kind: 'binary', op, left, right: this.#parseUnary() }
+      left = this.#node({ kind: 'binary', op, left, right: this.#parseUnary() })
     }
     return left
   }
@@ -188,7 +200,7 @@ class Parser {
   #parseUnary(): Expr {
     if (this.#isOp('-')) {
       this.#next()
-      return { kind: 'unary', op: '-', operand: this.#parseUnary() }
+      return this.#node({ kind: 'unary', op: '-', operand: this.#parseUnary() })
     }
     return this.#parsePrimary()
   }
@@ -197,7 +209,7 @@ class Parser {
     const token = this.#peek()
     if (token.type === 'num') {
       this.#next()
-      return { kind: 'num', value: Number(token.value) }
+      return this.#node({ kind: 'num', value: Number(token.value) })
     }
     if (token.type === 'op' && token.value === '(') {
       this.#next()
@@ -223,9 +235,9 @@ class Parser {
         }
         if (!this.#isOp(')')) throw new DslError(`函数 ${token.value} 缺少右括号`, this.#peek().pos)
         this.#next()
-        return { kind: 'call', name: token.value, args }
+        return this.#node({ kind: 'call', name: token.value, args })
       }
-      return { kind: 'path', path: token.value }
+      return this.#node({ kind: 'path', path: token.value })
     }
     throw new DslError(`意外的记号 ${JSON.stringify(token.value || 'EOF')}`, token.pos)
   }

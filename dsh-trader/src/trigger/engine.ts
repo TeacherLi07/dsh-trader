@@ -299,11 +299,17 @@ export interface WatchOutcome {
   readonly decisions: readonly GovernorDecision[]
 }
 
+export interface RuleWatchOptions {
+  /** 规则无法求值时的审计钩子；失败不是“无命中”，不能只留在返回值里。 */
+  readonly onFailure?: (failure: RuleFailure) => void
+}
+
 /** 单根 bar 的盯盘入口：求值 + 治理。可以安全地对同一根 bar 重复调用（幂等）。 */
 export class RuleWatch {
   constructor(
     private readonly rules: readonly RuleSpec[],
     private readonly governor: TriggerGovernor,
+    private readonly options: RuleWatchOptions = {},
   ) {}
 
   onBar(input: BarInput): WatchOutcome {
@@ -314,6 +320,8 @@ export class RuleWatch {
       barTs: input.barTs,
       context: input.context,
     })
+
+    for (const failure of evaluation.failures) this.options.onFailure?.(failure)
 
     const decisions = evaluation.hits.map((hit) => {
       const rule = this.rules.find((candidate) => candidate.id === hit.ruleId)

@@ -149,4 +149,24 @@ describe('createMarketRuntime', () => {
     await runtime.close()
     expect(exchange.closed).toBe(true)
   })
+
+  it('startup backfill uses the archive tail and is available before polling starts', async () => {
+    const clock = new ReplayClock(NOW)
+    const exchange = new FakeExchange()
+    const runtime = await createMarketRuntime({
+      venue: 'htx',
+      symbols: [SYMBOL],
+      timeframes: [TF],
+      pollMs: 60_000,
+      archive,
+      clock,
+      createExchange: () => exchange,
+    })
+
+    const results = await runtime.backfill(NOW)
+    expect(results.length).toBeGreaterThan(0)
+    expect(results[0]?.written).toBeGreaterThan(0)
+    expect(archive.count(SYMBOL, TF)).toBeGreaterThan(0)
+    await runtime.close()
+  })
 })

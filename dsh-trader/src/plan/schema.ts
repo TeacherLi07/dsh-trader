@@ -7,6 +7,8 @@
  */
 
 import { canonicalJson, fingerprint } from '../util/canonical.js'
+import { parseExpression, referencedPaths } from './dsl.js'
+import { V0_ALLOWED_PATHS } from './evaluate.js'
 
 export { canonicalJson }
 
@@ -229,6 +231,22 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
   }
 }
 
+const DYNAMIC_PM_PATH = /^pm\.[a-z][a-z0-9_]{0,40}\.(prob|mid|spread|volume24h|change1h|change24h|ageMs)$/
+
+function validateWhenExpression(value: unknown, path: string, errors: string[]): void {
+  if (typeof value !== 'string' || value.trim() === '') return
+  try {
+    parseExpression(value)
+    for (const referenced of referencedPaths(value)) {
+      if (!(V0_ALLOWED_PATHS as readonly string[]).includes(referenced) && !DYNAMIC_PM_PATH.test(referenced)) {
+        errors.push(`${path} 引用了未允许的路径：${referenced}`)
+      }
+    }
+  } catch (error) {
+    errors.push(`${path} DSL 编译失败：${(error as Error).message}`)
+  }
+}
+
 /** 结构 + 语义校验。校验失败一律拒绝执行，**绝不**回退成散文再正则解析（plan §11.4）。 */
 export function validatePlanCard(value: unknown): PlanValidation {
   if (!isRecord(value)) return { ok: false, errors: ['计划卡必须是对象'] }
@@ -289,6 +307,8 @@ export function validatePlanCard(value: unknown): PlanValidation {
       const when = entry['when']
       if (typeof when !== 'string' || when.trim() === '') {
         errors.push(`${path}.when 不能为空（必须能被求值器执行）`)
+      } else {
+        validateWhenExpression(when, `${path}.when`, errors)
       }
       const tf = entry['tf']
       if (typeof tf !== 'string' || !(TIMEFRAMES as readonly string[]).includes(tf)) {

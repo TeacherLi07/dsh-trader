@@ -69,6 +69,8 @@ export interface FeatureSnapshot {
   readonly openTime: number
   readonly closeTime: number
   readonly values: FeatureValues
+  /** 重启时恢复 OI/清算窗口的原始观测；不参与 DSL 词汇表。 */
+  readonly derivatives?: DerivativesObservation
   /** 内容指纹：可用它证明"当时用的是什么特征"（plan §5.1）。 */
   readonly fingerprint: string
 }
@@ -263,6 +265,8 @@ export class FeatureEngine {
   #closes = new RollingBuffer<number>(Math.max(FEATURE_WINDOWS.zscore, VOL_NEEDS))
   #derivatives: DerivativesTracker
   #bars = 0
+  #lastCandle: Candle | undefined
+  #lastSnapshot: FeatureSnapshot | undefined
 
   constructor(derivativesWindowMs = DEFAULT_DERIVATIVES_WINDOW_MS) {
     this.#derivatives = new DerivativesTracker(derivativesWindowMs)
@@ -281,6 +285,34 @@ export class FeatureEngine {
       )
     }
 
+    // 增量状态不能接受乱序或历史修正：继续计算会把一根旧 bar 当成新 bar，
+    // 之后所有 EMA/RSI/ADX/衍生品窗口都被静默污染。相同 bar 的重复投递则返回
+    // 上次快照，供 feed 回调失败后的幂等重试使用。
+    if (this.#lastCandle !== undefined) {
+      if (candle.openTime < this.#lastCandle.openTime) {
+        throw new MarketSourceError(
+          'other',
+          `特征层收到乱序 bar：${candle.symbol} ${candle.timeframe} ${candle.openTime} < ${this.#lastCandle.openTime}`,
+        )
+      }
+      if (candle.openTime === this.#lastCandle.openTime) {
+        const same =
+          candle.symbol === this.#lastCandle.symbol &&
+          candle.timeframe === this.#lastCandle.timeframe &&
+          candle.closeTime === this.#lastCandle.closeTime &&
+          candle.open === this.#lastCandle.open &&
+          candle.high === this.#lastCandle.high &&
+          candle.low === this.#lastCandle.low &&
+          candle.close === this.#lastCandle.close &&
+          candle.volume === this.#lastCandle.volume
+        if (same && this.#lastSnapshot !== undefined) return this.#lastSnapshot
+        throw new MarketSourceError(
+          'other',
+          `特征层拒绝修正已消费 bar：${candle.symbol} ${candle.timeframe} ${candle.openTime}`,
+        )
+      }
+    }
+
     const ohlcv: Ohlcv = {
       high: candle.high,
       low: candle.low,
@@ -297,6 +329,10 @@ export class FeatureEngine {
     this.#candles.push(ohlcv)
     this.#closes.push(candle.close)
     const derivativeValues = this.#derivativeValues(derivatives, candle.closeTime)
+    const rawDerivatives =
+      derivatives !== undefined && !('oiChangePct' in derivatives)
+        ? { ...derivatives, timestamp: derivatives.timestamp ?? candle.closeTime }
+        : undefined
 
     const values: FeatureValues = {
       open: candle.open,
@@ -318,7 +354,7 @@ export class FeatureEngine {
       basisBps: derivativeValues.basisBps,
     }
 
-    return {
+    const snapshot: FeatureSnapshot = {
       symbol: candle.symbol,
       timeframe: candle.timeframe,
       openTime: candle.openTime,
@@ -329,8 +365,13 @@ export class FeatureEngine {
         timeframe: candle.timeframe,
         openTime: candle.openTime,
         values,
+        ...(rawDerivatives === undefined ? {} : { derivatives: rawDerivatives }),
       }),
+      ...(rawDerivatives === undefined ? {} : { derivatives: rawDerivatives }),
     }
+    this.#lastCandle = candle
+    this.#lastSnapshot = snapshot
+    return snapshot
   }
 
   #derivativeValues(
@@ -402,10 +443,15 @@ export class FeaturePipeline {
    * 进程重启后回灌：用归档里的已收盘 bar 重建增量状态。
    * 回灌长度取 FEATURE_WARMUP_BARS，覆盖 EMA50 和 ADX 双窗口，避免重启后长时间空窗。
    */
-  warmUp(candles: readonly Candle[]): void {
+  warmUp(candles: readonly Candle[], snapshots: readonly FeatureSnapshot[] = []): void {
+    const byOpen = new Map<string, FeatureSnapshot>()
+    for (const snapshot of snapshots) {
+      byOpen.set(`${snapshot.symbol}|${snapshot.timeframe}|${snapshot.openTime}`, snapshot)
+    }
     for (const candle of candles) {
       if (!candle.closed) continue
-      this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle)
+      const snapshot = byOpen.get(`${candle.symbol}|${candle.timeframe}|${candle.openTime}`)
+      this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, snapshot?.derivatives)
     }
   }
 

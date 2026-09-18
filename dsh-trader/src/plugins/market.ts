@@ -39,6 +39,7 @@ export const Config = z.object({
   enabled: z.boolean().default(false),
   pollMs: z.number().default(60000),
   recentLimit: z.number().default(3),
+  derivativesEnabled: z.boolean().default(true),
 })
 
 export interface MarketConfig {
@@ -49,6 +50,7 @@ export interface MarketConfig {
   enabled?: boolean
   pollMs?: number
   recentLimit?: number
+  derivativesEnabled?: boolean
   /** 可选注入点；插件本身不主动请求衍生品，避免改变既有行情轮询行为。 */
   derivativesForCandle?: (candle: Candle) => FeatureDerivatives | undefined
 }
@@ -87,14 +89,8 @@ export function apply(ctx: Context, config: MarketConfig): void {
 
       const database = getDatabase()
       const bars = new BarArchive(database)
-      const pipeline = new FeaturePipeline(new FeatureArchive(database))
-
-      // 重启后回灌最近 N 根已收盘 bar，重建增量指标状态，避免特征长时间空窗
-      for (const symbol of config.symbols) {
-        for (const timeframe of config.timeframes) {
-          pipeline.warmUp(bars.recentClosedBars(symbol, timeframe, FEATURE_WARMUP_BARS))
-        }
-      }
+      const featureArchive = new FeatureArchive(database)
+      const pipeline = new FeaturePipeline(featureArchive)
 
       runtime = await createMarketRuntime({
         venue: config.venue,
@@ -106,8 +102,15 @@ export function apply(ctx: Context, config: MarketConfig): void {
         clock: systemClock(),
         createExchange: () => new Exchange({ enableRateLimit: true }),
         onClosedCandle: async (candle) => {
-          // T2.4 接线由调用方提供已经取样的 observation；此处不新增网络请求或墙钟读取。
-          const snapshot = pipeline.onClosedCandle(candle, config.derivativesForCandle?.(candle))
+          // 衍生品端点是可选能力；每根 bar 取一次同一 closeTime 的 observation，
+          // 失败字段由 source 归一为缺失，不能用上一根值填洞。
+          const spotSymbol = candle.symbol.includes(':') ? candle.symbol.split(':')[0] : undefined
+          const derivatives =
+            config.derivativesForCandle?.(candle) ??
+            (config.derivativesEnabled === false || runtime === undefined
+              ? undefined
+              : await runtime.derivatives.fetch(candle.symbol, candle.closeTime, spotSymbol))
+          const snapshot = pipeline.onClosedCandle(candle, derivatives)
           // 行情 → 特征 → 规则 → 触发；rules 插件未启用时静默跳过（不是错误）
           getTriggerRuntime()?.onBar({
             symbol: candle.symbol,
@@ -118,7 +121,7 @@ export function apply(ctx: Context, config: MarketConfig): void {
           // ★ 机械执行（无人值守的核心一环）：每根已收盘 bar 匹配 active 计划卡并执行。
           // 与回放共用同一份 execute-action；组合根未就绪时跳过（不静默假装执行）。
           const ports = getExecPorts()
-          if (ports === undefined) return
+          if (ports === undefined) throw new Error('执行组合根尚未就绪，保留 bar 等待下一轮重试')
           // paper 模式的保护单是"挂单"，必须靠 bar 推进才可能触发；真实 broker 没有 onBar
           // （它的止损在交易所侧），因此这里是可选的、不改变实盘语义。
           const paperLike = ports.broker as typeof ports.broker & {
@@ -180,10 +183,26 @@ export function apply(ctx: Context, config: MarketConfig): void {
         },
       })
 
+      // 先修复归档尾部/内部缺口，再从“成功处理”游标恢复特征；归档成功不等于下游成功。
+      try {
+        await runtime.backfill()
+      } catch (error) {
+        logger.error(`行情启动回补失败（后续轮询将继续重试）：${String(error)}`)
+      }
+      for (const symbol of config.symbols) {
+        for (const timeframe of config.timeframes) {
+          const processed = bars.recentProcessedClosedBars(symbol, timeframe, FEATURE_WARMUP_BARS)
+          const snapshots = featureArchive.recent(symbol, timeframe, FEATURE_WARMUP_BARS)
+          pipeline.warmUp(processed, snapshots)
+        }
+      }
+
       if (disposed) {
         await runtime.close()
         return
       }
+      // 首次轮询立即处理回补后的待处理队列，不等待一个完整 pollMs；single-flight 仍由 feed 保证。
+      await runtime.feed.pollOnce()
       runtime.start()
     } catch (error) {
       // 数据源不可达或配置错误不应让 profile 启动失败；按 plan §4.3 跳过并告警。

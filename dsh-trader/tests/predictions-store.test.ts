@@ -262,6 +262,15 @@ describe('PmStore：序列门控与毫秒整数（plan §10 专项 ②）', () =
     ).toThrow(/毫秒整数/)
   })
 
+  it('拒绝概率序列中的范围外值，避免把脏价格当概率', () => {
+    expect(() => store.recordSeries('111', [{ ts: NOW, price: 1.01 }], { source: 'x', observedAt: NOW })).toThrow(
+      /price.*\[0,1\]/,
+    )
+    expect(() => store.recordSeries('111', [{ ts: NOW, price: -0.01 }], { source: 'x', observedAt: NOW })).toThrow(
+      /price.*\[0,1\]/,
+    )
+  })
+
   it('序列门控：只返回 ts <= now 的点，未来的点一律看不到', () => {
     store.recordSeries(
       '111',
@@ -404,6 +413,16 @@ describe('PmStore：关注登记（plan §4.1 约束）', () => {
     // 额度用尽
     expect(store.recordWatchFire('fed_sep_cut', NOW + 2 * HOUR)).toBe(false)
     expect(store.watchByAlias('fed_sep_cut')?.triggerCount).toBe(2)
+  })
+
+  it('达到 maxTriggers 后可重新登记同一规格，过期关注不永久占用 active cap', () => {
+    store.registerWatch(watch({ maxTriggers: 1, expiresAt: NOW + DAY }), NOW)
+    expect(store.recordWatchFire('fed_sep_cut', NOW)).toBe(true)
+    expect(store.watchByAlias('fed_sep_cut')?.state).toBe('expired')
+    const revived = store.registerWatch(watch({ maxTriggers: 1, expiresAt: NOW + 2 * DAY }), NOW + HOUR)
+    expect(revived.created).toBe(true)
+    expect(revived.watch.state).toBe('active')
+    expect(revived.watch.triggerCount).toBe(0)
   })
 
   it('过期与取消：expireWatches 由时钟驱动，取消后不再活跃', () => {

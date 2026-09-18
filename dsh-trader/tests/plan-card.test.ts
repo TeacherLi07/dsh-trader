@@ -88,6 +88,20 @@ describe('plan card v0', () => {
     expect(validatePlanCard(card).ok).toBe(false)
   })
 
+  it('编译并静态检查 when：语法错/固定未知路径拒绝，动态 pm alias 保留运行时校验', () => {
+    const syntax = validCard()
+    syntax.invalidation = [{ ...syntax.invalidation[0]!, when: 'bar.close >' }]
+    expect(validatePlanCard(syntax).ok).toBe(false)
+
+    const unknown = validCard()
+    unknown.invalidation = [{ ...unknown.invalidation[0]!, when: 'news.headline > 1' }]
+    expect(validatePlanCard(unknown).ok).toBe(false)
+
+    const dynamic = validCard()
+    dynamic.invalidation = [{ ...dynamic.invalidation[0]!, when: 'pm.future_event.prob < 0.3' }]
+    expect(validatePlanCard(dynamic).ok).toBe(true)
+  })
+
   it('hashes deterministically regardless of key order, and changes with content', () => {
     const { contentHash: _dropped, ...rest } = validCard()
     const reordered = Object.fromEntries(Object.entries(rest).reverse()) as typeof rest

@@ -149,6 +149,70 @@ export class BarArchive {
     return rows.map(toCandle).reverse()
   }
 
+  /** 最近已**成功处理**的 bar；用于重启时恢复增量特征而不跳过待处理队列。 */
+  recentProcessedClosedBars(symbol: string, timeframe: string, limit: number): readonly Candle[] {
+    const rows = this.#statements
+      .get(
+        `SELECT b.symbol, b.timeframe, b.open_time, b.close_time, b.open, b.high, b.low, b.close, b.volume, b.closed
+         FROM bars b
+         JOIN bar_processing p
+           ON p.symbol = b.symbol AND p.timeframe = b.timeframe AND p.open_time = b.open_time
+         WHERE b.symbol = ? AND b.timeframe = ? AND b.closed = 1
+         ORDER BY b.open_time DESC
+         LIMIT ?`,
+      )
+      .all(symbol, timeframe, limit) as BarRow[]
+    return rows.map(toCandle).reverse()
+  }
+
+  /** 处理游标之后的已收盘 bar，按时间升序返回；成功回调后才写入 bar_processing。 */
+  unprocessedClosedBars(symbol: string, timeframe: string, limit = 1_000): readonly Candle[] {
+    const rows = this.#statements
+      .get(
+        `SELECT b.symbol, b.timeframe, b.open_time, b.close_time, b.open, b.high, b.low, b.close, b.volume, b.closed
+         FROM bars b
+         LEFT JOIN bar_processing p
+           ON p.symbol = b.symbol AND p.timeframe = b.timeframe AND p.open_time = b.open_time
+         WHERE b.symbol = ? AND b.timeframe = ? AND b.closed = 1 AND p.open_time IS NULL
+         ORDER BY b.open_time ASC
+         LIMIT ?`,
+      )
+      .all(symbol, timeframe, limit) as BarRow[]
+    return rows.map(toCandle)
+  }
+
+  /** 标记一根 bar 的全部下游处理成功；重复标记幂等。 */
+  markProcessed(candle: Pick<Candle, 'symbol' | 'timeframe' | 'openTime'>, processedAt: number): void {
+    this.#statements
+      .get(
+        `INSERT INTO bar_processing (symbol, timeframe, open_time, processed_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (symbol, timeframe, open_time) DO UPDATE SET processed_at = excluded.processed_at`,
+      )
+      .run(candle.symbol, candle.timeframe, candle.openTime, processedAt)
+  }
+
+  /** 归档中首个时间缺口；返回 undefined 表示当前序列连续或不足两根。 */
+  firstGapOpenTime(symbol: string, timeframe: string, maxBars = 200_000): number | undefined {
+    const bars = this.closedBars(symbol, timeframe, { limit: maxBars })
+    // 这里不解析字符串时间框架，避免重复维护单位表；调用方只在已知框架上使用 gap 检测。
+    const timeframeSteps: Readonly<Record<string, number>> = {
+      '1m': 60_000,
+      '15m': 900_000,
+      '1h': 3_600_000,
+      '4h': 14_400_000,
+      '1d': 86_400_000,
+    }
+    const tfMs = timeframeSteps[timeframe]
+    if (tfMs === undefined || bars.length < 2) return undefined
+    for (let index = 1; index < bars.length; index += 1) {
+      const previous = bars[index - 1] as Candle
+      const current = bars[index] as Candle
+      if (current.openTime - previous.openTime > tfMs) return previous.openTime + tfMs
+    }
+    return undefined
+  }
+
   count(symbol?: string, timeframe?: string): number {
     const clauses: string[] = []
     const params: unknown[] = []

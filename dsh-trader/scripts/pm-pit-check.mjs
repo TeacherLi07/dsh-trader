@@ -203,8 +203,12 @@ const one = (sql, ...params) => db.prepare(sql).get(...params)
 const existenceViolations = db
   .prepare(
     `SELECT COUNT(*) AS n FROM triggers t
-     JOIN pm_watches w ON t.symbol = 'pm:' || w.alias
-     JOIN pm_markets m ON m.condition_id IN (SELECT condition_id FROM pm_markets)
+     LEFT JOIN pm_watches w ON t.symbol = 'pm:' || w.alias
+     JOIN pm_markets m
+       ON EXISTS (
+         SELECT 1 FROM json_each(w.token_ids_json) wt
+         JOIN json_each(m.token_ids_json) mt ON wt.value = mt.value
+       ) OR (t.rule_id = 'pm_new_market' AND json_extract(t.payload_json, '$.detail.conditionId') = m.condition_id)
      WHERE t.rule_id LIKE 'pm_%' AND t.bar_ts < m.created_at`,
   )
   .get().n
@@ -213,8 +217,13 @@ const existenceViolations = db
 const resolutionViolations = db
   .prepare(
     `SELECT COUNT(*) AS n FROM triggers t
-     JOIN pm_markets m ON m.resolved_at IS NOT NULL
-     WHERE t.rule_id = 'pm_resolution' AND t.bar_ts < m.resolved_at`,
+     LEFT JOIN pm_watches w ON t.symbol = 'pm:' || w.alias
+     JOIN pm_markets m
+       ON EXISTS (
+         SELECT 1 FROM json_each(w.token_ids_json) wt
+         JOIN json_each(m.token_ids_json) mt ON wt.value = mt.value
+       ) OR json_extract(t.payload_json, '$.detail.tokenId') IN (SELECT value FROM json_each(m.token_ids_json))
+     WHERE t.rule_id = 'pm_resolution' AND m.resolved_at IS NOT NULL AND t.bar_ts < m.resolved_at`,
   )
   .get().n
 

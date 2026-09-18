@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
 import { getDatabase } from '../db/runtime.js'
+import { DecisionJournal } from '../exec/journal.js'
 import {
   DEFAULT_TRIGGER_LIMITS,
   RULE_PACKS,
@@ -71,7 +72,21 @@ export function apply(ctx: Context, config: RulesConfig): void {
   }
 
   const queue = new TriggerQueue(getDatabase())
-  const watch = new RuleWatch(built.rules, new TriggerGovernor(queue, systemClock(), limits))
+  const journal = new DecisionJournal(getDatabase())
+  const watch = new RuleWatch(built.rules, new TriggerGovernor(queue, systemClock(), limits), {
+    onFailure: (failure) => {
+      try {
+        journal.appendAudit({
+          actor: 'system',
+          kind: 'rule_uncovered',
+          payload: failure,
+          ts: systemClock().now(),
+        })
+      } catch {
+        // 审计失败不能让行情回调中断；原始 failure 仍由 onBar 返回给调用方。
+      }
+    },
+  })
   setTriggerRuntime(watch)
 
   ctx.effect(

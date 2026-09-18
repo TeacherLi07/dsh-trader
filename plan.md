@@ -187,6 +187,11 @@ CREATE TABLE features(                                -- 每根 bar 收盘的特
   symbol TEXT, timeframe TEXT, open_time INTEGER, snapshot_json TEXT, fingerprint TEXT,
   PRIMARY KEY(symbol,timeframe,open_time)) WITHOUT ROWID;
 
+CREATE TABLE bar_processing(                         -- 归档与成功处理分离；回调失败可重试
+  symbol TEXT, timeframe TEXT, open_time INTEGER, processed_at INTEGER,
+  PRIMARY KEY(symbol,timeframe,open_time),
+  FOREIGN KEY(symbol,timeframe,open_time) REFERENCES bars(symbol,timeframe,open_time)) WITHOUT ROWID;
+
 CREATE TABLE plan_cards(
   plan_id TEXT PRIMARY KEY, symbol TEXT NOT NULL, version INTEGER NOT NULL,
   status TEXT NOT NULL CHECK(status IN('active','expired','superseded')),

@@ -58,6 +58,8 @@ export interface MarketFeedOptions {
   readonly pollMs: number
   /** 每次轮询抓取的最近 bar 数（含进行中的那根，默认 3）。 */
   readonly recentLimit?: number
+  /** 每轮最多补处理多少根已归档但尚未成功回调的 bar。 */
+  readonly processingBatchLimit?: number
   readonly limiter?: TokenBucket
   readonly limiterCost?: number
   readonly sleep?: Sleep
@@ -76,6 +78,7 @@ const MAX_RATE_LIMIT_RETRIES = 64
 
 export class MarketFeed {
   #attempts = new Map<string, number>()
+  #nextAllowedAt = new Map<string, number>()
   /**
    * 周期回调可能在上一轮 REST 请求尚未返回时再次到期；保留正在运行的 promise，
    * 让所有入口共享同一轮，避免慢源导致并发请求和乱序写入。
@@ -103,10 +106,14 @@ export class MarketFeed {
 
   /** 跑一轮：每个 symbol×timeframe 独立 try/catch，失败只计数不抛出。 */
   pollOnce(): Promise<PollResult> {
+    return this.#beginPoll(false)
+  }
+
+  #beginPoll(respectBackoff: boolean): Promise<PollResult> {
     const inFlight = this.#pollInFlight
     if (inFlight !== undefined) return inFlight
 
-    const poll = this.#pollOnce()
+    const poll = this.#pollOnce(respectBackoff)
     this.#pollInFlight = poll
     // 两个分支都消费清理 promise；若内部出现未预期 reject，也不能制造新的 unhandled rejection。
     void poll.then(
@@ -120,7 +127,7 @@ export class MarketFeed {
     return poll
   }
 
-  async #pollOnce(): Promise<PollResult> {
+  async #pollOnce(respectBackoff: boolean): Promise<PollResult> {
     const {
       source,
       archive,
@@ -128,6 +135,7 @@ export class MarketFeed {
       symbols,
       timeframes,
       recentLimit = 3,
+      processingBatchLimit = 1_000,
       limiter,
       limiterCost = 1,
       sleep = realSleep,
@@ -146,6 +154,12 @@ export class MarketFeed {
         try {
           // 未知时间框架在这里就失败：不浪费一次请求，也不静默跳过
           timeframeMs(timeframe)
+
+          // 退避不靠生产调用方“记得调用 backoffFor”：start() 走这一道闸。
+          // 尚未到 due 时只跳过本 key，不阻塞其它标的/时间框；手工 pollOnce 保留
+          // 立即重试语义，便于回补/故障注入显式控制时间。
+          const nextAllowedAt = this.#nextAllowedAt.get(key)
+          if (respectBackoff && nextAllowedAt !== undefined && clock.now() < nextAllowedAt) continue
 
           if (limiter !== undefined) {
             let acquired = false
@@ -170,23 +184,27 @@ export class MarketFeed {
           const now = clock.now()
           const { candles } = normalizeCandles(raw, symbol, timeframe, now)
           const closed = closedOnly(candles)
-          const before = archive.lastOpenTime(symbol, timeframe)
           const result = archive.upsertClosed(closed, { source: source.id, fetchedAt: now })
           written += result.written
 
           if (onClosedCandle !== undefined) {
-            for (const candle of closed) {
-              if (before !== undefined && candle.openTime <= before) continue
+            // 归档游标与处理游标分离：整批 upsert 成功不代表下游成功。
+            // 处理队列包含之前回调失败的 bar，因此回调抛错后不会把批内后续 bar 永久吞掉。
+            const pending = archive.unprocessedClosedBars(symbol, timeframe, processingBatchLimit)
+            for (const candle of pending) {
               await onClosedCandle(candle)
+              archive.markProcessed(candle, clock.now())
               emitted += 1
             }
           }
 
           this.#attempts.set(key, 0)
+          this.#nextAllowedAt.delete(key)
         } catch (error) {
           failures += 1
           const attempt = (this.#attempts.get(key) ?? 0) + 1
           this.#attempts.set(key, attempt)
+          this.#nextAllowedAt.set(key, clock.now() + computeBackoff(attempt - 1))
           onError?.(error, { symbol, timeframe, kind: classifyError(error), attempt })
         }
       }
@@ -198,7 +216,7 @@ export class MarketFeed {
   /** 用注入的 Clock 起轮询（回放时同一个 Clock 驱动）。返回取消函数。 */
   start(): () => void {
     return this.options.clock.setInterval(() => {
-      void this.pollOnce().catch((error: unknown) => {
+      void this.#beginPoll(true).catch((error: unknown) => {
         this.options.onError?.(error, {
           symbol: '*',
           timeframe: '*',

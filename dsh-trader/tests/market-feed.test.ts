@@ -91,6 +91,33 @@ describe('MarketFeed', () => {
     expect(feed.attempts(SYMBOL, TF)).toBe(0)
   })
 
+  it('回调失败时保留处理游标，批内后续 bar 下一轮仍会按序重试', async () => {
+    const clock = new ReplayClock(NOW)
+    const source = new FakeSource({ pages: [series(NOW - 3 * HOUR, 2), series(NOW - 3 * HOUR, 2)] })
+    let first = true
+    const seen: number[] = []
+    const feed = makeFeed(source, clock, {
+      onClosedCandle: (candle) => {
+        seen.push(candle.openTime)
+        if (first) {
+          first = false
+          throw new Error('downstream unavailable')
+        }
+      },
+    })
+
+    const failed = await feed.pollOnce()
+    expect(failed.failures).toBe(1)
+    expect(archive.count(SYMBOL, TF)).toBe(2) // 归档成功不等于处理成功
+
+    const retried = await feed.pollOnce()
+    expect(retried.failures).toBe(0)
+    expect(retried.emitted).toBe(2)
+    // 第 1 根被重试，第 2 根没有被首轮失败吞掉
+    expect(seen).toEqual([NOW - 3 * HOUR, NOW - 3 * HOUR, NOW - 2 * HOUR])
+    expect(archive.unprocessedClosedBars(SYMBOL, TF)).toEqual([])
+  })
+
   it('never lets a failing source break the loop; it counts and backs off', async () => {
     const clock = new ReplayClock(NOW)
     const error = Object.assign(new Error('rate limit exceeded'), { name: 'RateLimitExceeded' })

@@ -89,6 +89,18 @@ describe('DerivativesTracker', () => {
     expect(tracker.push({ timestamp: 2, openInterest: 100 }).oiChangePct).toBeNull()
     expect(tracker.push({ timestamp: 3, openInterest: 110 }).oiChangePct).toBe(10)
   })
+
+  it('deduplicates overlapping liquidation windows when rows have stable ids', () => {
+    const observations: readonly DerivativesObservation[] = [
+      { timestamp: 1_000, liquidations: [{ id: 'l1', trade_turnover: 10 }] },
+      { timestamp: 2_000, liquidations: [{ id: 'l1', trade_turnover: 10 }, { id: 'l2', trade_turnover: 5 }] },
+    ]
+    const expected = derivativesValues(observations, 60_000)
+    const tracker = new DerivativesTracker(60_000)
+    const actual = observations.map((observation) => tracker.push(observation))
+    expect(actual).toEqual(expected)
+    expect(actual[1]?.liqNotional).toBe(15)
+  })
 })
 
 class FakeDerivativesExchange implements CcxtExchangeLike {

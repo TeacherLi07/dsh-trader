@@ -53,6 +53,45 @@ function rowNumber(row: unknown, key: string): number | null {
   return finiteNumber(asRecord(record.info)?.[key])
 }
 
+/** 交易所的清算端点常返回重叠窗口；有稳定 id 时只计一次，没有 id 则保守保留。 */
+function liquidationIdentity(row: unknown): string | undefined {
+  const record = asRecord(row)
+  if (record === null) return undefined
+  const info = asRecord(record.info)
+  for (const source of [record, info]) {
+    if (source === null) continue
+    for (const key of ['id', 'orderId', 'order_id', 'tradeId', 'trade_id']) {
+      const value = source[key]
+      if (typeof value === 'string' || typeof value === 'number') {
+        return `${key}:${String(value)}`
+      }
+    }
+  }
+  return undefined
+}
+
+function uniqueLiquidations(
+  rows: readonly unknown[],
+  seen: Map<string, number>,
+  timestamp: number,
+  windowMs: number,
+): readonly unknown[] {
+  const unique: unknown[] = []
+  const cutoff = timestamp - windowMs
+  for (const [key, seenAt] of seen) if (seenAt < cutoff) seen.delete(key)
+  for (const row of rows) {
+    const key = liquidationIdentity(row)
+    if (key === undefined) {
+      unique.push(row)
+      continue
+    }
+    if (seen.has(key)) continue
+    seen.set(key, timestamp)
+    unique.push(row)
+  }
+  return unique
+}
+
 /** 每行优先采用 trade_turnover，否则采用 volume；坏行跳过但不把缺失伪装成 0。 */
 export function normalizeLiquidations(rows: readonly unknown[]): LiquidationNormalization {
   let notional = 0
@@ -126,6 +165,7 @@ export class DerivativesTracker {
   #liquidations: LiquidationBucket[] = []
   #liquidationHead = 0
   #liquidationTotal = 0
+  #seenLiquidations = new Map<string, number>()
 
   constructor(private readonly windowMs: number) {
     assertWindow(windowMs)
@@ -148,7 +188,9 @@ export class DerivativesTracker {
     const liquidations = observation.liquidations
     let liqNotional: number | null = null
     if (liquidations !== undefined) {
-      const normalized = normalizeLiquidations(liquidations)
+      const normalized = normalizeLiquidations(
+        uniqueLiquidations(liquidations, this.#seenLiquidations, observation.timestamp, this.windowMs),
+      )
       liqNotional = this.#addLiquidationBucket(observation.timestamp, normalized.notional)
     }
 
@@ -193,6 +235,7 @@ export function derivativesValues(
 ): readonly DerivativesValues[] {
   assertWindow(windowMs)
   const buckets: LiquidationBucket[] = []
+  const seenLiquidations = new Map<string, number>()
   let previousOpenInterest: number | null = null
   let previousTimestamp: number | undefined
   const out: DerivativesValues[] = []
@@ -215,7 +258,9 @@ export function derivativesValues(
     if (observation.liquidations !== undefined) {
       buckets.push({
         timestamp: observation.timestamp,
-        notional: normalizeLiquidations(observation.liquidations).notional,
+        notional: normalizeLiquidations(
+          uniqueLiquidations(observation.liquidations, seenLiquidations, observation.timestamp, windowMs),
+        ).notional,
       })
       const cutoff = observation.timestamp - windowMs
       liqNotional = buckets

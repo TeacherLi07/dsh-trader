@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS features (
   PRIMARY KEY (symbol, timeframe, open_time)
 ) WITHOUT ROWID;
 
--- 行情归档与机械处理游标分离：bar 已落库不等于 live-engine 已成功处理。
+-- bars 已归档不等于已完成特征/规则/机械执行；该游标在回调成功后才推进，
+-- 让回调失败、进程重启或执行组合尚未就绪时可以从同一根 bar 幂等重试。
 CREATE TABLE IF NOT EXISTS bar_processing (
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL,

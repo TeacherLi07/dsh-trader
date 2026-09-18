@@ -41,6 +41,7 @@ describe('schema (plan §4.1 invariants)', () => {
       'bars',
       'bar_processing',
       'features',
+      'bar_processing',
       'plan_cards',
       'decisions',
       'outcomes',

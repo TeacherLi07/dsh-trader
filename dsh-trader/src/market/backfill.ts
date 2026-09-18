@@ -111,7 +111,9 @@ export async function backfill(
     const { candles, dropped: invalid } = normalizeCandles(raw, request.symbol, request.timeframe, now)
     dropped += invalid
 
-    const inRange = closedOnly(candles).filter((candle) => candle.openTime < request.until)
+    // 把未收盘条目交给 archive 统计后再拒绝；先 `closedOnly()` 会让 rejectedOpen 永远为 0，
+    // 使回补报告把数据源返回的进行中 bar 静默掉。until 仍是开区间，区间外条目不计入本批。
+    const inRange = candles.filter((candle) => candle.openTime < request.until)
     const result = archive.upsertClosed(inRange, { source: source.id, fetchedAt: now })
     written += result.written
     rejectedOpen += result.rejectedOpen
