@@ -32,8 +32,7 @@ import { DecisionJournal } from '../exec/journal.js'
 export const name = 'trade-market'
 
 export const Config = z.object({
-  venue: z.string().required(),
-  crossCheckVenue: z.string(),
+  venue: z.union(['htx']).required(),
   symbols: z.array(z.string()).required(),
   timeframes: z.array(z.string()).required(),
   enabled: z.boolean().default(false),
@@ -43,8 +42,7 @@ export const Config = z.object({
 })
 
 export interface MarketConfig {
-  venue: string
-  crossCheckVenue?: string
+  venue: 'htx'
   symbols: readonly string[]
   timeframes: readonly string[]
   enabled?: boolean

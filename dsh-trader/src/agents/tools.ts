@@ -37,6 +37,7 @@ import {
   type WatchKind,
   type WatchPurpose,
 } from '../predictions/store.js'
+import { WorkflowContextStore, type WorkflowContextRecord } from '../supervisor/workflow-context.js'
 
 export interface ToolPorts {
   readonly db: Database.Database
@@ -72,6 +73,9 @@ export interface ToolPorts {
   /** 执行层状态未知时立即冻结，而不是等下一次重启。 */
   readonly freezeSymbol?: (symbol: string) => void
   readonly halt?: () => void
+  /** 生产组合根配置的唯一允许范围；计划工具缺少它们时必须拒绝，不能猜。 */
+  readonly symbols?: readonly string[]
+  readonly timeframes?: readonly string[]
 }
 
 /** 默认结算视界：4 小时（日内-摆动之间，1h bar 下约 4 根）。 */
@@ -176,6 +180,21 @@ function optionalEnum<T extends string>(
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+function requireWorkflowContext(
+  args: Readonly<Record<string, unknown>>,
+  ports: ToolPorts,
+  symbol: string,
+  timeframe: string,
+): { readonly token: string; readonly record: WorkflowContextRecord; readonly store: WorkflowContextStore } {
+  const token = requireString(args, 'contextToken')
+  const store = new WorkflowContextStore(ports.db)
+  const record = store.verify(token, ports.clock.now(), { symbol, timeframe })
+  if (record === undefined) {
+    throw new ToolArgumentError('contextToken 无效、已过期、已消费，或与 symbol/timeframe 不匹配；必须先成功运行 trade_workflow_run')
+  }
+  return { token, record, store }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -851,6 +870,7 @@ const tradeRecordDecision: ToolDefinition = {
     decisionId: { type: 'string', required: true },
     symbol: { type: 'string', required: true },
     timeframe: { type: 'string', enum: TIMEFRAMES },
+    contextToken: { type: 'string', required: true, description: 'trade_workflow_run 返回的一次性上下文 token' },
     action: { type: 'string', required: true },
     sizeQty: { type: 'number' },
     stopPrice: { type: 'number' },
@@ -866,26 +886,37 @@ const tradeRecordDecision: ToolDefinition = {
       throw new ToolArgumentError(`action 必须是 ${DECISION_ACTIONS.join('|')} 之一，收到 ${rawAction}`)
     }
     const action = rawAction as DecisionAction
-    const timeframe = optionalString(args, 'timeframe')
-    // `contextHash` **不接受模型入参**：哈希由代码给出，模型无法伪造"我看到过什么"
-    const contextHash = ports.contextHash ?? `unassembled-manual:${decisionId}`
+    const timeframe = requireEnum(args, 'timeframe', TIMEFRAMES)
+    if (ports.symbols === undefined || !ports.symbols.includes(symbol)) {
+      throw new ToolArgumentError(`symbol 不在配置标的池中：${symbol}`)
+    }
+    if (ports.timeframes === undefined || !ports.timeframes.includes(timeframe)) {
+      throw new ToolArgumentError(`timeframe 不在配置时间框中：${timeframe}`)
+    }
+    const workflow = requireWorkflowContext(args, ports, symbol, timeframe)
+    // context hash 只来自已验证 workflow token，模型入参永远不会进入审计根。
+    const contextHash = workflow.record.contextHash
     const sizeQty = optionalNumber(args, 'sizeQty')
     const stopPrice = optionalNumber(args, 'stopPrice')
     const takeProfit = optionalNumber(args, 'takeProfit')
     const rationale = optionalString(args, 'rationale')
-    const inserted = ports.journal.recordDecision({
-      decisionId,
-      symbol,
-      ...(timeframe === undefined ? {} : { timeframe }),
-      decidedAt: ports.clock.now(),
-      contextHash,
-      action,
-      executed: false,
-      ...(sizeQty === undefined ? {} : { sizeQty }),
-      ...(stopPrice === undefined ? {} : { stopPrice }),
-      ...(takeProfit === undefined ? {} : { takeProfit }),
-      ...(rationale === undefined ? {} : { rationale }),
-    })
+    const inserted = ports.db.transaction(() => {
+      const saved = ports.journal.recordDecision({
+        decisionId,
+        symbol,
+        timeframe,
+        decidedAt: ports.clock.now(),
+        contextHash,
+        action,
+        executed: false,
+        ...(sizeQty === undefined ? {} : { sizeQty }),
+        ...(stopPrice === undefined ? {} : { stopPrice }),
+        ...(takeProfit === undefined ? {} : { takeProfit }),
+        ...(rationale === undefined ? {} : { rationale }),
+      })
+      if (!workflow.store.consume(workflow.token, ports.clock.now())) throw new ToolArgumentError('contextToken 已被消费')
+      return saved
+    })()
     return { recorded: inserted, decisionId }
   },
 }
@@ -1029,6 +1060,8 @@ const tradePlanCard: ToolDefinition = {
   sideEffect: true,
   parameters: {
     symbol: { type: 'string', required: true },
+    timeframe: { type: 'string', required: true, enum: TIMEFRAMES },
+    contextToken: { type: 'string', required: true, description: 'trade_workflow_run 返回的一次性上下文 token' },
     windowEndsInHours: { type: 'number', required: true, description: '本卡有效期（小时），到期即失效' },
     cardJson: {
       type: 'string',
@@ -1041,6 +1074,14 @@ const tradePlanCard: ToolDefinition = {
   },
   async execute(args, ports) {
     const symbol = requireString(args, 'symbol')
+    const timeframe = requireEnum(args, 'timeframe', TIMEFRAMES)
+    if (ports.symbols === undefined || !ports.symbols.includes(symbol)) {
+      throw new ToolArgumentError(`symbol 不在配置标的池中：${symbol}`)
+    }
+    if (ports.timeframes === undefined || !ports.timeframes.includes(timeframe)) {
+      throw new ToolArgumentError(`timeframe 不在配置时间框中：${timeframe}`)
+    }
+    const workflow = requireWorkflowContext(args, ports, symbol, timeframe)
     const windowEndsInHours = requireNumber(args, 'windowEndsInHours')
     if (!(windowEndsInHours > 0) || windowEndsInHours > 24 * 14) {
       throw new ToolArgumentError(`windowEndsInHours 必须在 (0, 336] 内，收到 ${windowEndsInHours}`)
@@ -1077,7 +1118,16 @@ const tradePlanCard: ToolDefinition = {
       throw new ToolArgumentError(`计划卡校验失败：${validation.errors.join('；')}`)
     }
 
-    const saved = ports.plans.save(validation.card, createdAt)
+    const conditionTimeframes = [...validation.card.invalidation, ...validation.card.commitments].map((item) => item.tf)
+    if (conditionTimeframes.some((candidate) => candidate !== timeframe)) {
+      throw new ToolArgumentError(`计划卡条件 tf 必须全部等于本次 workflow timeframe=${timeframe}`)
+    }
+
+    const saved = ports.db.transaction(() => {
+      const result = ports.plans.save(validation.card, createdAt)
+      if (!workflow.store.consume(workflow.token, ports.clock.now())) throw new ToolArgumentError('contextToken 已被消费')
+      return result
+    })()
     return {
       saved: true,
       status: saved.status,

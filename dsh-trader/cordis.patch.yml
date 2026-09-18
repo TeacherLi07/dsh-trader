@@ -18,7 +18,6 @@
       name: dsh-trader/plugins/market
       config:
         venue: htx
-        crossCheckVenue: okx
         # 高流动性 + 小额合约（实测 1 张名义：ADA≈1.95 USDT、DOGE≈8.0 USDT），
         # 24.9 USDT 在 1× 下可下单；BTC≈76.4/ETH≈24.2 开不了最小张。
         symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
@@ -66,7 +65,7 @@
         symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
         timeframes: [1h]
         benchmark: BTC/USDT:USDT
-        venue: htx
+        venue: htx             # 生产执行只支持 HTX；不保留多 venue 兼容分支
         # 组合根：lazy 启动 broker + ports + 启动/周期对账；paper 模式**不触网**
         reconcileEnabled: true
         reconcileMs: 300000

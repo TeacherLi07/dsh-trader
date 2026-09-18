@@ -1,0 +1,25 @@
+{
+  "ranAt": "2026-09-18T11:59:41Z",
+  "verify": {
+    "exitCode": 0,
+    "testFilesPassed": 65,
+    "testFilesTotal": 65,
+    "testsPassed": 678,
+    "testsTotal": 678
+  },
+  "dumpConfig": {
+    "exitCode": 0,
+    "tradeEntries": 13,
+    "marketVenue": "htx",
+    "execVenue": "htx",
+    "crossCheckVenueMatches": 0,
+    "settleMs": 60000
+  },
+  "workflowContext": {
+    "requiredByPlanCard": true,
+    "requiredByRecordDecision": true,
+    "singleUse": true,
+    "transactionalConsume": true
+  },
+  "realHtxPrivateOrderExecuted": false
+}

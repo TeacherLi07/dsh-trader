@@ -19,6 +19,7 @@ import {
 } from '../src/agents/tools.js'
 import { SIDE_EFFECT_TOOLS, assertRoleSurface } from '../src/agents/roles.js'
 import { randomSeries } from './helpers/market.js'
+import { WorkflowContextStore } from '../src/supervisor/workflow-context.js'
 
 const SYMBOL = 'BTC/USDT'
 const TF = '1h'
@@ -71,6 +72,8 @@ function setup(options: { readonly limits?: RiskLimits | null } = {}): void {
     limits: options.limits === undefined ? LIMITS : options.limits,
     mode: 'paper',
     riskPct: 0.002,
+    symbols: [SYMBOL],
+    timeframes: [TF],
   }
 }
 
@@ -81,6 +84,19 @@ function call(name: string, args: Record<string, unknown> = {}): Promise<unknown
   const tool = toolByName(name)
   if (tool === undefined) throw new Error(`unknown tool ${name}`)
   return tool.execute(args, ports)
+}
+
+function contextToken(contextHash = 'sha256:workflow'): string {
+  return new WorkflowContextStore(db).issue({
+    packId: `pack:${contextHash}`,
+    contextHash,
+    resultHash: 'sha256:result',
+    symbol: SYMBOL,
+    timeframe: TF,
+    scriptVersion: 'test',
+    promptVersion: 'test',
+    createdAt: START,
+  }).token
 }
 
 describe('tool registry', () => {
@@ -290,19 +306,22 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     await call('trade_record_decision', {
       decisionId: 'd-model-claim',
       symbol: SYMBOL,
+      timeframe: TF,
       action: 'no_trade',
+      contextToken: contextToken('sha256:assembled'),
       contextHash: 'sha256:伪造的',
     })
     expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('sha256:assembled')
   })
 
-  it('没有组装过上下文时，占位符显式标明"未组装"而不是伪装成真哈希', async () => {
-    await call('trade_record_decision', {
+  it('没有 workflow token 时拒绝记录裁决，不再写未组装占位符', async () => {
+    await expect(call('trade_record_decision', {
       decisionId: 'd-fallback',
       symbol: SYMBOL,
+      timeframe: TF,
       action: 'no_trade',
-    })
-    expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('unassembled-manual:d-fallback')
+    })).rejects.toThrow('contextToken')
+    expect(ports.journal.recentDecisions()).toHaveLength(0)
   })
 
   it('reduces and closes a live position by fraction', async () => {
@@ -398,14 +417,14 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
     const tool = toolByName('trade_plan_card')
     expect(tool).toBeDefined()
     const first = (await tool?.execute(
-      { symbol: SYMBOL, windowEndsInHours: 4, cardJson: validCard() },
+      { symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: validCard() },
       ports,
     )) as { saved: boolean; status: string; planId: string; contentHash: string }
     expect(first.saved).toBe(true)
     expect(first.planId.startsWith('pc-')).toBe(true)
 
     const second = (await tool?.execute(
-      { symbol: SYMBOL, windowEndsInHours: 4, cardJson: validCard() },
+      { symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: validCard() },
       ports,
     )) as { status: string }
     expect(second.status).toBe('unchanged')
@@ -420,7 +439,7 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
       invalidation: [],
     })
     await expect(
-      tool?.execute({ symbol: SYMBOL, windowEndsInHours: 4, cardJson: bad }, ports),
+      tool?.execute({ symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: bad }, ports),
     ).rejects.toThrow(ToolArgumentError)
     expect(ports.plans.active(SYMBOL)).toBeUndefined()
   })
@@ -428,7 +447,7 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
   it('cardJson 不是 JSON 对象时拒绝（不猜）', async () => {
     const tool = toolByName('trade_plan_card')
     await expect(
-      tool?.execute({ symbol: SYMBOL, windowEndsInHours: 4, cardJson: '[]' }, ports),
+      tool?.execute({ symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: '[]' }, ports),
     ).rejects.toThrow(ToolArgumentError)
   })
 })

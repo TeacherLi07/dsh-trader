@@ -16,7 +16,7 @@ import { systemClock } from '../clock.js'
 import { StartupParamsError, startupLimitsError, type RiskLimits } from '../config.js'
 import { getDatabase } from '../db/runtime.js'
 import { applyProxyAwareFetch } from '../market/ccxt-source.js'
-import { CcxtBroker, type CcxtProExchangeLike } from '../exec/ccxt-broker.js'
+import { HtxBroker, type CcxtProExchangeLike } from '../exec/ccxt-broker.js'
 import { DecisionJournal } from '../exec/journal.js'
 import { LocalStateReader, runReadOnlyPreflight } from '../exec/preflight.js'
 import {
@@ -42,8 +42,8 @@ export const Config = z.object({
   apiSecret: z.string(),
   /** 只读预检开关；默认关闭 ⇒ 插件加载时完全不触网。 */
   preflightEnabled: z.boolean(),
-  /** 只读预检的 venue（htx 生产 / okx 用于交叉校验与 sandbox）。 */
-  preflightVenue: z.string(),
+  /** 只读预检与生产执行使用同一 HTX 语义。 */
+  preflightVenue: z.union(['htx']),
   /** 只读预检的参考标的（用于点差重取）；省略时由 broker 自行推断。 */
   preflightSymbol: z.string(),
   /** OKX sandbox；HTX 没有该端点，不应打开。 */
@@ -67,7 +67,7 @@ export const Config = z.object({
   symbols: z.array(z.string()),
   timeframes: z.array(z.string()),
   benchmark: z.string(),
-  venue: z.string().default('htx'),
+  venue: z.union(['htx']).default('htx'),
 })
 
 export interface ExecConfig {
@@ -83,7 +83,7 @@ export interface ExecConfig {
   apiKey?: string
   apiSecret?: string
   preflightEnabled?: boolean
-  preflightVenue?: string
+  preflightVenue?: 'htx'
   preflightSymbol?: string
   sandbox?: boolean
   accountType?: string
@@ -99,7 +99,7 @@ export interface ExecConfig {
   symbols?: readonly string[]
   timeframes?: readonly string[]
   benchmark?: string
-  venue?: string
+  venue?: 'htx'
 }
 
 export type ExecBrokerKind = 'paper' | 'ccxt'
@@ -334,7 +334,7 @@ export function apply(ctx: Context, config: ExecConfig): void {
       if (disposed) return
 
       const clock = systemClock()
-      const broker = new CcxtBroker({
+      const broker = new HtxBroker({
         exchange,
         venue,
         clock,

@@ -37,4 +37,21 @@ describe('WorkflowContextStore', () => {
     expect(store.verify(issued.token, 1_050, { contextHash: 'sha256:other' })).toBeUndefined()
     expect(store.verify(issued.token, 1_100)).toBeUndefined()
   })
+
+  it('consumes a token exactly once', () => {
+    const store = new WorkflowContextStore(db)
+    const issued = store.issue({
+      packId: 'pack-once',
+      contextHash: 'sha256:once',
+      resultHash: 'sha256:result',
+      symbol: 'BTC/USDT:USDT',
+      timeframe: '1h',
+      scriptVersion: 'workflow-v1',
+      promptVersion: 'v2',
+      createdAt: 2_000,
+    })
+    expect(store.consume(issued.token, 2_001)).toBe(true)
+    expect(store.consume(issued.token, 2_002)).toBe(false)
+    expect(store.verify(issued.token, 2_002)).toBeUndefined()
+  })
 })

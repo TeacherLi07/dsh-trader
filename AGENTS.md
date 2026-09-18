@@ -22,7 +22,7 @@
 **当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地与安全收口（T2.1–T2.9；Docker 单进程重启 + 启动恢复为故障模型；旧 watchdog 证据仅保留归档）。
 **下一步**：P3 小额实盘前安全收口 —— HTX key/只读预检/最小额独立冒烟均已完成，`live_auto` 也曾获授权但当前已回退 `paper`。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账，并补齐 §12.1 #25 的结构化 `live_confirm` 逐单确认通道（未接入前 runtime fail-closed 拒绝该模式）。
 
-**T3.4 平台运营收口（已实现）**：schema v4 迁移历史触发/价目/预算表并持久化 `bar_processing`、W1 pending/cursor、workflow context token；结算周期配置已接线，P1/live-paper 验收已增加非空与保护单确认门槛。真实 HTX merged 对账与 `live_confirm` 仍按上段保留为外部/能力边界。
+**T3.2–T3.4 安全重构（已实现）**：生产执行收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；schema v4 持久化 `bar_processing`、W1 pending/cursor 与一次性 workflow context token；行情回补、特征/DSL/PM fail-closed、历史迁移及非空验收均已接线。真实 HTX merged 对账与 `live_confirm` 仍按上段保留为外部/能力边界。
 
 **七条红线**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
@@ -36,7 +36,7 @@ pnpm install --frozen-lockfile   # 装依赖；首次或换 profile 后需要 pn
 pnpm verify                      # ★ 提交前必过：typecheck && build && test
 pnpm typecheck                   # tsc -p tsconfig.json && tsc -p tsconfig.test.json
 pnpm build                       # 产出 lib/ —— scripts/*.mjs 从 lib/ 导入，改完 src 必须先 build
-pnpm test                        # vitest run，当前 63 文件 / 655 测试
+pnpm test                        # vitest run（数量随阶段增长，以命令输出为准）
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
@@ -158,12 +158,12 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
 - **P3–P4 未做**：周级复盘/playbook/M3 版本化。`live_auto` 已按用户授权 arm，无人值守回路
   **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
-- **P2 的剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（`CcxtBroker` 代码已就绪、单测覆盖；需用已有 key 做非空实测）；结构化 `live_confirm` 逐单确认通道仍未接入。
+- **P2 的剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（生产组合根使用 `HtxBroker`，单测覆盖；需用已有 key 做非空实测）；结构化 `live_confirm` 逐单确认通道仍未接入。
   P2 ①②④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`）；旧 watchdog 结果仅作历史归档，当前不启动外部进程。
 - **宏观事件窗口不是硬闸（暂不启用）**：`GatePolicy.tradingWindowOpen` 可选，调用方不传即不拦截；
   宏观风险只写进 `news` 分析师的提示词提醒（软判断，主动权在 agent）。**不要**再塞一个恒真/恒假的开关
   假装有这条风控；接入日历前请先读 `plan.md` §12.1 #22 的推翻条件。
-- **待外部输入**（`plan.md` §12.2）：OKX demo key 可选；模型凭据（P1.5 的 LLM 判断臂）；
+- **待外部输入**（`plan.md` §12.2）：模型凭据（P1.5 的 LLM 判断臂）；
   A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。真 HTX merged 对账使用已确认的现有 key，不再是凭据阻塞。
 
 ## 文档维护

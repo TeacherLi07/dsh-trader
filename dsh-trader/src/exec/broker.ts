@@ -6,7 +6,7 @@
  */
 
 /** 生产执行只允许 HTX；paper 仅用于回放/本地撮合。OKX 不再是生产 Broker。 */
-export type Venue = 'paper' | 'htx' | 'okx'
+export type Venue = 'paper' | 'htx'
 
 export type OrderSide = 'buy' | 'sell'
 export type OrderType = 'market' | 'limit'

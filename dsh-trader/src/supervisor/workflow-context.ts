@@ -127,6 +127,19 @@ export class WorkflowContextStore {
     return toRecord(row)
   }
 
+  /** 单次消费：只有仍 active 且未过期的 token 能从 active 原子推进为 consumed。 */
+  consume(token: string, now: number): boolean {
+    const tokenHash = `sha256:${sha256Hex(token)}`
+    const result = this.#statements
+      .get(
+        `UPDATE workflow_contexts
+         SET state = 'consumed'
+         WHERE token_hash = ? AND state = 'active' AND expires_at > ?`,
+      )
+      .run(tokenHash, now)
+    return Number(result.changes) === 1
+  }
+
   expire(now: number): number {
     const result = this.#statements
       .get("UPDATE workflow_contexts SET state = 'expired' WHERE state = 'active' AND expires_at <= ?")

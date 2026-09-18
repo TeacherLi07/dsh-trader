@@ -365,7 +365,7 @@ describe('ExecRuntime 组合根', () => {
     }
   })
 
-  it('fake HTX 非空启动链：先恢复 filled 在途意图，再对账并冻结未知远端持仓', async () => {
+  it('fake HTX 非空启动链：无 exchangeOrderId 的在途意图保持 unknown，并冻结相关标的', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     const journal = new DecisionJournal(db)
@@ -408,9 +408,10 @@ describe('ExecRuntime 组合根', () => {
       )
       try {
         expect(db.prepare('SELECT state, exchange_order_id FROM order_intents WHERE client_order_id = ?').get('htx-restart-client')).toEqual({
-          state: 'filled',
-          exchange_order_id: 'exchange-order-1',
+          state: 'unknown',
+          exchange_order_id: null,
         })
+        expect(runtime.frozenSymbols().has(SYMBOL)).toBe(true)
         expect(runtime.frozenSymbols().has('OTHER/USDT:USDT')).toBe(true)
         const startupKinds = db.prepare(
           "SELECT kind FROM audit_events WHERE kind IN ('crash_recovery', 'reconcile_report') ORDER BY seq",

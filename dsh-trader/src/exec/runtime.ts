@@ -102,7 +102,7 @@ const RISK_OUTCOME_SQL = [
  * 口径是「已结算交易级净收益」：realized_net_pct 已包含结算器记录的手续费与
  * 滑点，因此只用 entry_price × 首笔成交数量把百分比换成报价币金额，不能再扣一遍
  * fees_quote。drawdown 是累计已实现收益相对历史峰值的最大回撤；未结算仓位的浮盈亏
- * 不会被伪造进来。没有已结算样本、成交数量或价格缺失时直接抛错，让 CcxtBroker
+ * 不会被伪造进来。没有已结算样本时从经过审计的空账本基线启动；异常数据让 HtxBroker
  * 的 getAccount() fail-closed，而不是用 0 冒充「没有亏损」。
  */
 export function createRiskStateProvider(
@@ -258,7 +258,7 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
   }
   if (config.mode !== 'paper') {
     if (!LIVE_VENUES.includes(config.venue as Exclude<Venue, 'paper'>)) {
-      throw new Error('实盘 venue 非法：' + String(config.venue) + '（只允许 htx | okx）')
+      throw new Error('实盘 venue 非法：' + String(config.venue) + '（生产只允许 htx）')
     }
     if (typeof config.accountType !== 'string' || config.accountType.trim() === '') {
       throw new Error('实盘 accountType 必须显式提供')
