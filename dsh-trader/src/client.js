@@ -1,5 +1,5 @@
 /*
- * dsh-trader 的浏览器半：S0 挂载探针 + S2 只读状态面。
+ * dsh-trader 的浏览器半：S0 挂载探针 + S1/S2/S3 只读状态面。
  *
  * 只用同源 GET 读取 `/api/trade/state`；浏览器沿用 DSH connection 的认证 cookie。
  * 不提供 POST、撤单、模式切换或其它控制路径。这个文件保持为 DSH client-loader
@@ -134,7 +134,7 @@ window.__ModuleLoader__.load({
 			return React.createElement(
 				'main',
 				{
-					'aria-label': 'Trade Console S0',
+					'aria-label': 'Trade Console',
 					style: {
 						boxSizing: 'border-box',
 						maxWidth: 860,
@@ -225,7 +225,7 @@ window.__ModuleLoader__.load({
 							),
 						),
 					),
-					React.createElement('p', { style: { ...caption, margin: 0 } }, 'S2 intentionally adds no LLM call, no trade tool, no control action.'),
+						React.createElement('p', { style: { ...caption, margin: 0 } }, 'S1–S3 intentionally add no LLM call, no trade tool, no control action.'),
 				),
 			)
 		}
