@@ -13,18 +13,18 @@
 
 | 位置 | 内容 |
 |---|---|
-| `plan.md` | **可执行计划**（红线、DSL、DDL、验收判据、WBS、决策记录）——改行为前先读对应章节 |
+| `plan.md` | **当前可执行计划**（边界、判断链、DDL 合同、重构范围、验收）——改行为前先读对应章节 |
 | `docs/decision.md` | 决策与依据：为什么这样做、被否决的选项、历史证据 |
 | `docs/*.md` | 各阶段验收的**实测证据**（每份都配同名 `.json` 原始输出） |
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0 ✅（`tag: phase-p0`）、P1 ✅（`tag: phase-p1`）、P1.5 闸门 ✅、P2 ✅ 代码落地与安全收口（T2.1–T2.9；Docker 单进程重启 + 启动恢复为故障模型；旧 watchdog 证据仅保留归档）。
-**下一步**：P3 小额实盘前安全收口 —— HTX key/只读预检/最小额独立冒烟均已完成，`live_auto` 也曾获授权但当前已回退 `paper`。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账，并补齐 §12.1 #25 的结构化 `live_confirm` 逐单确认通道（未接入前 runtime fail-closed 拒绝该模式）。
+**当前阶段**：P0–P2 与 T3.2–T3.5 的执行安全基础已完成；当前模式为 `paper`。
+**下一步**：R1 存储根与 R2 context/请求渲染已完成，按 [plan.md](plan.md) R3 实现并接通 single/critique 与 eligibility，再做 R4 即时动作、W2/W3、结算/成本和 R5 真实模型对照；分别通过工程与经济验收后再评估 R6 小额 `live_auto`。R2 用固定 PIT 样本捕获渲染请求，没有真实模型调用；当前生产判断仍是旧多分析师链。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账。
 
-**T3.2–T3.4 安全重构（已实现）**：生产执行收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；schema v4 持久化 `bar_processing`、W1 pending/cursor 与一次性 workflow context token；行情回补、特征/DSL/PM fail-closed、历史迁移及非空验收均已接线。真实 HTX merged 对账与 `live_confirm` 仍按上段保留为外部/能力边界。
+**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与非空验收均已接线。R1 已移除旧 context/token 表；R2 建立双时间行情归档与 DecisionContext 渲染器，但尚未接入生产模型调用。旧多 agent 判断链按 R3 重写，不保留兼容层。
 
-**七条红线**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
+**永久硬边界**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
 
 ## 环境与命令
@@ -78,7 +78,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
   （它会连 CHECK 违规一起吞掉）。
 - **失败要 fail-closed**：DSL 里未知路径 / 未注册 alias 必须让求值返回 `ok:false` → 计 UNCOVERED，
   **绝不静默返回 false 或 0**。"没数据"与"值为 0"必须能区分（缺数据返回 `null`）。
-- **schema 改动必须两处同步**：`src/db/schema.ts` 与 `plan.md` §4.1 的 DDL，并在
+- **schema 改动必须两处同步**：`src/db/schema.ts` 与 `plan.md` §4.1 的 DDL 合同，并在
   `tests/db-schema.test.ts` 的表清单里登记。
 - 注释里的反引号：`src/db/schema.ts` 的 DDL 在模板字符串里，**注释中不要用反引号**（会截断字符串）。
 
@@ -146,28 +146,27 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | 每轮运营指标 | `src/supervisor/metrics.ts` |
 | 加验收脚本 | `scripts/*.mjs`，并留 `docs/*.md` + 同名 `.json` 证据 |
 
-## 诚实清单：已知未实现
+## 诚实清单：当前代码与新计划的差异
 
 写代码时**不要**注册"调用即抛错"的占位工具或空实现来让表格好看；缺口要如实报告。
 
-- **6 个工具未实现**（`missingTools()` 会打印）：`trade_derivatives`、`trade_news`、`trade_onchain`、
-  `trade_stress_test`、`trade_review`、`trade_playbook_update`。`trade_workflow_run` 已由 T2.9
-  固化接线（子 agent 使用结构化输出与零工具面）。
-  （`trade_regime` 已由 T2.5 实现。）
+- 旧 `KNOWN_TOOL_NAMES` 仍会报告 6 个未实现工具：`trade_derivatives`、`trade_news`、`trade_onchain`、
+  `trade_stress_test`、`trade_review`、`trade_playbook_update`。它们不再是目标能力；R3/R4 应删除旧目标
+  工具箱与占位声明，而不是补空实现。
 - **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
-  `liq.notional`、`funding.rate`、`basis.bps`，全部移入 `V0_ALLOWED_PATHS`（`plan.md` §12.1 #16）。
-- **P3–P4 未做**：周级复盘/playbook/M3 版本化。`live_auto` 已按用户授权 arm，无人值守回路
-  **已跑通到决策**（W1→desk 回合→工具调用→`no_trade`/计划卡）；首单取决于模型是否判出机会。
-- **P2 的剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（生产组合根使用 `HtxBroker`，单测覆盖；需用已有 key 做非空实测）；结构化 `live_confirm` 逐单确认通道仍未接入。
+  `liq.notional`、`funding.rate`、`basis.bps`，全部已进入 `V0_ALLOWED_PATHS`。
+- 旧持久 desk、多分析师 workflow、C1–C5 assembler 和 JudgmentPack 仍在当前代码中；R1 已替换
+  旧 context/token 存储，剩余判断链按 `plan.md` R3–R5 收敛，不保留兼容层。
+- 结算 scheduler 已在生产运行，reflector 尚未接入；lesson 默认关闭，是否启用按 `plan.md` §7/§10 验收。
+- **P3 未做**：当前仍是 `paper`；`live_confirm` 已从目标计划删除，P3 直接在 R5 达标后以小额、硬限额、
+  显式 arm 的 `live_auto` 进行。
+- **剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（生产组合根使用 `HtxBroker`，
+  单测覆盖；需用已有 key 做非空实测）。
   P2 ①②④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`）；旧 watchdog 结果仅作历史归档，当前不启动外部进程。
-- **宏观事件窗口不是硬闸（暂不启用）**：`GatePolicy.tradingWindowOpen` 可选，调用方不传即不拦截；
-  宏观风险只写进 `news` 分析师的提示词提醒（软判断，主动权在 agent）。**不要**再塞一个恒真/恒假的开关
-  假装有这条风控；接入日历前请先读 `plan.md` §12.1 #22 的推翻条件。
-- **待外部输入**（`plan.md` §12.2）：模型凭据（P1.5 的 LLM 判断臂）；
-  A/B 触发密度（92 天仅 16 次触发，需 `--preset high-freq`）。真 HTX merged 对账使用已确认的现有 key，不再是凭据阻塞。
+- 宏观日历、新闻、社媒、链上供应商与策略自进化均不在当前计划；不要保留名义开关或未接线角色。
 
 ## 文档维护
 
-`plan.md` 是**活文档**：任务完成后在该行标 ✅，决策变化写进 §12（含推翻条件），
+`plan.md` 是**活文档**：任务完成后更新 R1–R6；决策变化与依据写进 `docs/decision.md`，
 新踩的坑写进本文件的坑表。**不要**在代码注释、`README.md`、本文件三处重复同一段解释 ——
 选一处（通常是 `plan.md` 或 `docs/decision.md`），其余用链接指过去。

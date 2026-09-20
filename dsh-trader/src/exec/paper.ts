@@ -158,6 +158,8 @@ export class PaperBroker implements Broker {
     return {
       venue: this.venue,
       equityQuote: equity,
+      // paper 撮合没有逐仓/全仓保证金模型，不能把现金余额冒充交易所可用保证金。
+      freeMarginQuote: null,
       totalExposureUsd: this.#exposure(),
       openOrders: this.#openOrders().length,
       leverage: equity > 0 ? this.#exposure() / equity : Number.POSITIVE_INFINITY,
@@ -171,11 +173,13 @@ export class PaperBroker implements Broker {
 
   async getPositions(): Promise<readonly PositionSnapshot[]> {
     const out: PositionSnapshot[] = []
+    const observedAt = this.options.clock.now()
     for (const [symbol, position] of this.#positions) {
       if (position.qty === 0) continue
       const price = this.#price(symbol)
       out.push({
         symbol,
+        observedAt,
         qty: position.qty,
         avgPrice: position.avgPrice,
         unrealizedPnlUsd: price === undefined ? 0 : (price - position.avgPrice) * position.qty,
@@ -188,9 +192,10 @@ export class PaperBroker implements Broker {
   }
 
   async getOpenOrders(symbol?: string): Promise<readonly OrderAck[]> {
+    const observedAt = this.options.clock.now()
     return this.#openOrders()
       .filter((order) => symbol === undefined || order.symbol === symbol)
-      .map((order) => this.#ack(order))
+      .map((order) => ({ ...this.#ack(order), observedAt }))
   }
 
   async findOrderByExchangeOrderId(exchangeOrderId: string): Promise<OrderAck | undefined> {

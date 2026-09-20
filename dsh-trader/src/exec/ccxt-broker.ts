@@ -407,6 +407,17 @@ function quoteAmount(balance: CcxtBalanceLike, quoteCurrency: string): number | 
   return free !== undefined && used !== undefined ? free + used : undefined
 }
 
+function quoteFreeAmount(balance: CcxtBalanceLike, quoteCurrency: string): number | undefined {
+  const root = balance as Readonly<Record<string, unknown>>
+  const free = root['free']
+  if (isRecord(free)) {
+    const value = asNumber(free[quoteCurrency])
+    if (value !== undefined) return value
+  }
+  const currency = root[quoteCurrency]
+  return isRecord(currency) ? asNumber(currency['free']) : undefined
+}
+
 function lookupMiss(error: unknown): boolean {
   if (error instanceof Error && (NOT_FOUND_RE.test(error.name) || NOT_SUPPORTED_RE.test(error.name))) return true
   const message = error instanceof Error ? error.message : String(error)
@@ -487,6 +498,7 @@ export class HtxBroker implements Broker {
     return {
       venue: this.venue,
       equityQuote: equity,
+      freeMarginQuote: quoteFreeAmount(balance, this.#quoteCurrency) ?? null,
       totalExposureUsd,
       openOrders: openOrders.length,
       leverage: equity > 0 ? totalExposureUsd / equity : Number.POSITIVE_INFINITY,
@@ -522,6 +534,7 @@ export class HtxBroker implements Broker {
       this.#call(() => this.#exchange.fetchPositions()),
       this.#fetchOpenOrdersMerged(),
     ])
+    const observedAt = this.#clock.now()
     const stops = new Map<string, number>()
     for (const order of openOrders) {
       if (!isReduceOnly(order)) continue
@@ -537,6 +550,7 @@ export class HtxBroker implements Broker {
       const stop = stops.get(reading.snapshot.symbol)
       out.push({
         ...reading.snapshot,
+        observedAt,
         ...(stop === undefined ? {} : { protectedStopPrice: stop }),
       })
     }
@@ -546,18 +560,19 @@ export class HtxBroker implements Broker {
   async getOpenOrders(symbol?: string): Promise<readonly OrderAck[]> {
     await this.#ensureMarketsLoaded()
     const orders = await this.#fetchOpenOrdersMerged(symbol)
+    const observedAt = this.#clock.now()
     const acks: OrderAck[] = []
     for (const order of orders) {
       if (symbol !== undefined && order['symbol'] !== symbol) continue
       const ack = this.#orderAck(order, undefined, 'acked')
-      if (ack !== undefined) acks.push(ack)
+      if (ack !== undefined) acks.push({ ...ack, observedAt })
       else {
         const exchangeOrderId = exchangeOrderIdFrom(order)
         // HTX 算法单常不回显 client id；exchangeOrderId 是对账主键，使用它作为
         // 仅用于展示/孤儿检测的占位 client id，绝不拿它去做本地意图匹配。
         if (exchangeOrderId !== undefined) {
           const synthetic = this.#orderAck(order, { clientOrderId: exchangeOrderId }, 'acked')
-          if (synthetic !== undefined) acks.push(synthetic)
+          if (synthetic !== undefined) acks.push({ ...synthetic, observedAt })
         }
       }
     }

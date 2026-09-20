@@ -114,7 +114,7 @@ function harness(cardOver: Parameters<typeof makeCard>[0] = {}, now = START + HO
   const bars = new BarArchive(db)
   bars.upsertClosed(normalizeCandles([raw(START, 100)], SYMBOL, TF, now).candles, {
     source: 'synthetic',
-    fetchedAt: START,
+    fetchedAt: now,
   })
   const plans = new PlanStore(db)
   plans.save(
@@ -280,7 +280,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     const featureEngine = new FeatureEngine()
     const snapshots = new Map<string, ReturnType<FeatureEngine['onClosedCandle']>>()
     const candles = normalizeCandles([raw(START, 100), raw(START + HOUR, 90)], SYMBOL, TF, START + 3 * HOUR).candles
-    new BarArchive(h.db).upsertClosed(candles, { source: 'synthetic', fetchedAt: START })
+    new BarArchive(h.db).upsertClosed(candles, { source: 'synthetic', fetchedAt: START + 3 * HOUR })
     for (const candle of candles) {
       snapshots.set(
         `${candle.symbol}|${candle.timeframe}|${candle.openTime}`,
@@ -375,7 +375,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     const replayBars = new BarArchive(replayDb)
     replayBars.upsertClosed(normalizeCandles([raw(START, 100)], SYMBOL, TF, START + HOUR).candles, {
       source: 'synthetic',
-      fetchedAt: START,
+      fetchedAt: START + HOUR,
     })
     const replayPlans = new PlanStore(replayDb)
     replayPlans.save(

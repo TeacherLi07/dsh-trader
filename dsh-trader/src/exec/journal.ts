@@ -136,6 +136,22 @@ export interface DecisionSummary {
   readonly triggerSource: string | null
 }
 
+export interface DecisionHistoryEntry extends DecisionSummary {
+  readonly executed: boolean
+  readonly reflectionDueAt: number | null
+  readonly settlementState: 'settled' | 'pending' | 'overdue' | 'not_scheduled'
+  readonly outcome: {
+    readonly settledAt: number
+    readonly realizedGrossPct: number
+    readonly realizedNetPct: number
+    readonly benchmarkPct: number
+    readonly alphaPct: number
+    readonly feesQuote: number
+    readonly stopHit: boolean
+    readonly evidenceRefs: readonly string[]
+  } | null
+}
+
 /** 一次模型调用的实际开销，回填到产生它的决策上（plan §8）。 */
 export interface DecisionCost {
   readonly tokensIn: number
@@ -180,6 +196,37 @@ interface DecisionRow {
   cost_known: number | null
   duration_ms: number | null
   trigger_source: string | null
+}
+
+interface DecisionHistoryRow {
+  decision_id: string
+  run_id: string | null
+  symbol: string
+  decided_at: number
+  action: string
+  size_qty: number | null
+  stop_price: number | null
+  confidence: number | null
+  rationale: string | null
+  context_hash: string
+  executed: number
+  reflection_due_at: number | null
+  tokens_in: number | null
+  tokens_out: number | null
+  tokens_cached: number | null
+  cost_usd: number | null
+  cost_known: number | null
+  duration_ms: number | null
+  trigger_source: string | null
+  outcome_id: string | null
+  settled_at: number | null
+  realized_gross_pct: number | null
+  realized_net_pct: number | null
+  benchmark_pct: number | null
+  alpha_pct: number | null
+  fees_quote: number | null
+  stop_hit: number | null
+  evidence_refs_json: string | null
 }
 
 interface LessonRow {
@@ -1045,6 +1092,76 @@ export class DecisionJournal {
       durationMs: row.duration_ms,
       triggerSource: row.trigger_source,
     }))
+  }
+
+  /**
+   * 给冻结上下文用的 PIT 历史：决策和结算都必须不晚于 asOf。
+   * JOIN 条件把未来才生成的 outcome 留在 pending/overdue，而不是回填到旧 context。
+   */
+  recentDecisionHistory(options: {
+    readonly asOf: number
+    readonly symbol?: string
+    readonly limit?: number
+  }): readonly DecisionHistoryEntry[] {
+    const { asOf } = options
+    const limit = options.limit ?? 20
+    if (!Number.isSafeInteger(asOf) || asOf < 0) throw new Error('history.asOf 必须是非负安全整数毫秒时间戳')
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('history.limit 必须在 1..100')
+    const fields = `SELECT d.decision_id, d.run_id, d.symbol, d.decided_at, d.action, d.size_qty,
+        d.stop_price, d.confidence, d.rationale, d.context_hash, d.executed, d.reflection_due_at,
+        d.tokens_in, d.tokens_out, d.tokens_cached, d.cost_usd, d.cost_known, d.duration_ms,
+        d.trigger_source, o.outcome_id, o.settled_at, o.realized_gross_pct, o.realized_net_pct,
+        o.benchmark_pct, o.alpha_pct, o.fees_quote, o.stop_hit, o.evidence_refs_json
+      FROM decisions d
+      LEFT JOIN outcomes o ON o.decision_id = d.decision_id AND o.settled_at <= ?`
+    const rows = (options.symbol === undefined
+      ? this.#statements.get(`${fields} WHERE d.decided_at <= ? ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT ?`).all(asOf, asOf, limit)
+      : this.#statements.get(`${fields} WHERE d.symbol = ? AND d.decided_at <= ? ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT ?`).all(asOf, options.symbol, asOf, limit)) as DecisionHistoryRow[]
+    return rows.map((row) => {
+      const settled = row.outcome_id !== null
+      if (settled && row.evidence_refs_json === null) throw new Error(`已结算 outcome 缺少 evidence_refs：${row.outcome_id}`)
+      const outcome = settled
+        ? {
+            settledAt: row.settled_at!,
+            realizedGrossPct: row.realized_gross_pct!,
+            realizedNetPct: row.realized_net_pct!,
+            benchmarkPct: row.benchmark_pct!,
+            alphaPct: row.alpha_pct!,
+            feesQuote: row.fees_quote!,
+            stopHit: row.stop_hit === 1,
+            evidenceRefs: parseJsonArray(row.evidence_refs_json!),
+          }
+        : null
+      const settlementState = settled
+        ? 'settled'
+        : row.reflection_due_at === null
+          ? 'not_scheduled'
+          : row.reflection_due_at > asOf ? 'pending' : 'overdue'
+      return {
+        decisionId: row.decision_id,
+        runId: row.run_id,
+        symbol: row.symbol,
+        decidedAt: row.decided_at,
+        action: row.action,
+        sizeQty: row.size_qty,
+        stopPrice: row.stop_price,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        contextHash: row.context_hash,
+        outcomeId: row.outcome_id,
+        tokensIn: row.tokens_in,
+        tokensOut: row.tokens_out,
+        tokensCached: row.tokens_cached,
+        costUsd: row.cost_usd,
+        costKnown: row.cost_known === null ? null : row.cost_known === 1,
+        durationMs: row.duration_ms,
+        triggerSource: row.trigger_source,
+        executed: row.executed === 1,
+        reflectionDueAt: row.reflection_due_at,
+        settlementState,
+        outcome,
+      }
+    })
   }
 
   /**

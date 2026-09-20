@@ -226,6 +226,7 @@ describe('CcxtBroker', () => {
     expect(positions).toEqual([
       {
         symbol: SYMBOL,
+        observedAt: NOW,
         qty: 2,
         avgPrice: 100,
         unrealizedPnlUsd: 20,
@@ -237,6 +238,16 @@ describe('CcxtBroker', () => {
     expect(open).toHaveLength(3)
     expect(open.map((item) => item.clientOrderId)).toEqual(['protect-1', 'client-2', 'ghost'])
     expect(exchange.loads).toBe(1)
+  })
+
+  it('保留交易所真实可用保证金，缺字段不把 equity 猜成 free margin', async () => {
+    const exchange = new FakeExchange()
+    exchange.balance = { total: { USDT: '10000' }, free: { USDT: '7350.5' } }
+    const broker = makeBroker(exchange)
+    expect((await broker.getAccount()).freeMarginQuote).toBe(7350.5)
+
+    exchange.balance = { total: { USDT: '10000' } }
+    expect((await broker.getAccount()).freeMarginQuote).toBeNull()
   })
 
   it('fails closed with infinite spread when bid or ask is missing', async () => {

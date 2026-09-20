@@ -118,6 +118,18 @@ export class PlanStore {
     return row === undefined ? undefined : toCard(row)
   }
 
+  /**
+   * 还原给定时点可用的计划卡。status 是当前投影，会在后来被 expire/supersede 改写；PIT 判断按
+   * 创建时刻与有效期限筛选不可变卡片正文，不能让今天的 status 污染历史 context。
+   */
+  activeAt(symbol: string, asOf: number): PlanCard | undefined {
+    if (!Number.isSafeInteger(asOf) || asOf < 0) throw new Error('plan.asOf 必须是非负安全整数毫秒时间戳')
+    const row = this.#statements.get(`SELECT * FROM plan_cards
+      WHERE symbol = ? AND created_at <= ? AND window_ends_at >= ?
+      ORDER BY created_at DESC, version DESC LIMIT 1`).get(symbol, asOf, asOf) as PlanRow | undefined
+    return row === undefined ? undefined : toCard(row)
+  }
+
   get(planId: string): PlanCard | undefined {
     const row = this.#byId(planId)
     return row === undefined ? undefined : toCard(row)

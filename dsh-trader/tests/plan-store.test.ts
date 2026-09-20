@@ -55,6 +55,15 @@ describe('PlanStore', () => {
     expect(store.count()).toBe(2)
   })
 
+  it('按历史 asOf 读取当时的卡，不让后来的 supersede 状态污染 PIT context', () => {
+    store.save(makeCard({ planId: 'pc-pit-old', createdAt: 100, windowEndsAt: 1_000 }), 100)
+    store.save(makeCard({ planId: 'pc-pit-new', createdAt: 200, windowEndsAt: 1_000 }), 200)
+
+    expect(store.active('BTC/USDT')?.planId).toBe('pc-pit-new')
+    expect(store.activeAt('BTC/USDT', 150)?.planId).toBe('pc-pit-old')
+    expect(store.activeAt('BTC/USDT', 1_001)).toBeUndefined()
+  })
+
   it('refuses to rewrite an existing planId — a correction must be a new id', () => {
     store.save(makeCard({ planId: 'pc-a' }), NOW)
     const changed = makeCard({ planId: 'pc-a', confidence: 0.95 })

@@ -17,6 +17,8 @@ export type OrderState = 'created' | 'acked' | 'rejected' | 'unknown' | 'cancele
 export interface AccountSnapshot {
   readonly venue: Venue
   readonly equityQuote: number
+  /** 交易所可用保证金/余额；paper 不模拟保证金时必须为 null/undefined。 */
+  readonly freeMarginQuote?: number | null
   readonly totalExposureUsd: number
   readonly openOrders: number
   readonly leverage: number
@@ -29,6 +31,7 @@ export interface AccountSnapshot {
 
 export interface PositionSnapshot {
   readonly symbol: string
+  readonly observedAt?: number
   readonly qty: number
   readonly avgPrice: number
   readonly unrealizedPnlUsd: number
@@ -64,6 +67,8 @@ export interface OrderAck {
   readonly exchangeOrderId?: string
   readonly state: OrderState
   readonly ts: number
+  /** 查询交易所当前订单列表的时刻；ts 仍保留订单/ack 自身时刻。 */
+  readonly observedAt?: number
   /**
    * 实际成交均价（成交后由 broker 回填）。
    * 结算必须用它，而不是"信号 bar 的收盘价" —— 否则滑点从未进入账本（plan §5.3）。

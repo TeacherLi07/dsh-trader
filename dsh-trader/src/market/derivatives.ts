@@ -122,6 +122,10 @@ export interface DerivativesObservation {
   readonly liquidations?: readonly unknown[]
   readonly spotPrice?: unknown
   readonly swapPrice?: unknown
+  readonly openInterestUnit?: 'quote' | 'contracts' | 'unknown'
+  readonly fundingIntervalMs?: number | null
+  readonly nextFundingTime?: number | null
+  readonly errors?: Readonly<Record<string, string>>
 }
 
 export interface DerivativesValues {
@@ -299,10 +303,10 @@ function pickField(raw: unknown, keys: readonly string[]): unknown {
   return undefined
 }
 
-function optionalCall<T>(call: (() => Promise<T>) | undefined): Promise<T | undefined> {
-  if (call === undefined) return Promise.resolve(undefined)
-  // 衍生品是可选特征；单个端点不可用时保留其它字段，不能用估算值填洞。
-  return call().catch(() => undefined)
+function optionalCall<T>(name: string, errors: Record<string, string>, call: (() => Promise<T>) | undefined): Promise<T | undefined> {
+  if (call === undefined) { errors[name] = 'unsupported'; return Promise.resolve(undefined) }
+  // 缺失不能抹掉原始失败；这里只调用公开端点，不接收私有凭据。
+  return call().catch(error => { errors[name] = String(error); return undefined })
 }
 
 export interface CcxtDerivativesSource {
@@ -321,14 +325,17 @@ export function createCcxtDerivativesSource(exchange: CcxtExchangeLike): CcxtDer
     timestamp: number,
     spotSymbol?: string,
   ): Promise<DerivativesObservation> => {
+    const errors: Record<string, string> = {}
     const [fundingRaw, openInterestRaw, liquidationsRaw, swapTickerRaw, spotTickerRaw] = await Promise.all([
-      optionalCall(exchange.fetchFundingRate === undefined ? undefined : () => exchange.fetchFundingRate!(symbol)),
-      optionalCall(exchange.fetchOpenInterest === undefined ? undefined : () => exchange.fetchOpenInterest!(symbol)),
+      optionalCall('funding', errors, exchange.fetchFundingRate === undefined ? undefined : () => exchange.fetchFundingRate!(symbol)),
+      optionalCall('openInterest', errors, exchange.fetchOpenInterest === undefined ? undefined : () => exchange.fetchOpenInterest!(symbol)),
       optionalCall(
+        'liquidations', errors,
         exchange.fetchLiquidations === undefined ? undefined : () => exchange.fetchLiquidations!(symbol),
       ),
-      optionalCall(exchange.fetchTicker === undefined ? undefined : () => exchange.fetchTicker!(symbol)),
+      optionalCall('swapTicker', errors, exchange.fetchTicker === undefined ? undefined : () => exchange.fetchTicker!(symbol)),
       optionalCall(
+        'spotTicker', errors,
         spotSymbol === undefined || exchange.fetchTicker === undefined
           ? undefined
           : () => exchange.fetchTicker!(spotSymbol),
@@ -338,6 +345,10 @@ export function createCcxtDerivativesSource(exchange: CcxtExchangeLike): CcxtDer
     const liquidationRows = Array.isArray(liquidationsRaw) ? liquidationsRaw : undefined
     const swapPrice = pickField(swapTickerRaw, ['last', 'close'])
     const spotPrice = pickField(spotTickerRaw, ['last', 'close'])
+    const funding = asRecord(fundingRaw)
+    const interval = funding?.interval
+    const intervalMs = typeof interval === 'string' && /^\d+h$/.test(interval) ? Number(interval.slice(0, -1)) * 3_600_000 : null
+    const nextFunding = finiteNumber(funding?.nextFundingTimestamp)
     return {
       timestamp,
       // HTX 实测字段是 snake_case；同时接受 ccxt 规范字段，避免换版本后静默丢值。
@@ -345,6 +356,10 @@ export function createCcxtDerivativesSource(exchange: CcxtExchangeLike): CcxtDer
       openInterest: normalizeOpenInterest(
         pickField(openInterestRaw, ['openInterestValue', 'openInterest', 'open_interest']),
       ),
+      openInterestUnit: finiteNumber(asRecord(openInterestRaw)?.openInterestValue) === null ? 'unknown' : 'quote',
+      fundingIntervalMs: intervalMs,
+      nextFundingTime: nextFunding !== null && nextFunding >= timestamp ? nextFunding : null,
+      errors,
       liquidations: liquidationRows,
       spotPrice: finiteNumber(spotPrice),
       swapPrice: finiteNumber(swapPrice),

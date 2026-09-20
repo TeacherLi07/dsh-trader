@@ -38,7 +38,7 @@ function harness(seed = 1): Harness {
   const queue = new TriggerQueue(db)
 
   const candles = normalizeCandles(randomSeries(START, BARS, seed), SYMBOL, TF, START + BARS * HOUR).candles
-  bars.upsertClosed(candles, { source: 'synthetic', fetchedAt: START })
+  bars.upsertClosed(candles, { source: 'synthetic', fetchedAt: START + BARS * HOUR })
 
   const broker = new PaperBroker({
     clock,
@@ -282,7 +282,7 @@ describe('回放审计修复', () => {
     const queue = new TriggerQueue(db)
     bars.upsertClosed(normalizeCandles(rawBars, S, TF, T + 1000 * H).candles, {
       source: 'synthetic',
-      fetchedAt: T,
+      fetchedAt: T + 1000 * H,
     })
     const broker = new PaperBroker({
       clock,

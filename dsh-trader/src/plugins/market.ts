@@ -17,6 +17,7 @@ import { BarArchive } from '../market/archive.js'
 import { createFeatureContext } from '../market/context.js'
 import type { CcxtExchangeLike } from '../market/ccxt-source.js'
 import { FeatureArchive } from '../market/feature-archive.js'
+import { MarketObservationStore } from '../market/observations.js'
 import {
   FEATURE_WARMUP_BARS,
   FeaturePipeline,
@@ -88,7 +89,9 @@ export function apply(ctx: Context, config: MarketConfig): void {
       const database = getDatabase()
       const bars = new BarArchive(database)
       const featureArchive = new FeatureArchive(database)
+      const observations = new MarketObservationStore(database)
       const pipeline = new FeaturePipeline(featureArchive)
+      const clock = systemClock()
 
       runtime = await createMarketRuntime({
         venue: config.venue,
@@ -97,7 +100,8 @@ export function apply(ctx: Context, config: MarketConfig): void {
         pollMs: config.pollMs ?? 60_000,
         recentLimit: config.recentLimit ?? 3,
         archive: bars,
-        clock: systemClock(),
+        observations,
+        clock,
         createExchange: () => new Exchange({ enableRateLimit: true }),
         onClosedCandle: async (candle) => {
           // 衍生品端点是可选能力；每根 bar 取一次同一 closeTime 的 observation，
@@ -108,7 +112,16 @@ export function apply(ctx: Context, config: MarketConfig): void {
             (config.derivativesEnabled === false || runtime === undefined
               ? undefined
               : await runtime.derivatives.fetch(candle.symbol, candle.closeTime, spotSymbol))
-          const snapshot = pipeline.onClosedCandle(candle, derivatives)
+          const processedAt = clock.now()
+          if (derivatives !== undefined && 'timestamp' in derivatives &&
+              typeof derivatives.timestamp === 'number' && Number.isSafeInteger(derivatives.timestamp)) {
+            observations.record({
+              kind: 'derivatives', symbol: candle.symbol, timeframe: '',
+              eventTime: derivatives.timestamp, availableAt: processedAt,
+              source: 'htx.derivatives', value: derivatives,
+            })
+          }
+          const snapshot = pipeline.onClosedCandle(candle, derivatives, processedAt)
           // 行情 → 特征 → 规则 → 触发；rules 插件未启用时静默跳过（不是错误）
           getTriggerRuntime()?.onBar({
             symbol: candle.symbol,

@@ -25,6 +25,7 @@ import {
   type ExecRuntime,
 } from '../exec/runtime.js'
 import type { ExecRuntimeConfig, TradePorts } from '../exec/ports.js'
+import type { DecisionContextConfig } from '../agents/context-config.js'
 
 export const name = 'trade-exec'
 
@@ -67,6 +68,18 @@ export const Config = z.object({
   symbols: z.array(z.string()),
   timeframes: z.array(z.string()),
   benchmark: z.string(),
+  decisionContext: z.object({
+    version: z.string(),
+    barsPerTimeframe: z.number(),
+    statisticsWindow: z.number(),
+    historyLimit: z.number(),
+    historyTextChars: z.number(),
+    maxChars: z.number(),
+    accountMaxAgeMs: z.number(),
+    marketGraceMs: z.number(),
+    derivativesMaxAgeMs: z.number(),
+    specMaxAgeMs: z.number(),
+  }),
   venue: z.union(['htx']).default('htx'),
 })
 
@@ -99,6 +112,7 @@ export interface ExecConfig {
   symbols?: readonly string[]
   timeframes?: readonly string[]
   benchmark?: string
+  decisionContext?: Partial<DecisionContextConfig>
   venue?: 'htx'
 }
 
@@ -198,6 +212,7 @@ function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | un
     symbols: config.symbols,
     timeframes: config.timeframes,
     benchmark: config.benchmark,
+    decisionContext: config.decisionContext,
     venue: (config.venue ?? 'htx') as ExecRuntimeConfig['venue'],
     accountType: config.accountType ?? 'swap',
     positionSide: config.positionSide ?? 'both',

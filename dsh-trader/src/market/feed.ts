@@ -63,7 +63,7 @@ export interface MarketFeedOptions {
   readonly limiter?: TokenBucket
   readonly limiterCost?: number
   readonly sleep?: Sleep
-  readonly onClosedCandle?: (candle: Candle) => void | Promise<void>
+  readonly onClosedCandle?: (candle: Candle, availableAt: number) => void | Promise<void>
   readonly onError?: (error: unknown, info: FeedErrorInfo) => void
 }
 
@@ -192,7 +192,7 @@ export class MarketFeed {
             // 处理队列包含之前回调失败的 bar，因此回调抛错后不会把批内后续 bar 永久吞掉。
             const pending = archive.unprocessedClosedBars(symbol, timeframe, processingBatchLimit)
             for (const candle of pending) {
-              await onClosedCandle(candle)
+              await onClosedCandle(candle, clock.now())
               archive.markProcessed(candle, clock.now())
               emitted += 1
             }

@@ -20,8 +20,8 @@
         venue: htx
         # 高流动性 + 小额合约（实测 1 张名义：ADA≈1.95 USDT、DOGE≈8.0 USDT），
         # 24.9 USDT 在 1× 下可下单；BTC≈76.4/ETH≈24.2 开不了最小张。
-        symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
-        timeframes: [1h]
+        symbols: [ADA/USDT:USDT, DOGE/USDT:USDT, BTC/USDT:USDT] # BTC 作为独立 benchmark 行情源
+        timeframes: [15m, 1h, 4h]
         enabled: true          # 起轮询；--dump-config 不会启动轮询
         pollMs: 60000
         recentLimit: 3
@@ -63,8 +63,19 @@
         maxSpreadBps: 10
         maxOpenOrders: 2
         symbols: [ADA/USDT:USDT, DOGE/USDT:USDT]
-        timeframes: [1h]
+        timeframes: [15m, 1h, 4h]
         benchmark: BTC/USDT:USDT
+        decisionContext:
+          version: context-r2-v1
+          barsPerTimeframe: 64
+          statisticsWindow: 32
+          historyLimit: 12
+          historyTextChars: 1600
+          maxChars: 180000
+          accountMaxAgeMs: 60000
+          marketGraceMs: 120000
+          derivativesMaxAgeMs: 3600000
+          specMaxAgeMs: 86400000
         venue: htx             # 生产执行只支持 HTX；不保留多 venue 兼容分支
         # 组合根：lazy 启动 broker + ports + 启动/周期对账；paper 模式**不触网**
         reconcileEnabled: true

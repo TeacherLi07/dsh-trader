@@ -70,10 +70,10 @@ describe('MarketFeed', () => {
   it('stores and emits only newly closed candles', async () => {
     const clock = new ReplayClock(NOW)
     const source = new FakeSource({ pages: [series(NOW - 3 * HOUR, 3), series(NOW - 3 * HOUR, 4)] })
-    const emitted: number[] = []
+    const emitted: { readonly openTime: number; readonly availableAt: number }[] = []
     const feed = makeFeed(source, clock, {
-      onClosedCandle: (candle) => {
-        emitted.push(candle.openTime)
+      onClosedCandle: (candle, availableAt) => {
+        emitted.push({ openTime: candle.openTime, availableAt })
       },
     })
 
@@ -86,7 +86,12 @@ describe('MarketFeed', () => {
     expect(second.written).toBe(4)
     expect(second.emitted).toBe(1)
 
-    expect(emitted).toEqual([NOW - 3 * HOUR, NOW - 2 * HOUR, NOW - HOUR, NOW])
+    expect(emitted).toEqual([
+      { openTime: NOW - 3 * HOUR, availableAt: NOW },
+      { openTime: NOW - 2 * HOUR, availableAt: NOW },
+      { openTime: NOW - HOUR, availableAt: NOW },
+      { openTime: NOW, availableAt: NOW + HOUR },
+    ])
     expect(archive.count(SYMBOL, TF)).toBe(4)
     expect(feed.attempts(SYMBOL, TF)).toBe(0)
   })

@@ -16,6 +16,8 @@ import {
 import { createCcxtDerivativesSource, type CcxtDerivativesSource } from './derivatives.js'
 import { MarketFeed, type FeedErrorInfo } from './feed.js'
 import { timeframeMs } from './normalize.js'
+import { MarketObservationStore } from './observations.js'
+import { marketSpecification } from './specification.js'
 import { TokenBucket } from './ratelimit.js'
 import type { Candle, MarketDataSource } from './types.js'
 
@@ -25,6 +27,8 @@ export interface MarketRuntimeOptions {
   readonly timeframes: readonly string[]
   readonly pollMs: number
   readonly archive: BarArchive
+  /** 生产传入与 bars 共用的 SQLite 观测归档；测试可省略以隔离行情传输。 */
+  readonly observations?: MarketObservationStore
   readonly clock: Clock
   readonly recentLimit?: number
   /** 依赖注入：返回 exchange-like（生产 = `new ccxt[venue]({ enableRateLimit: true })`）。 */
@@ -34,7 +38,7 @@ export interface MarketRuntimeOptions {
    * 传 `null` 表示不注入（仅用于测试/直连场景）。
    */
   readonly fetchImplementation?: unknown
-  readonly onClosedCandle?: (candle: Candle) => void | Promise<void>
+  readonly onClosedCandle?: (candle: Candle, availableAt: number) => void | Promise<void>
   readonly onError?: (error: unknown, info: FeedErrorInfo) => void
 }
 
@@ -58,7 +62,18 @@ export async function createMarketRuntime(options: MarketRuntimeOptions): Promis
   if (options.fetchImplementation !== null) {
     applyProxyAwareFetch(exchange, options.fetchImplementation ?? globalThis.fetch)
   }
-  const source = createCcxtSource(exchange)
+  const source = createCcxtSource(exchange, () => {
+    if (options.observations === undefined || exchange.markets === undefined) return
+    const availableAt = options.clock.now()
+    for (const symbol of options.symbols) {
+      const market = exchange.markets[symbol]
+      if (market === undefined) continue
+      options.observations.record({
+        kind: 'spec', symbol, timeframe: '', eventTime: availableAt, availableAt,
+        source: `${exchange.id}.loadMarkets`, value: marketSpecification(symbol, market, exchange.precisionMode),
+      })
+    }
+  })
   const derivatives = createCcxtDerivativesSource(exchange)
 
   // 免费 ccxt 的 `rateLimit` 是"两次请求之间的最小毫秒数"，因此桶按 1 token / rateLimitMs 补充，

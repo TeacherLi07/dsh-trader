@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 import type { FeatureSnapshot } from './features.js'
+import { MarketObservationStore } from './observations.js'
 
 interface FeatureRow {
   symbol: string
@@ -33,12 +34,19 @@ function toSnapshot(row: FeatureRow): FeatureSnapshot {
 
 export class FeatureArchive {
   readonly #statements: Statements
+  readonly #observations: MarketObservationStore
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
+    this.#observations = new MarketObservationStore(db)
   }
 
-  upsert(snapshot: FeatureSnapshot): void {
+  upsert(snapshot: FeatureSnapshot, availableAt?: number): void {
+    // 旧投影没有生成时刻；未显式提供时不伪造 PIT 历史，判断入口会如实报告缺失。
+    if (availableAt !== undefined) this.#observations.record({
+      kind: 'feature', symbol: snapshot.symbol, timeframe: snapshot.timeframe,
+      eventTime: snapshot.closeTime, availableAt, source: 'feature-pipeline', value: snapshot,
+    })
     this.#statements.get(
         `INSERT INTO features (symbol, timeframe, open_time, snapshot_json, fingerprint)
          VALUES (@symbol, @timeframe, @openTime, @json, @fingerprint)

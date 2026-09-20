@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
 import type { Candle } from './types.js'
+import { MarketObservationStore } from './observations.js'
 
 export interface UpsertMeta {
   readonly source: string
@@ -17,7 +18,7 @@ export interface UpsertMeta {
 
 export interface UpsertResult {
   readonly written: number
-  /** 因为**未收盘**而被拒绝的 bar 数 —— 只落已收盘 bar，且拒绝要可见。 */
+  /** 未收盘或抓取时尚未发生的 bar 数；PIT 观测的 availableAt 不能早于 closeTime。 */
   readonly rejectedOpen: number
 }
 
@@ -57,12 +58,14 @@ function toCandle(row: BarRow): Candle {
 
 export class BarArchive {
   readonly #statements: Statements
+  readonly #observations: MarketObservationStore
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
+    this.#observations = new MarketObservationStore(db)
   }
 
-  /** 已收盘 bar 写入/更新；未收盘一律拒绝。整个批次一个事务。 */
+  /** 已收盘且抓取时可见的 bar 才能写入；整个批次一个事务。晚到回补保留真实 availableAt。 */
   upsertClosed(candles: readonly Candle[], meta: UpsertMeta): UpsertResult {
     const statement = this.#statements.get(`
       INSERT INTO bars (
@@ -82,7 +85,7 @@ export class BarArchive {
 
     const run = this.db.transaction((rows: readonly Candle[]) => {
       for (const candle of rows) {
-        if (!candle.closed) {
+        if (!candle.closed || candle.closeTime > meta.fetchedAt) {
           rejectedOpen += 1
           continue
         }
@@ -99,6 +102,8 @@ export class BarArchive {
           source: meta.source,
           fetchedAt: meta.fetchedAt,
         })
+        this.#observations.record({ kind: 'bar', symbol: candle.symbol, timeframe: candle.timeframe,
+          eventTime: candle.closeTime, availableAt: meta.fetchedAt, source: meta.source, value: candle })
         written += 1
       }
     })

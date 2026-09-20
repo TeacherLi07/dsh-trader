@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { migrate } from '../src/db/schema.js'
 import { FeatureArchive } from '../src/market/feature-archive.js'
 import { FeatureEngine, type FeatureSnapshot } from '../src/market/features.js'
+import { MarketObservationStore } from '../src/market/observations.js'
 import { normalizeCandles } from '../src/market/normalize.js'
 import { randomSeries } from './helpers/market.js'
 
@@ -39,6 +40,18 @@ describe('FeatureArchive', () => {
     expect(readBack).toEqual(original)
     expect(archive.latest(SYMBOL, TF)).toEqual(original)
     expect(archive.count()).toBe(1)
+  })
+
+  it('只在调用方提供可见时刻时写 feature PIT observation', () => {
+    const item = snapshot()
+    const availableAt = item.closeTime + 500
+    archive.upsert(item, availableAt)
+    const observation = new MarketObservationStore(db)
+
+    expect(observation.recent('feature', SYMBOL, TF, item.closeTime, 10)).toEqual([])
+    const visible = observation.recent<FeatureSnapshot>('feature', SYMBOL, TF, availableAt, 10)
+    expect(visible).toHaveLength(1)
+    expect(visible[0]).toMatchObject({ eventTime: item.closeTime, availableAt, value: item })
   })
 
   it('is idempotent per (symbol, timeframe, open_time)', () => {

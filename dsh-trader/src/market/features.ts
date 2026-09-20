@@ -433,9 +433,9 @@ export class FeaturePipeline {
     private readonly derivativesWindowMs = DEFAULT_DERIVATIVES_WINDOW_MS,
   ) {}
 
-  onClosedCandle(candle: Candle, derivatives?: FeatureDerivatives): FeatureSnapshot {
+  onClosedCandle(candle: Candle, derivatives?: FeatureDerivatives, availableAt?: number): FeatureSnapshot {
     const snapshot = this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, derivatives)
-    this.archive.upsert(snapshot)
+    this.archive.upsert(snapshot, availableAt)
     return snapshot
   }
 

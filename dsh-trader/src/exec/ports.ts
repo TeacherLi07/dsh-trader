@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3'
 import type { Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
 import type { ToolPorts } from '../agents/tools.js'
+import type { DecisionContextConfig } from '../agents/context-config.js'
 import type { Venue } from './broker.js'
 import type { CcxtProExchangeLike } from './ccxt-broker.js'
 
@@ -17,6 +18,7 @@ export interface TradePorts extends ToolPorts {
   readonly symbols: readonly string[]
   readonly timeframes: readonly string[]
   readonly benchmark: string
+  readonly decisionContextConfig?: DecisionContextConfig
 }
 
 /**
@@ -31,6 +33,7 @@ export interface ExecRuntimeConfig {
   readonly symbols: readonly string[]
   readonly timeframes: readonly string[]
   readonly benchmark: string
+  readonly decisionContext?: Partial<DecisionContextConfig>
   readonly venue: Venue
   /** HTX 现货与永续分账户；实盘路径必须显式提供。 */
   readonly accountType: string

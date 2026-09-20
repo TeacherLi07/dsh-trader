@@ -38,6 +38,7 @@ describe('schema (plan §4.1 invariants)', () => {
   it('creates every authoritative table', () => {
     const tables = names('table')
     for (const table of [
+      'market_observations',
       'bars',
       'bar_processing',
       'features',
@@ -70,6 +71,20 @@ describe('schema (plan §4.1 invariants)', () => {
   it('is idempotent and records the schema version', () => {
     expect(() => migrate(db)).not.toThrow()
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+  })
+
+  it('把 v5 库升级到 v6 时补齐双时间 observation 表与 append-only 触发器', () => {
+    db.exec(`DROP TRIGGER market_observations_no_update;
+      DROP TRIGGER market_observations_no_delete;
+      DROP TABLE market_observations;
+      PRAGMA user_version = 5;`)
+
+    migrate(db)
+
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+    expect(names('table')).toContain('market_observations')
+    expect(names('trigger')).toContain('market_observations_no_update')
+    expect(names('trigger')).toContain('market_observations_no_delete')
   })
 
   it('给已有库补 decisions.timeframe（增量迁移），且可重复执行', () => {

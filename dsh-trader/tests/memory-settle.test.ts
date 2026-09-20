@@ -52,7 +52,7 @@ function seedBars(
     }),
   )
   const normalized = normalizeCandles(raws, symbol, TF, T0 + 30 * 24 * HOUR)
-  const written = archive.upsertClosed(normalized.candles, { source: 'fake', fetchedAt: T0 })
+  const written = archive.upsertClosed(normalized.candles, { source: 'fake', fetchedAt: T0 + 30 * 24 * HOUR })
   expect(written.written).toBe(bars.length)
 }
 

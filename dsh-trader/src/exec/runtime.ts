@@ -30,6 +30,7 @@ import type { ExecRuntimeConfig, ExecRuntimeDeps, TradePorts } from './ports.js'
 import { CrashRecovery, type ClientOrderLookup } from './recovery.js'
 import { SettlementScheduler } from '../memory/settle.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
+import { decisionContextConfig } from '../agents/context-config.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx']
@@ -437,6 +438,7 @@ export async function createExecRuntime(
     symbols: Object.freeze([...config.symbols]),
     timeframes: Object.freeze([...config.timeframes]),
     benchmark: config.benchmark,
+    decisionContextConfig: decisionContextConfig(config.decisionContext),
     ...(config.reflectionHorizonMs === undefined ? {} : { reflectionHorizonMs: config.reflectionHorizonMs }),
     ...(config.contextHash === undefined ? {} : { contextHash: config.contextHash }),
     ...(config.pm === undefined ? {} : { pm: config.pm }),

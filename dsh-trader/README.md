@@ -6,9 +6,11 @@
 - **决策与依据（为什么这样做、证据、被否决的选项）** → [`../docs/decision.md`](../docs/decision.md)
 
 > 本项目按 `non-human in the loop`（无人确认）+ `audit-first`（全量可审计）设计。**默认模式是 `paper`**；
-> 切到实盘前请先读完 plan.md §6（权限与安全）与 §10（验收）。
+> 切到实盘前请先读完 plan.md §1（硬边界）、§6（判断资格）、§8（模式）与 §10（验收）。
 
 ## 状态
+
+历史阶段的完成记录不代表新判断链已完成；当前实现缺口与目标以 [plan.md §0](../plan.md#0-目标与当前状态) 为准。
 
 | 阶段 | 内容 | 状态 |
 |---|---|---|
@@ -39,7 +41,10 @@
 | T2.7 | 结构化证据账本 + 有限 Bull/Bear + 单一 `RiskCritic` | ✅ 数字/路径/contextHash 由代码校验；无效工件不进下一阶段；三风险人格已移除 |
 | T2.8 | 真实 agent 运行时权限收窄 | ✅ create/resume 共用 scoped restrict；judge 无 `trade_execute_order`，只读角色无副作用工具 |
 | T2.9 | 固化判断 workflow `trade_workflow_run` | ✅ 已接线（代码组装 pack、固定脚本；spawn child 只允许 `structured_output`，结果/失败均落审计） |
-| P3–P4 | 小额实盘、周级复盘/playbook/M3 版本化 | ⬜ 未开始（当前为 `paper`；进 P3 前需真 HTX 保护单对账验证，并补结构化 `live_confirm` 逐单确认；未接入前该 runtime 会 fail-closed 拒绝） |
+| R1 | schema v5 + `DecisionContext` / decision run 存储根 | ✅ canonical context 与 draft/critique/final/eligibility 已落库；旧 snapshot/token 表已移除；验收见 `scripts/r1-acceptance.mjs` |
+| R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档；PIT 组装行情、benchmark、衍生品、组合/保护、完整计划和历史 outcome；请求长度 119,015 / 180,000 字符；正常空、缺失/过期/暖机、PIT、密钥脱敏和超长拒发均有非空验收；证据见 `docs/r2-decision-context-2026-09-20.md`。仅捕获渲染请求，未调用真实模型 |
+| R3–R5 | 判断链与效果验收 | ⬜ 接通 single/critique 与 eligibility，再接即时动作、W2/W3、结算和成本；使用真实模型分别验收工程与经济效果，lesson 默认关闭 |
+| R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，以显式 arm 的小额 `live_auto` 运行；`live_confirm` 与自进化不在当前计划 |
 
 ## 开发
 
@@ -99,8 +104,8 @@ src/
 
 ## 红线（摘自 plan.md §1）
 
-1. 判断用 LLM，执行用代码；盘中不唤醒 LLM（只有 W1/W2/W3）。
-2. 判断只发生在窗口内、敞口打开之前 → 产出计划卡。
+1. 判断用 LLM，执行用代码；LLM 由 W1/W2/W3 驱动，不逐 bar 调用。
+2. 判断可提议即时动作或未来计划；执行均需通过资格检查与实时硬闸。
 3. 止损/止盈走交易所侧条件单或插件硬闸，不依赖 LLM。
 4. 权威状态在交易所 + SQLite；context 是可丢弃的视图。
 5. 模型输出不得成为决策的唯一真相来源。

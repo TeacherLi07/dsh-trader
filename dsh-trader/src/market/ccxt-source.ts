@@ -11,6 +11,9 @@ import { MarketSourceError, classifyError, type MarketDataSource, type RawCandle
 export interface CcxtExchangeLike {
   readonly id: string
   readonly has: Record<string, unknown>
+  /** loadMarkets() 后由 ccxt 填充；只投影白名单字段进入审计上下文。 */
+  readonly markets?: Readonly<Record<string, unknown>>
+  readonly precisionMode?: unknown
   /** 两次请求之间的最小毫秒数（ccxt 的 `rateLimit`）。 */
   readonly rateLimit?: number
   /** ccxt 允许用户覆盖 fetch 实现（`Exchange.fetchImplementation`）。 */
@@ -79,7 +82,7 @@ export function toRawCandle(row: unknown): RawCandle | undefined {
   return { openTime, open, high, low, close, volume }
 }
 
-export function createCcxtSource(exchange: CcxtExchangeLike): MarketDataSource {
+export function createCcxtSource(exchange: CcxtExchangeLike, onMarketsLoaded?: () => void): MarketDataSource {
   let marketsLoaded = false
 
   return {
@@ -91,6 +94,7 @@ export function createCcxtSource(exchange: CcxtExchangeLike): MarketDataSource {
     async fetchOHLCV(symbol, timeframe, since, limit) {
       if (!marketsLoaded) {
         await exchange.loadMarkets()
+        onMarketsLoaded?.()
         marketsLoaded = true
       }
       try {

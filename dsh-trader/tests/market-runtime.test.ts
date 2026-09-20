@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
 import { migrate } from '../src/db/schema.js'
 import { BarArchive } from '../src/market/archive.js'
+import { MarketObservationStore } from '../src/market/observations.js'
 import type { CcxtExchangeLike } from '../src/market/ccxt-source.js'
 import { createMarketRuntime } from '../src/market/runtime.js'
 
@@ -27,6 +28,10 @@ afterEach(() => {
 class FakeExchange implements CcxtExchangeLike {
   readonly id = 'htx'
   readonly has: Record<string, unknown> = { fetchOHLCV: true }
+  readonly precisionMode = 4
+  readonly markets: Readonly<Record<string, unknown>> = {
+    [SYMBOL]: { linear: true, contractSize: 1, precision: { amount: 1, price: 0.01 }, limits: { amount: { min: 1 } }, maker: 0.0002, taker: 0.0005 },
+  }
   readonly rateLimit = 250
   fetchImplementation?: unknown
   closed = false
@@ -56,6 +61,7 @@ describe('createMarketRuntime', () => {
       timeframes: [TF],
       pollMs: 60_000,
       archive,
+      observations: new MarketObservationStore(db),
       clock,
       createExchange: () => exchange,
     })
@@ -138,6 +144,7 @@ describe('createMarketRuntime', () => {
       timeframes: [TF],
       pollMs: 1_000,
       archive,
+      observations: new MarketObservationStore(db),
       clock,
       createExchange: () => exchange,
     })
@@ -145,6 +152,9 @@ describe('createMarketRuntime', () => {
     const result = await runtime.feed.pollOnce()
     expect(result.written).toBe(1)
     expect(archive.count(SYMBOL, TF)).toBe(1)
+    const specification = new MarketObservationStore(db).recent('spec', SYMBOL, '', NOW, 1)
+    expect(specification).toHaveLength(1)
+    expect(specification[0]?.value).toMatchObject({ symbol: SYMBOL, linear: true, contractSize: 1, takerFeeRate: 0.0005 })
 
     await runtime.close()
     expect(exchange.closed).toBe(true)

@@ -14,10 +14,10 @@
 /**
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
  * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
- * 正式纳入版本边界；旧 context snapshot/token 只在迁移入口中一次性清理，不再作为判断
- * 或执行的兼容路径。
+ * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档。旧 context snapshot/token
+ * 只在迁移入口中一次性清理，不再作为判断或执行的兼容路径。
  */
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -26,6 +26,30 @@ export interface SqliteLike {
 }
 
 export const SCHEMA_SQL = `
+-- 当前投影会被修订覆盖；判断必须从双时间的不可变观测取数，不能把回补时间冒充历史可见时间。
+CREATE TABLE IF NOT EXISTS market_observations (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL CHECK (kind IN ('bar', 'feature', 'derivatives', 'spec')),
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  event_time INTEGER NOT NULL CHECK (event_time >= 0),
+  available_at INTEGER NOT NULL CHECK (available_at >= event_time),
+  source TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  UNIQUE (kind, symbol, timeframe, event_time, available_at, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS market_observations_pit
+  ON market_observations (kind, symbol, timeframe, event_time DESC, available_at DESC);
+CREATE TRIGGER IF NOT EXISTS market_observations_no_update
+  BEFORE UPDATE ON market_observations BEGIN
+    SELECT RAISE(ABORT, 'market_observations is append-only');
+  END;
+CREATE TRIGGER IF NOT EXISTS market_observations_no_delete
+  BEFORE DELETE ON market_observations BEGIN
+    SELECT RAISE(ABORT, 'market_observations is append-only');
+  END;
+
 CREATE TABLE IF NOT EXISTS bars (
   symbol TEXT NOT NULL,
   timeframe TEXT NOT NULL,

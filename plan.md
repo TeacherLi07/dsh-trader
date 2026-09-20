@@ -15,8 +15,9 @@
 模型通过审计配置提供，不写成代码常量。
 
 当前已完成行情、DSL、paper/HTX broker、订单状态机、保护单、恢复、对账与审计基础，以及 R1
-的 schema v5 / DecisionContext / decision run 存储。实际判断仍是旧多分析师链；R1 不代表新 context
-内容、eligibility 或调用成本已完整接线。生产结算已启动，reflector 尚未接入；W2/W3 尚未驱动生产判断。
+的 schema v5 / context / run 存储和 R2 的双时间行情归档、DecisionContext 组装与请求渲染。R2
+使用固定 PIT 样本捕获渲染结果，未调用真实模型；生产判断仍走旧多分析师链，R3 才接通新渲染器、
+single/critique 与 eligibility。生产结算已启动，reflector 尚未接入；W2/W3 尚未驱动生产判断。
 
 本计划评估的是价格、衍生品、组合状态支持的交易判断，不宣称覆盖 LLM 的全部交易能力。当前
 模式保持 `paper`；R2–R5 完成后再评估 R6。此次收敛依据见 [决策记录 §17](docs/decision.md#architecture-review-2026-09-19)。
@@ -167,7 +168,7 @@ qty              = floorToStep(riskQuote / stopDistance)
 
 | 表组 | 表 | 不变量 |
 |---|---|---|
-| 行情 | `bars`, `features`, `bar_processing` | 只处理已收盘 bar；同一 bar 成功后才推进游标 |
+| 行情 | `bars`, `features`, `bar_processing`, `market_observations` | 只处理已收盘 bar；PIT 观测按 event/available 双时间只追加；同一 bar 成功后才推进游标 |
 | 判断 | `decision_contexts`, `decision_runs`, `decisions`, `plan_cards` | context 全文可复现；一轮一个最终裁决；每标的一张 active 卡 |
 | 执行 | `order_intents`, `orders`, `fills` | client id 唯一；状态单向迁移；重复回报不重复成交 |
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
@@ -175,10 +176,11 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger` | 审计 append-only；限额与成本版本化 |
 | 预测市场 | `pm_markets`, `pm_series`, `pm_quotes`, `pm_watches` | PIT、只读、别名有期限且有上限 |
 
-v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v6。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
-必须回指该 run。
+必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
+禁止回写和删除；历史回补只能从真实抓取时刻起可见。
 
 R3 补足运行语义：run 必须绑定候选/提示词/模型版本与触发身份，不能只凭 context hash 合并不同
 实验；终结工件不可重写，重试按已持久化阶段恢复。状态为 running/failed 或 eligibility 未计算的
@@ -336,7 +338,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | 阶段 | 工作 | 完成判据 |
 |---|---|---|
 | R1 | schema v5 + DecisionContext 类型与 store | ✅ `decision_contexts` 保存 canonical 全文或不可变 content ref；`decision_runs` 保存 draft/critique/final/eligibility 与模型成本；旧 context/token 表已从生产 schema/引用移除；验收：`dsh-trader/scripts/r1-acceptance.mjs` |
-| R2 | 完整而有界的 DecisionContext | 捕获模型请求验证 §5 全文与非空数据；覆盖正常空状态、缺失、过期、暖机及 PIT；验证上下文长度与不可截断项 |
+| R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；正常空、读取失败脱敏、过期、暖机、晚到数据、未来计划/对账/订单排除及超长拒发均通过；验收：`scripts/r2-acceptance.mjs`，证据见 `docs/r2-decision-context-2026-09-20.md` |
 | R3 | 单次/三步 workflow + evidence/eligibility | 先实现 single，再组合 critique；共用 schema/适配器；单轮调用数 1/3，修复最多 +1；伪造引用、失效 run 和必要缺失不能开仓，可选缺失不误杀 |
 | R4 | 即时动作、W2/W3、结算与成本 | 仅一条执行路径；即时/DSL 去重、持久队列重试、过期事件、预算准入实际生效；结算区分估值/实现与未知成本，lesson 默认关闭 |
 | R5 | 真实 LLM 回放 + forward paper | 分别完成 §10.3 工程与 §10.4 经济验收；交付完整样本、实验清单、对照结果和方案选择，不用替身或成交子集宣称增益 |
