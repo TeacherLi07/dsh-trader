@@ -1857,7 +1857,8 @@ Luna Max 复核指出，“存在一条 market 路径”不足以证明 PM 信�
 可复算的独立场内 entry gate，而不是以 claim 数量或自由文本说明替代。
 
 另一个执行边界是保护编辑的可证明性：`set_stop` 只可在实时价格有效且当前无远端 stop 时添加初始保护，不能走非原子路径替换已有算法单；
-`set_target`、`set_trailing`、`cancel_all` 在 `decision_only` 返回 REVIEW，除非各自动作的保护状态校验有证据。对账/持仓状态未知时不因动作名推断“减险”。
+`set_target` 只可在远端 stop 仍有效且目标位于盈利方向时执行；`set_trailing` 只可在当前远端 stop 仍有效时增加 reduce-only 追踪保护；
+`cancel_all` 在 `decision_only` 只允许当前标的并保持持仓保护，全局撤单保持 fail-closed。对账/持仓状态未知时不因动作名推断“减险”。
 
 生产 `dailyBudgetUsd` 仍有意未配置，所以 W1/W2/W3 不发真实模型请求。R3/R4 工程 stub 输出分别见
 [R3](../dsh-trader/docs/r3-decision-envelope-2026-09-20.md) 与 [R4](../dsh-trader/docs/r4-trigger-worker-2026-09-20.md)；

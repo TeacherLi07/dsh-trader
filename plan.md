@@ -266,7 +266,7 @@ RiskCritic 只寻找数据缺口、反事实、组合风险、执行风险和失
 - `decision_only` 只允许 `NO_TRADE/REVIEW` 或经过单独校验的减险动作。减险仍需可靠确认目标
   持仓/订单及 reduce-only 语义；`set_stop/set_target/cancel_all` 不能仅凭动作名称认定安全，必须
   验证不会扩大风险或移除必要保护。P0 机械保护独立运行。
-- 当前可执行的 `decision_only` 即时动作限制为 `reduce/close`、无订单动作，以及有新鲜价格且当前无远端止损时添加有效初始 `set_stop`；已有远端止损的原子替换尚未实现。`set_target/set_trailing/cancel_all` 在 `decision_only` 明确返回 REVIEW，直到各自的保护状态校验通过测试。
+- 当前可执行的 `decision_only` 即时动作限制为 `reduce/close`、无订单动作、在无远端止损时按新鲜价格添加有效初始 `set_stop`、在现有远端 stop 仍有效且目标位于盈利方向时 `set_target`/`set_trailing`，以及仅对当前标的执行且保留保护单的 `cancel_all`。已有远端 stop 的原子替换和全局撤单当前 fail-closed。
 - 可选预测市场、lesson 或未被动作依赖的指标缺失，不单独阻止开仓；缺口仍进入 uncertainties。
 - PM W3 事件虽然可映射到 active plan 并进入只读 context，但目前代码无法从 claim 的文本/路径证明方向性独立；R5 验收独立场内 entry gate 前，PM-triggered run 固定为 `decision_only`，只能复核/减险，不能新增敞口。
 - 数据与工件有效 → `risk_gate_required`；即时动作和以后每次承诺命中都必须再过实时硬闸。

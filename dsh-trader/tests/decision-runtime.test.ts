@@ -182,7 +182,7 @@ describe('R3 decision runtime', () => {
       for (const [index, action] of [
         { action: 'set_target', price: 120 },
         { action: 'set_trailing', percent: 0.5 },
-        { action: 'cancel_all', scope: 'symbol' },
+        { action: 'cancel_all', scope: 'all' },
       ].entries()) {
         const model = new FakeDecisionModel({
           outcome: 'act', thesis: '状态不足时不改变保护与挂单', rejectedAlternatives: [],
@@ -195,7 +195,11 @@ describe('R3 decision runtime', () => {
           symbol: SYMBOL, timeframe: '1h',
         })
         expect(result).toMatchObject({ status: 'review', eligibility: { state: 'decision_only' } })
-        expect(db.prepare('SELECT COUNT(*) AS n FROM decisions WHERE run_id = ?').get(result.runId)).toMatchObject({ n: 0 })
+        const decisions = db.prepare('SELECT action, executed FROM decisions WHERE run_id = ?').all(result.runId) as { action: string; executed: number }[]
+        if (action.action === 'set_target' || action.action === 'set_trailing') {
+          expect(decisions).toMatchObject([{ action: action.action, executed: 0 }])
+        }
+        else expect(decisions).toEqual([])
       }
       expect(db.prepare("SELECT COUNT(*) AS n FROM order_intents WHERE type = 'protective'").get()).toMatchObject({ n: 0 })
     } finally {
@@ -228,6 +232,32 @@ describe('R3 decision runtime', () => {
       expect(result).toMatchObject({ status: 'completed', eligibility: { state: 'decision_only' } })
       expect((await paper.getPositions()).find((position) => position.symbol === SYMBOL)?.protectedStopPrice).toBe(98)
       expect(db.prepare('SELECT action, executed FROM decisions WHERE run_id = ?').get(result.runId)).toMatchObject({ action: 'set_stop', executed: 1 })
+
+      const target = await runDecisionRuntime({
+        ...runtime,
+        model: new FakeDecisionModel({
+          outcome: 'act', thesis: '已有有效 stop 限制下行，添加盈利方向目标', rejectedAlternatives: [], claims: [], uncertainties: [],
+          confidence: 0.5, riskFraction: 1, immediateAction: { action: 'set_target', price: 110 },
+        }),
+        config,
+        trigger: { ...trigger, id: 'w2-set-target-with-stop', source: 'W2' },
+        symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(target).toMatchObject({ status: 'completed', eligibility: { state: 'decision_only' } })
+      expect(db.prepare('SELECT action, executed FROM decisions WHERE run_id = ?').get(target.runId)).toMatchObject({ action: 'set_target', executed: 1 })
+
+      const trailing = await runDecisionRuntime({
+        ...runtime,
+        model: new FakeDecisionModel({
+          outcome: 'act', thesis: '在现有硬 stop 上添加 reduce-only trailing', rejectedAlternatives: [], claims: [], uncertainties: [],
+          confidence: 0.5, riskFraction: 1, immediateAction: { action: 'set_trailing', percent: 0.5 },
+        }),
+        config,
+        trigger: { ...trigger, id: 'w2-set-trailing-with-stop', source: 'W2' },
+        symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(trailing).toMatchObject({ status: 'completed', eligibility: { state: 'decision_only' } })
+      expect(db.prepare('SELECT action, executed FROM decisions WHERE run_id = ?').get(trailing.runId)).toMatchObject({ action: 'set_trailing', executed: 1 })
 
       const loosen = await runDecisionRuntime({
         ...runtime,

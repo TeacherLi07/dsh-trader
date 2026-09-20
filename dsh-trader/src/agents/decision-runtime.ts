@@ -140,9 +140,9 @@ function planHasOpen(envelope: DecisionEnvelope): boolean {
 }
 
 function isRiskReducing(action: PlanAction): boolean {
-  // set_stop 只有在 executeAction 锁内确认无远端止损并添加有效初始保护后才会执行。
-  return ['reduce', 'close', 'set_stop', 'halt', 'noop', 'escalate']
-    .includes(action.action)
+  // 保护修改是否减险仍由 executeAction 锁内的远端持仓/价格检查证明。
+  if (['reduce', 'close', 'set_stop', 'set_target', 'set_trailing', 'halt', 'noop', 'escalate'].includes(action.action)) return true
+  return action.action === 'cancel_all' && action.scope === 'symbol'
 }
 
 function stageArtifact(stages: DecisionWorkflowStages, stage: 'draft' | 'critique' | 'final'): unknown {
@@ -430,7 +430,7 @@ export async function runDecisionRuntime(input: {
       let referencePrice = featurePrice ?? timeFacts?.price ?? portfolioAvgPrice
       let atr = latestFeature?.values.atr14 ?? timeFacts?.atr ?? null
       const barTs = timeFacts?.barTs ?? context.asOf
-      if (envelope.immediateAction.action === 'open' || envelope.immediateAction.action === 'set_stop') {
+      if (['open', 'set_stop', 'set_target', 'set_trailing'].includes(envelope.immediateAction.action)) {
         const atrRequired = envelope.immediateAction.action === 'open' && envelope.immediateAction.stop.method === 'atr'
         const freshSnapshot = latestFeature !== undefined && timeFacts !== undefined &&
           latestFeature.openTime === timeFacts.barTs && latestFeature.values.close === timeFacts.price &&
@@ -444,7 +444,7 @@ export async function runDecisionRuntime(input: {
           atr = latestFeature.values.atr14
         }
       }
-      const requiresPrice = ['open', 'reduce', 'close', 'set_stop'].includes(envelope.immediateAction.action)
+      const requiresPrice = ['open', 'reduce', 'close', 'set_stop', 'set_target', 'set_trailing'].includes(envelope.immediateAction.action)
       if (finalizeReason !== undefined) {
         // 成交前的价格新鲜度闸拒绝即时动作；终态 run 仍保留模型工件与原因。
       } else if (requiresPrice && (referencePrice === undefined || !Number.isFinite(referencePrice) || referencePrice <= 0)) {

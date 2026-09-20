@@ -335,12 +335,41 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
         return { executed: false, denied: true, reason, decisionId }
       }
     }
-    const protective =
-      action.action === 'set_stop'
-        ? { stopLossPrice: (action as LevelAction).price }
-        : action.action === 'set_target'
-          ? { takeProfitPrice: (action as LevelAction).price }
-          : { trailingPercent: (action as TrailingAction).percent }
+    if (action.action === 'set_target') {
+      const proposed = (action as LevelAction).price
+      const reference = args.referencePrice
+      const currentStop = currentPosition.protectedStopPrice
+      const stopProtectsCurrentSide = currentStop !== undefined && Number.isFinite(currentStop) && currentStop > 0 &&
+        reference !== undefined && Number.isFinite(reference) && reference > 0 &&
+        (currentPosition.qty > 0 ? currentStop < reference : currentStop > reference)
+      const targetIsProfitSide = reference !== undefined && Number.isFinite(reference) && reference > 0 &&
+        (currentPosition.qty > 0 ? proposed > reference : proposed < reference)
+      if (!Number.isFinite(proposed) || proposed <= 0 || !stopProtectsCurrentSide || !targetIsProfitSide) {
+        const reason = 'set_target 需要有效远端止损与新鲜价格，并且目标必须位于盈利方向'
+        record(false, { rationale: reason })
+        auditDenied(args, decisionId, reason, now)
+        return { executed: false, denied: true, reason, decisionId }
+      }
+    }
+    if (action.action === 'set_trailing') {
+      const reference = args.referencePrice
+      const currentStop = currentPosition.protectedStopPrice
+      const stopProtectsCurrentSide = currentStop !== undefined && Number.isFinite(currentStop) && currentStop > 0 &&
+        reference !== undefined && Number.isFinite(reference) && reference > 0 &&
+        (currentPosition.qty > 0 ? currentStop < reference : currentStop > reference)
+      const percent = (action as TrailingAction).percent
+      if (!Number.isFinite(percent) || percent <= 0 || !stopProtectsCurrentSide) {
+        const reason = 'set_trailing 需要有效远端 stop 与新鲜价格；缺少现有硬保护时拒绝'
+        record(false, { rationale: reason })
+        auditDenied(args, decisionId, reason, now)
+        return { executed: false, denied: true, reason, decisionId }
+      }
+    }
+    const protective = action.action === 'set_stop'
+      ? { stopLossPrice: (action as LevelAction).price }
+      : action.action === 'set_target'
+        ? { takeProfitPrice: (action as LevelAction).price }
+        : { trailingPercent: (action as TrailingAction).percent }
     const protectiveClientId = protectiveClientOrderId(args.plan.planId, args.conditionId, args.barTs)
 
     // decision + protective intent 必须一次提交；否则 crash 恰在两次写入之间会留下
