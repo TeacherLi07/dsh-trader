@@ -347,7 +347,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-20.md`；没有真实模型调用 |
 | R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-20.md`；没有真实模型调用 |
-| R5 | 真实 LLM 回放 + forward paper | 分别完成 §10.3 工程与 §10.4 经济验收；交付完整样本、实验清单、对照结果和方案选择，不用替身或成交子集宣称增益 |
+| R5 | 真实 LLM 回放 + forward paper | ⬜ 已铺设单次模型请求/响应/成本审计与完整账户时间块 bootstrap；仍缺 `scripts/r5-acceptance.mjs` 真实模型运行入口、≥200 个真实判断窗口、执行样本覆盖及独立 forward-paper 经济证据；按 §12 先取得实验预算，stub 不算真实调用 |
 | R6 | P3 小额 `live_auto` | R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0 |
 
 R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs` 至 `scripts/r5-acceptance.mjs`，

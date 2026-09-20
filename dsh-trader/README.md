@@ -45,7 +45,7 @@
 | R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档；PIT 组装行情、benchmark、衍生品、组合/保护、完整计划和历史 outcome；请求长度 119,015 / 180,000 字符；正常空、缺失/过期/暖机、PIT、密钥脱敏和超长拒发均有非空验收；证据见 `docs/r2-decision-context-2026-09-20.md`。仅捕获渲染请求，未调用真实模型 |
 | R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；旧判断/工具链已删除；stub 工程证据见 `docs/r3-decision-envelope-2026-09-20.md`（无真实模型调用） |
 | R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `docs/r4-trigger-worker-2026-09-20.md`（无真实模型调用） |
-| R5 | 真实模型与 forward-paper 效果验收 | ⬜ 真实模型回放和 forward paper 分别通过工程与经济验收，lesson 默认关闭 |
+| R5 | 真实模型与 forward-paper 效果验收 | ⬜ 已有逐调用审计与账户权益 block-bootstrap 基础；真实模型 runner、非空样本与独立 forward-paper 仍待显式实验预算和实际运行，lesson 默认关闭 |
 | R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，以显式 arm 的小额 `live_auto` 运行；`live_confirm` 与自进化不在当前计划 |
 
 ## 开发
