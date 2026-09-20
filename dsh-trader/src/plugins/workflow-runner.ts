@@ -311,7 +311,7 @@ export async function runJudgmentWorkflow(
   const contextStore = typeof dbLike.prepare === 'function' ? new DecisionContextStore(ports.db) : undefined
   const runStore = typeof dbLike.prepare === 'function' ? new DecisionRunStore(ports.db) : undefined
   contextStore?.record(context, { createdAt: pack.asOf })
-  runStore?.start({
+  const startedRun = runStore?.start({
     runId,
     contextId: context.contextId,
     contextHash: context.contextHash,
@@ -322,6 +322,13 @@ export async function runJudgmentWorkflow(
     promptVersion: PROMPT_VERSION,
     createdAt: context.asOf,
   })
+  if (startedRun !== undefined && startedRun.status !== 'running') {
+    if (startedRun.status === 'completed') {
+      assertJudgmentResult(startedRun.final, pack)
+      return { ...(startedRun.final as JudgmentResult), runId }
+    }
+    throw new Error(`workflow 对应 run 已终结（${startedRun.status}），拒绝重复调用：${runId}`)
+  }
   const script = buildJudgmentWorkflowScript()
   let childCount = 0
   let result: unknown

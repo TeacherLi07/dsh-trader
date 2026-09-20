@@ -118,7 +118,8 @@ describe('T2.x 只读预检（plan §12.2 A 第①步）', () => {
 
   it('本地与远端一致时报告 consistent，且不产生动作', async () => {
     const { broker, calls } = fakeBroker({
-      positions: [position(0.1)],
+      // 保护必须来自远端 broker snapshot；本地 stop intent 不是交易所生效证据。
+      positions: [{ ...position(0.1), protectedStopPrice: 59_000 }],
       openOrders: [openOrder('co-1')],
       equity: 1000,
     })
@@ -161,6 +162,7 @@ describe('T2.x 只读预检（plan §12.2 A 第①步）', () => {
       venue: 'htx',
       equityQuote: 10_000,
       totalExposureUsd: 0,
+      pendingExposureUsd: 0,
       openOrders: 0,
       leverage: 0,
       dailyLossUsd: 0,

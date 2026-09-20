@@ -10,13 +10,15 @@ export interface DecisionContextConfig {
   readonly marketGraceMs: number
   readonly derivativesMaxAgeMs: number
   readonly specMaxAgeMs: number
+  readonly reconciliationMaxAgeMs: number
 }
 
 export const DEFAULT_DECISION_CONTEXT_CONFIG: DecisionContextConfig = Object.freeze({
-  version: 'context-r2-v1', barsPerTimeframe: 64, statisticsWindow: 32,
+  version: 'context-r2-v2', barsPerTimeframe: 64, statisticsWindow: 32,
   historyLimit: 12, historyTextChars: 1600, maxChars: 180_000,
   accountMaxAgeMs: 60_000, marketGraceMs: 120_000,
   derivativesMaxAgeMs: 3_600_000, specMaxAgeMs: 86_400_000,
+  reconciliationMaxAgeMs: 600_000,
 })
 
 export function decisionContextConfig(input: Partial<DecisionContextConfig> = {}): DecisionContextConfig {

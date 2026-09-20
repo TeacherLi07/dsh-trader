@@ -60,11 +60,12 @@ export type ReconciliationAction =
   | {
       readonly kind: 'cancel_orphan'
       readonly clientOrderId: string
+      readonly symbol?: string
       /** 撤单必须用它；缺失 ⇒ 调用方不得撤单（fail-closed）。 */
       readonly exchangeOrderId?: string
       readonly reason: string
     }
-  | { readonly kind: 'alert_missing_order'; readonly clientOrderId: string; readonly reason: string }
+  | { readonly kind: 'alert_missing_order'; readonly clientOrderId: string; readonly symbol: string; readonly reason: string }
   | { readonly kind: 'alert_unknown_position'; readonly symbol: string; readonly qty: number }
   | { readonly kind: 'alert_unprotected_position'; readonly symbol: string }
   | { readonly kind: 'alert_qty_mismatch'; readonly symbol: string; readonly local: number; readonly remote: number }
@@ -115,6 +116,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
       actions.push({
         kind: 'alert_missing_order',
         clientOrderId: order.clientOrderId,
+        symbol: order.symbol,
         reason: '本地标记为未结，但交易所无此单',
       })
     }
@@ -129,6 +131,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
       actions.push({
         kind: 'cancel_orphan',
         clientOrderId: order.clientOrderId ?? order.exchangeOrderId ?? 'unknown-order',
+        ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
         ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
         reason: local === undefined ? '本地无记录' : `本地状态为 ${local.state}`,
       })
@@ -151,7 +154,7 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
         remote: remote.qty,
       })
     }
-    if (remote.qty !== 0 && remote.protectedStopPrice === undefined && local.protectedStopPrice === undefined) {
+    if (remote.qty !== 0 && remote.protectedStopPrice === undefined) {
       actions.push({ kind: 'alert_unprotected_position', symbol: remote.symbol })
     }
   }
@@ -170,11 +173,8 @@ export function reconcile(input: ReconciliationInput): ReconciliationResult {
     }
   }
 
-  const freezeTrading = actions.some((action) =>
-    action.kind === 'alert_unknown_position' ||
-    action.kind === 'alert_unprotected_position' ||
-    action.kind === 'alert_qty_mismatch',
-  )
+  // 订单身份/状态不一致同样是未知在途风险；仅计入 maxOpenOrders 会漏掉尚未反映为持仓的名义金额。
+  const freezeTrading = actions.length > 0
 
   return {
     actions,
@@ -266,6 +266,8 @@ function actionMessage(action: ReconciliationAction): string {
 
 function isFreezeAction(action: ReconciliationAction): boolean {
   return (
+    action.kind === 'cancel_orphan' ||
+    action.kind === 'alert_missing_order' ||
     action.kind === 'alert_unknown_position' ||
     action.kind === 'alert_unprotected_position' ||
     action.kind === 'alert_qty_mismatch'
@@ -330,14 +332,14 @@ export class Reconciler {
   }
 }
 
-type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId'> & { readonly symbol?: string }
+type BrokerOpenOrder = Pick<OrderAck, 'clientOrderId' | 'exchangeOrderId' | 'symbol'>
 type BrokerPosition = Pick<PositionSnapshot, 'symbol' | 'qty' | 'protectedStopPrice'>
 
 function toRemoteOrder(order: BrokerOpenOrder): RemoteOrderSnapshot {
   return {
     ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
     ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
-    symbol: order.symbol ?? '',
+    ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
   }
 }
 

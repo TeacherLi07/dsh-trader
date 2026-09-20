@@ -132,6 +132,9 @@ export class DecisionRunStore {
   update(runId: string, patch: DecisionRunPatch, now: number): DecisionRunRecord {
     const current = this.get(runId)
     if (current === undefined) throw new Error(`不存在的 decision run：${runId}`)
+    if (current.status !== 'running') {
+      throw new Error(`decision run 已终结（${current.status}），工件不可改写：${runId}`)
+    }
     if (!Number.isFinite(now) || now < 0) throw new Error('run.updatedAt 必须是非负有限毫秒时间戳')
     const nextStatus = patch.status ?? current.status
     const result = this.#statements
@@ -152,7 +155,7 @@ export class DecisionRunStore {
            duration_ms = @durationMs,
            updated_at = @updatedAt,
            finished_at = @finishedAt
-         WHERE run_id = @runId`,
+         WHERE run_id = @runId AND status = 'running'`,
       )
       .run({
         runId,

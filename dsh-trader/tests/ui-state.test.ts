@@ -100,6 +100,7 @@ describe('UI state projection', () => {
         venue: 'paper',
         equityQuote: 100,
         totalExposureUsd: 0,
+        pendingExposureUsd: 0,
         openOrders: 0,
         leverage: 0,
         dailyLossUsd: 0,

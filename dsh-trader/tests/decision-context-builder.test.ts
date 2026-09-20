@@ -51,6 +51,7 @@ function fixtureBroker(over: {
 } = {}): Broker {
   const account: AccountSnapshot = over.account ?? {
     venue: 'paper', equityQuote: 100, freeMarginQuote: 80, totalExposureUsd: 20,
+    pendingExposureUsd: 0,
     openOrders: over.orders?.length ?? 0, leverage: 0.2, dailyLossUsd: 0, drawdownUsd: 0,
     consecutiveLosses: 0, spreadBps: 2, observedAt: AS_OF,
   }
@@ -225,6 +226,47 @@ describe('R2 DecisionContext assembly and request rendering', () => {
     expect(failed.sections.market.missing.length).toBeGreaterThan(0)
   })
 
+  it('过期的成功对账报告会显式降级为 stale', async () => {
+    journal.appendAudit({
+      actor: 'system', kind: 'reconcile_report',
+      payload: { acknowledgeOrphans: false, result: { actions: [], consistent: true, freezeTrading: false }, applied: [] },
+      ts: AS_OF - 600_001,
+    })
+    const context = await buildDecisionContext(ports(), SYMBOL, '1h')
+    expect(sectionValue(context, 'portfolio').reconciliation).toMatchObject({ state: 'stale', consistent: true })
+    expect(context.sections.portfolio.missing).toContain('reconciliation.stale')
+  })
+
+  it('非法待成交敞口会使组合上下文 invalid 且不计算剩余额度', async () => {
+    const account: AccountSnapshot = {
+      venue: 'paper', equityQuote: 100, freeMarginQuote: 80, totalExposureUsd: 20,
+      pendingExposureUsd: Number.NaN,
+      openOrders: 0, leverage: 0.2, dailyLossUsd: 0, drawdownUsd: 0,
+      consecutiveLosses: 0, spreadBps: 2, observedAt: AS_OF,
+    }
+    const context = await buildDecisionContext(ports(fixtureBroker({ account })), SYMBOL, '1h')
+    const portfolio = sectionValue(context, 'portfolio')
+    expect(portfolio.status).toBe('invalid')
+    expect(portfolio.remainingLimits).toBeNull()
+    expect(context.sections.portfolio.missing).toContain('account.pendingExposureUsd:invalid')
+  })
+
+  it('未决意图超过上下文上限时报告完整数量并标记截断', async () => {
+    const insert = db.prepare(`INSERT INTO order_intents
+      (intent_id, client_order_id, venue, symbol, state, created_at)
+      VALUES (?, ?, 'paper', ?, 'unknown', ?)`)
+    for (let index = 0; index < 101; index += 1) {
+      insert.run(`intent-${index}`, `client-${index}`, SYMBOL, AS_OF - index)
+    }
+    const context = await buildDecisionContext(ports(), SYMBOL, '1h')
+    const portfolio = sectionValue(context, 'portfolio')
+    expect(portfolio.unresolvedIntentCount).toBe(101)
+    expect(portfolio.unresolvedIntents).toHaveLength(100)
+    expect(portfolio.unresolvedIntentsTruncated).toBe(true)
+    expect(context.sections.portfolio.missing).toContain('unresolvedIntents.truncated')
+    expect(portfolio.status).toBe('partial')
+  })
+
   it('分别标出 PIT 未到达、陈旧、暖机不足与超时账户', async () => {
     const staleTime = AS_OF - 20 * HOUR
     const staleCandle = normalizeCandles([raw(staleTime - HOUR, 1_000)], SYMBOL, '1h', AS_OF).candles[0]!
@@ -247,6 +289,7 @@ describe('R2 DecisionContext assembly and request rendering', () => {
 
     const oldAccount: AccountSnapshot = {
       venue: 'paper', equityQuote: 100, freeMarginQuote: 80, totalExposureUsd: 0,
+      pendingExposureUsd: 0,
       openOrders: 0, leverage: 0, dailyLossUsd: 0, drawdownUsd: 0,
       consecutiveLosses: 0, spreadBps: 0, observedAt: AS_OF - 2 * HOUR,
     }
@@ -262,6 +305,16 @@ describe('R2 DecisionContext assembly and request rendering', () => {
     const context = await buildDecisionContext(ports(), SYMBOL, '1h')
     expect(sectionValue(context, 'activePlan').card.thesis.text).toHaveLength(20_000)
     expect(() => renderDecisionRequest(context, { maxChars: 1_000 })).toThrow(DecisionRequestTooLargeError)
+  })
+
+  it('最终 renderer 使用 context 中冻结的 maxChars，调用方不能放宽它', async () => {
+    plans.save(makeCard({
+      planId: 'pc-configured-budget', symbol: SYMBOL, createdAt: AS_OF - 1,
+      windowEndsAt: AS_OF + 10 * HOUR, thesis: 'x'.repeat(2_000),
+    }), AS_OF - 1)
+    const context = await buildDecisionContext(ports(), SYMBOL, '1h', { config: { maxChars: 1_000 } })
+    expect(() => renderDecisionRequest(context)).toThrow(DecisionRequestTooLargeError)
+    expect(() => renderDecisionRequest(context, { maxChars: 50_000 })).toThrow(DecisionRequestTooLargeError)
   })
 
   it('结算在 context 时点之后才可见，历史仍保留未结算状态', async () => {

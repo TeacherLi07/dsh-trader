@@ -89,6 +89,26 @@ describe('PaperBroker', () => {
     expect(crossed.state).toBe('filled')
   })
 
+  it('reserves pending limit exposure and preserves protective orders during cancelAll', async () => {
+    const { broker } = setup(100)
+    await broker.placeOrder(request())
+    const stop = await broker.placeProtective({ symbol: SYMBOL, stopLossPrice: 90, clientOrderId: 'stop' })
+    expect(stop.state).toBe('acked')
+    await broker.placeOrder(request({
+      intentId: 'limit', clientOrderId: 'limit', type: 'limit', price: 90, qty: 2, notionalUsd: 180,
+    }))
+
+    expect((await broker.getAccount()).pendingExposureUsd).toBe(180)
+    await broker.cancelAll(SYMBOL)
+    expect((await broker.getOpenOrders(SYMBOL)).map((order) => order.clientOrderId)).toEqual(['stop'])
+    await expect(broker.cancelAll(SYMBOL, { includeProtection: true })).rejects.toThrow(/仍有持仓/)
+
+    await broker.placeOrder(request({ intentId: 'close', clientOrderId: 'close', side: 'sell', reduceOnly: true }))
+    expect(await broker.getPositions()).toHaveLength(0)
+    await broker.cancelAll(SYMBOL, { includeProtection: true })
+    expect(await broker.getOpenOrders(SYMBOL)).toHaveLength(0)
+  })
+
   it('rejects a limit order with no price instead of guessing one', async () => {
     const { broker } = setup()
     const ack = await broker.placeOrder(request({ type: 'limit' }))

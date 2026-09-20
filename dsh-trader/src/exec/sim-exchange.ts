@@ -255,6 +255,7 @@ export class SimExchange implements Broker, ClientOrderLookup {
       venue: this.venue,
       equityQuote: equity,
       totalExposureUsd: this.#exposure(),
+      pendingExposureUsd: this.#pendingExposure(),
       openOrders: this.openOrderCount(),
       leverage: equity > 0 ? this.#exposure() / equity : Number.POSITIVE_INFINITY,
       dailyLossUsd: realizedLoss,
@@ -372,6 +373,12 @@ export class SimExchange implements Broker, ClientOrderLookup {
     if (position === undefined || position.qty === 0) {
       throw new Error(`placeProtective：${request.symbol} 没有持仓`)
     }
+    if (request.expectedPositionQty !== undefined &&
+        (!Number.isFinite(request.expectedPositionQty) || request.expectedPositionQty === 0 ||
+         Math.sign(position.qty) !== Math.sign(request.expectedPositionQty) ||
+         Math.abs(position.qty) + 1e-12 < Math.abs(request.expectedPositionQty))) {
+      throw new Error(`placeProtective：${request.symbol} 实际持仓小于已确认成交暴露`)
+    }
     const sequence = this.#lastSequence() + 1
     const clientOrderId = request.clientOrderId ?? `sim-protect-${request.symbol}-${sequence}`
     this.#onStep?.('before_persist')
@@ -427,10 +434,18 @@ export class SimExchange implements Broker, ClientOrderLookup {
     })()
   }
 
-  async cancelAll(symbol?: string): Promise<void> {
+  async cancelAll(symbol?: string, options: { readonly includeProtection?: boolean } = {}): Promise<void> {
+    if (options.includeProtection === true) {
+      const activePosition = this.#statements.get(`SELECT 1 FROM sim_positions
+        WHERE qty != 0 AND (? IS NULL OR symbol = ?) LIMIT 1`).get(symbol ?? null, symbol ?? null)
+      if (activePosition !== undefined) throw new Error('拒绝在仍有持仓时撤销保护单')
+    }
     this.#db.transaction(() => {
       const orders = this.#openOrderRows(symbol)
-      for (const order of orders) this.#setOrderState(order, 'canceled', this.#nextSequence())
+      for (const order of orders) {
+        if (options.includeProtection !== true && order.reduce_only === 1) continue
+        this.#setOrderState(order, 'canceled', this.#nextSequence())
+      }
     })()
   }
 
@@ -710,6 +725,18 @@ export class SimExchange implements Broker, ClientOrderLookup {
     return exposure
   }
 
+  #pendingExposure(): number | null {
+    let total = 0
+    for (const order of this.#openOrderRows()) {
+      if (order.reduce_only === 1) continue
+      const remaining = Math.max(0, order.qty - order.filled_qty)
+      if (remaining === 0) continue
+      if (order.limit_price === null || !Number.isFinite(order.limit_price) || order.limit_price <= 0) return null
+      total += remaining * order.limit_price
+    }
+    return Number.isFinite(total) ? total : null
+  }
+
   #protectiveStopFor(symbol: string): number | undefined {
     const row = this.#statements
       .get(
@@ -728,12 +755,13 @@ export class SimExchange implements Broker, ClientOrderLookup {
     return {
       intentId: order.intent_id,
       clientOrderId: order.client_order_id,
+      symbol: order.symbol,
       exchangeOrderId: order.exchange_order_id,
       state: order.status,
       ts: order.updated_seq,
       ...(order.avg_price === null ? {} : { avgPrice: order.avg_price }),
       filledQty: order.filled_qty,
-      ...(order.fee === 0 ? {} : { fee: order.fee }),
+      ...(order.filled_qty > 0 ? { fee: order.fee } : {}),
     }
   }
 }

@@ -11,7 +11,7 @@ import type Database from 'better-sqlite3'
 import { numericClientOrderId } from '../util/canonical.js'
 import type { Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
-import type { Broker, OrderRequest, OrderType } from '../exec/broker.js'
+import type { Broker, OrderRequest, OrderType, PositionSnapshot } from '../exec/broker.js'
 import { projectedExposureUsd, projectedLeverage, validateIntent, type GatePolicy } from '../exec/gate.js'
 import type { DecisionJournal } from '../exec/journal.js'
 import { computeSize, stopPriceFor, takeProfitFor } from '../exec/sizing.js'
@@ -38,6 +38,8 @@ import {
   type WatchPurpose,
 } from '../predictions/store.js'
 import { DecisionRunStore, type DecisionRunRecord } from './decision-run-store.js'
+import { inferPositionAfterFill, protectPositionOrClose, protectionClientOrderId } from '../exec/protection.js'
+import { withExposureLock } from '../exec/exposure-lock.js'
 
 export interface ToolPorts {
   readonly db: Database.Database
@@ -502,7 +504,15 @@ const tradeExecuteOrder: ToolDefinition = {
     targetRMultiple: { type: 'number' },
     rationale: { type: 'string' },
   },
-  async execute(args, ports) {
+  execute(args, ports) {
+    return withExposureLock(ports.journal, () => executeTradeOrder(args, ports))
+  },
+}
+
+async function executeTradeOrder(
+  args: Readonly<Record<string, unknown>>,
+  ports: ToolPorts,
+): Promise<unknown> {
     const decisionId = requireString(args, 'decisionId')
     const symbol = requireString(args, 'symbol')
     const timeframe = requireString(args, 'timeframe')
@@ -541,6 +551,13 @@ const tradeExecuteOrder: ToolDefinition = {
     const account = await ports.broker.getAccount()
     const positions = await ports.broker.getPositions()
     const position = positions.find((candidate) => candidate.symbol === symbol)
+    if (action === 'open' && position !== undefined && position.qty !== 0) {
+      const requestedSide = requireEnum(args, 'side', ['long', 'short'] as const)
+      const requestedDirection = requestedSide === 'long' ? 1 : -1
+      if (Math.sign(position.qty) !== requestedDirection) {
+        return refuse('已有反向持仓；open 不允许隐式反手，请先 reduce/close')
+      }
+    }
 
     // ② 构造意图：数量一律由代码推导
     let intent: OrderRequest | undefined
@@ -662,114 +679,124 @@ const tradeExecuteOrder: ToolDefinition = {
     )
     if (!inserted.intentInserted) return { executed: false, reason: 'already_intended' }
 
-    const ack = await ports.broker.placeOrder(intent)
-    const applied = ports.journal.applyOrderAck(ack, ports.clock.now(), {
-      fallbackQty: intent.qty,
-      fallbackPrice: intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+    let ack = await ports.broker.placeOrder(intent)
+    let applied = ports.journal.applyOrderAck(ack, ports.clock.now(), {
       reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
     })
     if (applied.unknown) ports.freezeSymbol?.(symbol)
 
     let executed = applied.filled
-    if (action === 'open' && !executed && ack.state !== 'rejected') {
-      try {
-        const before = position?.qty ?? 0
-        const after = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
-        const direction = intent.side === 'buy' ? 1 : -1
-        const deltaConfirmed = direction * (after - before) > 1e-12
-        if (deltaConfirmed && ports.broker.venue === 'paper') executed = true
-        else if (deltaConfirmed && ack.exchangeOrderId !== undefined) {
-          const refreshed = await ports.broker.findOrderByExchangeOrderId?.(ack.exchangeOrderId, symbol)
-          if (refreshed?.state === 'filled') {
-            const refreshedResult = ports.journal.applyOrderAck(refreshed, ports.clock.now(), {
-              fallbackQty: intent.qty,
-              fallbackPrice: intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
+    let positionAfter: PositionSnapshot | undefined
+    if (action === 'open') {
+      let cancelAttempted = false
+      let lookupFailed = false
+      const lookup = ports.broker.findOrderByExchangeOrderId
+      if (ports.broker.venue === 'htx' && ack.state === 'acked' && ack.exchangeOrderId !== undefined) {
+        cancelAttempted = true
+        try {
+          await ports.broker.cancelOrder(ack.exchangeOrderId)
+        } catch { /* 下面会按交易所最终查询结果决定是否冻结。 */ }
+        try {
+          const refreshed = await lookup?.call(ports.broker, ack.exchangeOrderId, symbol)
+          if (refreshed !== undefined) {
+            ack = refreshed
+            applied = ports.journal.applyOrderAck(refreshed, ports.clock.now(), {
               reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
             })
-            executed = refreshedResult.filled
-          }
+          } else lookupFailed = true
+        } catch {
+          lookupFailed = true
         }
-        if (deltaConfirmed && !executed) ports.freezeSymbol?.(symbol)
+      }
+      try {
+        const before = position?.qty ?? 0
+        positionAfter = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)
+        const after = positionAfter?.qty ?? 0
+        const direction = intent.side === 'buy' ? 1 : -1
+        const deltaConfirmed = direction * (after - before) > 1e-12
+        const orderHasFill = ack.state === 'filled' || (ack.filledQty ?? 0) > 0
+        const inferred = inferPositionAfterFill(
+          symbol, position, intent.side, ack.filledQty, ack.avgPrice,
+          intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? 0,
+        )
+        const reportedFill = ack.filledQty !== undefined && Number.isFinite(ack.filledQty) && ack.filledQty > 0
+        executed = deltaConfirmed || applied.filled || reportedFill
+        if (!deltaConfirmed && reportedFill) {
+          ports.freezeSymbol?.(symbol)
+          ports.journal.appendAudit({
+            actor: 'system', kind: 'open_fill_position_snapshot_mismatch',
+            payload: { decisionId: effectiveDecisionId, symbol, reportedFilledQty: ack.filledQty, observedQty: positionAfter?.qty ?? null, inferredQty: inferred?.qty ?? null },
+            ts: ports.clock.now(),
+          })
+        }
+        if (!deltaConfirmed || positionAfter === undefined) positionAfter = inferred
+        if (cancelAttempted && ack.state === 'acked') {
+          ports.journal.markIntentAcked(intent.clientOrderId, 'unknown', ack.exchangeOrderId, ports.clock.now())
+          ports.freezeSymbol?.(symbol)
+        } else if (deltaConfirmed && !orderHasFill) {
+          ports.journal.markIntentAcked(intent.clientOrderId, 'unknown', ack.exchangeOrderId, ports.clock.now())
+          ports.freezeSymbol?.(symbol)
+        }
+        if (!deltaConfirmed && orderHasFill) ports.freezeSymbol?.(symbol)
+        if (!deltaConfirmed && lookupFailed) {
+          ports.journal.markIntentAcked(intent.clientOrderId, 'unknown', ack.exchangeOrderId, ports.clock.now())
+          ports.freezeSymbol?.(symbol)
+        }
       } catch {
+        const inferred = inferPositionAfterFill(
+          symbol, position, intent.side, ack.filledQty, ack.avgPrice,
+          intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? 0,
+        )
+        if (ack.filledQty !== undefined && Number.isFinite(ack.filledQty) && ack.filledQty > 0) {
+          positionAfter = inferred
+          executed = true
+          ports.journal.appendAudit({
+            actor: 'system', kind: 'open_fill_position_snapshot_mismatch',
+            payload: { decisionId: effectiveDecisionId, symbol, reportedFilledQty: ack.filledQty, observedQty: null, inferredQty: inferred?.qty ?? null },
+            ts: ports.clock.now(),
+          })
+        }
         ports.freezeSymbol?.(symbol)
       }
     }
+    if (action === 'open' && positionAfter !== undefined &&
+        Math.sign(positionAfter.qty) !== Math.sign(intent.side === 'buy' ? 1 : -1)) {
+      ports.freezeSymbol?.(symbol)
+      ports.journal.appendAudit({
+        actor: 'system', kind: 'open_fill_direction_mismatch',
+        payload: { decisionId: effectiveDecisionId, symbol, openPositionQty: positionAfter.qty, orderSide: intent.side },
+        ts: ports.clock.now(),
+      })
+      positionAfter = undefined
+    }
     if (executed) {
       ports.journal.markDecisionExecuted(effectiveDecisionId)
-      // 只有成交的决策才进结算队列（plan §7.9 ④）：到期时刻与"何时重跑该标的"无关。
-      // 视界**按 tf 推导**（plan §12 #18）：1h→4h、4h→16h、1d→24h；全局 4h 常量对 1d 卡过短。
-      if (action === 'open' || action === 'close' || action === 'reduce') {
-        ports.journal.markDecisionReflectionDue(
-          effectiveDecisionId,
-          ports.clock.now() +
-            (ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe)),
-        )
-      }
     }
 
     // ⑤ 成交后**立即**挂保护单（HTX 无原子括号单 ⇒ 已知暴露窗口）
     let protectiveAck: unknown = null
-    if (action === 'open' && executed && stopPrice !== undefined) {
-      const protectiveClientId = numericClientOrderId(`pco:${effectiveDecisionId}`)
-      // 保护单同样要进审计链：否则恢复流程会把它当成"交易所挂着、本地无记录"的孤儿单
-      ports.journal.recordIntent({
-        intentId: `pi:${effectiveDecisionId}`,
-        clientOrderId: protectiveClientId,
-        decisionId: effectiveDecisionId,
-        venue: ports.broker.venue,
+    if (action === 'open' && positionAfter !== undefined && positionAfter.qty !== 0) {
+      protectiveAck = await protectPositionOrClose({
+        broker: ports.broker,
+        journal: ports.journal,
+        clock: ports.clock,
         symbol,
-        state: 'created',
-        type: 'protective',
-        side: intent.side === 'buy' ? 'sell' : 'buy',
-        qty: intent.qty,
-        reduceOnly: true,
-        createdAt: ports.clock.now(),
+        decisionId: effectiveDecisionId,
+        clientOrderId: protectionClientOrderId(effectiveDecisionId, positionAfter.qty),
+        position: positionAfter,
+        ...(stopPrice === undefined ? {} : { stopPrice }),
+        ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
+        referencePrice: intent.price ?? ports.features.latest(symbol, timeframe)?.values.close ?? positionAfter.avgPrice,
+        reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
+        freezeSymbol: ports.freezeSymbol,
+        reason: 'tool_open_fill',
       })
-      try {
-        const pAck = await ports.broker.placeProtective({
-          symbol,
-          clientOrderId: protectiveClientId,
-          stopLossPrice: stopPrice,
-          ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
-        })
-        const protectiveResult = ports.journal.applyOrderAck(pAck, ports.clock.now(), {
-          fallbackQty: intent.qty,
-          fallbackPrice: stopPrice,
-          reflectionHorizonMs: ports.reflectionHorizonMs ?? horizonMsForTimeframe(timeframe),
-        })
-        protectiveAck = pAck
-        if (pAck.state === 'rejected' || protectiveResult.unknown) {
-          await degradeUnprotectedOpen(
-            ports,
-            symbol,
-            intent,
-            effectiveDecisionId,
-            intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
-            'protective_rejected',
-          )
-        }
-      } catch (error) {
-        ports.journal.appendAudit({
-          actor: 'system',
-          kind: 'protection_failed',
-          payload: { decisionId: effectiveDecisionId, symbol, error: String(error) },
-          ts: ports.clock.now(),
-        })
-        await degradeUnprotectedOpen(
-          ports,
-          symbol,
-          intent,
-          effectiveDecisionId,
-          intent.price ?? ports.features.latest(symbol, timeframe)?.values.close,
-          `protective_failed:${String(error)}`,
-        )
-      }
     }
 
     // `close` = 全平 + cancelAll(symbol)（plan §3.3）
     if (action === 'close' && executed) {
       const remaining = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
-      if (remaining === 0) await ports.broker.cancelAll(symbol)
+      if (remaining === 0) await ports.broker.cancelAll(symbol, { includeProtection: true })
       else {
         ports.freezeSymbol?.(symbol)
         ports.journal.appendAudit({ actor: 'system', kind: 'close_not_flat', payload: { decisionId: effectiveDecisionId, symbol, remainingQty: remaining }, ts: ports.clock.now() })
@@ -782,88 +809,30 @@ const tradeExecuteOrder: ToolDefinition = {
       state: ack.state,
       protectiveAck,
     }
-  },
 }
 
-
-/**
- * §6.3 降级：入场成交后保护单挂失败 ⇒ 立即平掉这笔仓位。
- * 与 `execute-action.ts` 的同名逻辑保持同一语义 —— 工具路径与机械执行路径不能有两套保护语义。
- */
-async function degradeUnprotectedOpen(
-  ports: ToolPorts,
-  symbol: string,
-  intent: OrderRequest,
-  decisionId: string,
-  price: number | undefined,
-  reason: string,
-): Promise<void> {
-  const qty = Math.abs(intent.qty)
-  try {
-    const clientOrderId = numericClientOrderId(`degrade:${decisionId}`)
-    ports.journal.recordIntent({
-      intentId: `degrade:${decisionId}`,
-      clientOrderId,
-      decisionId,
-      venue: ports.broker.venue,
-      symbol,
-      state: 'created',
-      type: 'market',
-      side: intent.side === 'buy' ? 'sell' : 'buy',
-      qty,
-      notionalUsd: qty * (price ?? 0),
-      reduceOnly: true,
-      createdAt: ports.clock.now(),
-    })
-    const ack = await ports.broker.placeOrder({
-      intentId: `degrade:${decisionId}`,
-      clientOrderId,
-      decisionId,
-      symbol,
-      type: 'market',
-      side: intent.side === 'buy' ? 'sell' : 'buy',
-      qty,
-      notionalUsd: qty * (price ?? 0),
-      reduceOnly: true,
-    })
-    ports.journal.applyOrderAck(ack, ports.clock.now(), { fallbackQty: qty, fallbackPrice: price })
-    if (ack.state !== 'filled') {
-      ports.freezeSymbol?.(symbol)
-      ports.journal.appendAudit({ actor: 'system', kind: 'protection_degrade_failed', payload: { decisionId, symbol, reason, qty, ackState: ack.state }, ts: ports.clock.now() })
-      return
-    }
-    const remaining = (await ports.broker.getPositions()).find((candidate) => candidate.symbol === symbol)?.qty ?? 0
-    if (remaining !== 0) {
-      ports.freezeSymbol?.(symbol)
-      ports.journal.appendAudit({ actor: 'system', kind: 'protection_degrade_failed', payload: { decisionId, symbol, reason, qty, remainingQty: remaining }, ts: ports.clock.now() })
-      return
-    }
-    ports.journal.appendAudit({
-      actor: 'system',
-      kind: 'protection_degrade_closed',
-      payload: { decisionId, symbol, reason, qty },
-      ts: ports.clock.now(),
-    })
-  } catch (error) {
-    // 平仓也失败 ⇒ 如实落审计；下次对账会看到"有持仓无保护单"并冻结该标的。
-    ports.journal.appendAudit({
-      actor: 'system',
-      kind: 'protection_degrade_failed',
-      payload: { decisionId, symbol, reason, error: String(error), qty },
-      ts: ports.clock.now(),
-    })
-  }
-}
 
 const tradeCancel: ToolDefinition = {
   name: 'trade_cancel',
-  description: '撤单：撤销某标的（或全部）的未结订单。',
+  description: '撤销某标的（或全部）的普通未结单；只有交易所确认目标范围空仓后才会撤保护单。',
   sideEffect: true,
   parameters: { symbol: { type: 'string' } },
-  async execute(args, ports) {
-    const symbol = optionalString(args, 'symbol')
-    await ports.broker.cancelAll(symbol)
-    return { canceled: true, symbol: symbol ?? null }
+  execute(args, ports) {
+    return withExposureLock(ports.journal, async () => {
+      const symbol = optionalString(args, 'symbol')
+      await ports.broker.cancelAll(symbol)
+      try {
+        const positions = await ports.broker.getPositions()
+        const hasPosition = positions.some((position) => position.qty !== 0 && (symbol === undefined || position.symbol === symbol))
+        if (!hasPosition) {
+          await ports.broker.cancelAll(symbol, { includeProtection: true })
+          return { canceled: true, symbol: symbol ?? null, protectionsPreserved: false }
+        }
+        return { canceled: true, symbol: symbol ?? null, protectionsPreserved: true }
+      } catch {
+        return { canceled: true, symbol: symbol ?? null, protectionsPreserved: true, positionState: 'unknown' }
+      }
+    })
   },
 }
 

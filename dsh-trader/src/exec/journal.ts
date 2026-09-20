@@ -98,7 +98,7 @@ export interface FillRecord {
   readonly orderId: string
   readonly qty: number
   readonly price: number
-  readonly fee: number
+  readonly fee: number | null
   readonly feeCurrency: string
   readonly ts: number
 }
@@ -108,7 +108,7 @@ export interface FillView {
   readonly fillId: string
   readonly qty: number
   readonly price: number
-  readonly fee: number
+  readonly fee: number | null
   readonly side: string
   readonly ts: number
 }
@@ -586,7 +586,8 @@ export class DecisionJournal {
         `INSERT INTO fills (fill_id, order_id, qty, price, fee, fee_ccy, ts)
          VALUES (@fillId, @orderId, @qty, @price, @fee, @feeCurrency, @ts)
          -- fill_id 主键与 UNIQUE(order_id, ts, qty)（交易所重复推送）分别兜底
-         ON CONFLICT (fill_id) DO NOTHING
+         ON CONFLICT (fill_id) DO UPDATE SET fee = excluded.fee, fee_ccy = excluded.fee_ccy
+           WHERE fills.fee IS NULL AND excluded.fee IS NOT NULL
          ON CONFLICT (order_id, ts, qty) DO NOTHING`,
       )
       .run({
@@ -654,7 +655,7 @@ export class DecisionJournal {
       fillId: row.fill_id,
       qty: row.qty,
       price: row.price,
-      fee: row.fee ?? 0,
+      fee: row.fee,
       side: row.side,
       ts: row.ts,
     }))
@@ -687,7 +688,7 @@ export class DecisionJournal {
       fillId: row.fill_id,
       qty: row.qty,
       price: row.price,
-      fee: row.fee ?? 0,
+      fee: row.fee,
       side: row.side,
       ts: row.ts,
     }))
@@ -864,11 +865,7 @@ export class DecisionJournal {
   applyOrderAck(
     ack: OrderAck,
     now: number,
-    options: {
-      readonly fallbackQty?: number
-      readonly fallbackPrice?: number
-      readonly reflectionHorizonMs?: number
-    } = {},
+    options: { readonly reflectionHorizonMs?: number } = {},
   ): ApplyOrderAckResult {
     return this.#statements.transaction(() => {
       const intent = this.#statements
@@ -904,14 +901,37 @@ export class DecisionJournal {
         return { state: 'unknown', filled: false, unknown: true, reason: 'ack 缺少 exchangeOrderId' }
       }
 
-      const requestedQty = options.fallbackQty ?? intent.qty ?? 0
-      const filledQty = ack.filledQty ?? (ack.state === 'filled' ? requestedQty : 0)
-      if (ack.state === 'filled') {
-        const price = ack.avgPrice ?? options.fallbackPrice ?? intent.price ?? undefined
-        if (!(filledQty > 0) || price === undefined || !Number.isFinite(price) || !(price > 0)) {
-          this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
-          return { state: 'unknown', filled: false, unknown: true, reason: 'filled ack 缺少可核验成交量/价格' }
-        }
+      const requestedQty = intent.qty
+      if (requestedQty === null || !Number.isFinite(requestedQty) || requestedQty <= 0) {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: '本地 intent 缺少有效请求数量' }
+      }
+      const prior = this.#statements.get(`SELECT filled_qty, avg_price FROM orders
+        WHERE order_id = ? OR (venue = ? AND exchange_order_id = ?) LIMIT 1`)
+        .get(exchangeOrderId, intent.venue, exchangeOrderId) as { filled_qty: number; avg_price: number | null } | undefined
+      const priorFilledQty = prior?.filled_qty ?? 0
+      const reportedFilledQty = ack.filledQty
+      if (reportedFilledQty === undefined && priorFilledQty > 0) {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: '累计部分成交已有记录，但最新 ack 未报告成交量' }
+      }
+      if (reportedFilledQty !== undefined &&
+          (!Number.isFinite(reportedFilledQty) || reportedFilledQty < priorFilledQty - 1e-12 || reportedFilledQty > requestedQty + 1e-12)) {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: '交易所累计成交量无效或倒退' }
+      }
+      const filledQty = reportedFilledQty ?? priorFilledQty
+      const quantityUnchanged = reportedFilledQty !== undefined && Math.abs(reportedFilledQty - priorFilledQty) <= 1e-12
+      const avgPrice = ack.avgPrice ??
+        (reportedFilledQty === undefined || quantityUnchanged ? prior?.avg_price ?? undefined : undefined)
+      const terminal = ack.state === 'filled' || ack.state === 'canceled' || ack.state === 'rejected'
+      const hasFill = filledQty > 0
+      const terminalFill = terminal && hasFill
+      if ((ack.state === 'filled' && (reportedFilledQty === undefined || !hasFill)) ||
+          (terminal && hasFill && (reportedFilledQty === undefined || (ack.avgPrice === undefined && !quantityUnchanged))) ||
+          (hasFill && (avgPrice === undefined || !Number.isFinite(avgPrice) || avgPrice <= 0))) {
+        this.markIntentAcked(ack.clientOrderId, 'unknown', exchangeOrderId, now)
+        return { state: 'unknown', filled: false, unknown: true, reason: '终态/部分成交 ack 缺少可核验成交量或均价' }
       }
 
       this.markIntentAcked(ack.clientOrderId, ack.state, exchangeOrderId, now)
@@ -923,51 +943,51 @@ export class DecisionJournal {
         symbol: intent.symbol,
         status: ack.state,
         qty: requestedQty,
-        filledQty: ack.state === 'filled' ? filledQty : 0,
-        ...(ack.avgPrice === undefined ? {} : { avgPrice: ack.avgPrice }),
+        filledQty,
+        ...(avgPrice === undefined ? {} : { avgPrice }),
         updatedAt: now,
       })
       // recordOrder 是幂等插入；状态刷新必须覆盖之前的 acked 行。
       this.#statements
         .get(
-          `UPDATE orders SET status = ?, filled_qty = ?, avg_price = COALESCE(?, avg_price), updated_at = ?
+          `UPDATE orders SET status = ?, filled_qty = MAX(filled_qty, ?), avg_price = COALESCE(?, avg_price), updated_at = ?
            WHERE order_id = ? OR (venue = ? AND exchange_order_id = ?)`,
         )
         .run(
           ack.state,
-          ack.state === 'filled' ? filledQty : 0,
-          ack.avgPrice ?? null,
+          filledQty,
+          avgPrice ?? null,
           now,
           exchangeOrderId,
           intent.venue,
           exchangeOrderId,
         )
 
-      if (ack.state !== 'filled') return { state: ack.state, filled: false, unknown: false }
-      const price = ack.avgPrice ?? options.fallbackPrice ?? intent.price as number
-      this.recordFill({
-        fillId: `fill:${exchangeOrderId}:${ack.ts}`,
-        orderId: exchangeOrderId,
-        qty: filledQty,
-        price,
-        fee: ack.fee ?? 0,
-        feeCurrency: 'USDT',
-        ts: ack.ts,
-      })
-
-      if (intent.decision_id !== null) {
+      if (hasFill && intent.decision_id !== null) {
         this.markDecisionExecuted(intent.decision_id)
         const action = this.#statements
           .get('SELECT action FROM decisions WHERE decision_id = ?')
           .get(intent.decision_id) as { action: string } | undefined
-        if (action !== undefined && (action.action === 'open' || action.action === 'reduce' || action.action === 'close')) {
+        if (terminalFill && action !== undefined && (action.action === 'open' || action.action === 'reduce' || action.action === 'close')) {
           this.markDecisionReflectionDue(
             intent.decision_id,
             now + (options.reflectionHorizonMs ?? 4 * 3_600_000),
           )
         }
       }
-      return { state: 'filled', filled: true, unknown: false }
+
+      if (!terminalFill) return { state: ack.state, filled: false, unknown: false }
+      this.recordFill({
+        fillId: `fill:${exchangeOrderId}:terminal`,
+        orderId: exchangeOrderId,
+        qty: filledQty,
+        price: avgPrice as number,
+        fee: ack.fee ?? null,
+        feeCurrency: 'USDT',
+        ts: ack.ts,
+      })
+
+      return { state: ack.state, filled: true, unknown: false }
     })
   }
 
@@ -1023,13 +1043,30 @@ export class DecisionJournal {
     readonly symbol: string
     readonly qty: number
     readonly price: number | null
+    readonly decisionId: string | null
+    readonly side: string | null
+    readonly type: string | null
+    readonly stopPrice: number | null
+    readonly reduceOnly: boolean
+    readonly state: OrderState
+    readonly feePending: boolean
   }[] {
     const rows = this.#statements
       .get(
-        `SELECT client_order_id, exchange_order_id, symbol, qty, price
-         FROM order_intents
-         WHERE exchange_order_id IS NOT NULL AND state IN ('created', 'acked', 'unknown')
-         ORDER BY created_at ASC, client_order_id ASC`,
+        `SELECT oi.client_order_id, oi.exchange_order_id, oi.symbol, oi.qty, oi.price,
+                oi.decision_id, oi.side, oi.type, oi.stop_price, oi.reduce_only, oi.state,
+                EXISTS (
+                  SELECT 1 FROM orders o JOIN fills f ON f.order_id = o.order_id
+                  WHERE o.client_order_id = oi.client_order_id AND o.filled_qty > 0 AND f.fee IS NULL
+                ) AS fee_pending
+         FROM order_intents oi
+         WHERE oi.exchange_order_id IS NOT NULL AND (
+           oi.state IN ('created', 'acked', 'unknown') OR EXISTS (
+             SELECT 1 FROM orders o JOIN fills f ON f.order_id = o.order_id
+             WHERE o.client_order_id = oi.client_order_id AND o.filled_qty > 0 AND f.fee IS NULL
+           )
+         )
+         ORDER BY oi.created_at ASC, oi.client_order_id ASC`,
       )
       .all() as {
       client_order_id: string
@@ -1037,6 +1074,13 @@ export class DecisionJournal {
       symbol: string
       qty: number
       price: number | null
+      decision_id: string | null
+      side: string | null
+      type: string | null
+      stop_price: number | null
+      reduce_only: number
+      state: OrderState
+      fee_pending: number
     }[]
     return rows.map((row) => ({
         clientOrderId: row.client_order_id,
@@ -1044,6 +1088,13 @@ export class DecisionJournal {
         symbol: row.symbol,
         qty: row.qty,
         price: row.price,
+        decisionId: row.decision_id,
+        side: row.side,
+        type: row.type,
+        stopPrice: row.stop_price,
+        reduceOnly: row.reduce_only === 1,
+        state: row.state,
+        feePending: row.fee_pending === 1,
     }))
   }
 

@@ -73,9 +73,12 @@ export interface SupervisorConfig {
 }
 
 const DEFAULT_WINDOWS: readonly WindowSpec[] = [
-  { id: 'pre_session', at: '00:30Z' },
-  { id: 'midday', everyMs: 14_400_000 },
-  { id: 'post_session', at: '23:30Z' },
+  { id: 'w1-00', at: '00:00Z' },
+  { id: 'w1-04', at: '04:00Z' },
+  { id: 'w1-08', at: '08:00Z' },
+  { id: 'w1-12', at: '12:00Z' },
+  { id: 'w1-16', at: '16:00Z' },
+  { id: 'w1-20', at: '20:00Z' },
 ]
 
 const MAX_NOTICE_SUMMARY = 120
@@ -413,7 +416,8 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     const now = clock.now()
     windowQueue.enqueueDue([...specs], now)
     if (busy) return
-    const fire = windowQueue.claimOne(now)
+    // 旧配置留下的 pending fire 必须保留审计但不再执行；只领取当前配置声明的窗口。
+    const fire = windowQueue.claimOne(now, specs.map((spec) => spec.id))
     if (fire !== undefined) void driveWindow(fire)
   }, windowScanMs)
 

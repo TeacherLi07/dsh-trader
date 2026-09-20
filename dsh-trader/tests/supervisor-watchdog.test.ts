@@ -168,7 +168,7 @@ describe('Reconciler', () => {
     expect(cancelled).toEqual(['ex-orphan-1'])
     expect(events.length).toBeGreaterThan(0)
     expect(events[0]?.action.kind).toBe('cancel_orphan')
-    expect(output.freezeTrading).toBe(false)
+    expect(output.freezeTrading).toBe(true)
   })
 
   it('alerts and freezes on unknown positions', async () => {

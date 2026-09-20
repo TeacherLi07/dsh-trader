@@ -75,6 +75,9 @@ describe('DecisionRunStore', () => {
       costKnown: true,
     })
     expect(store.require('run-1', { symbol: savedContext.symbol }).runId).toBe('run-1')
+    expect(() => store.update('run-1', { final: { outcome: 'act' } }, 2_000)).toThrow(/已终结/)
+    expect(store.get('run-1')?.final).toEqual({ outcome: 'no_trade' })
+    expect(() => db.prepare("UPDATE decision_runs SET final_json = '{}' WHERE run_id = 'run-1'").run()).toThrow(/terminal/)
   })
 
   it('同一 runId 不可换绑 context，且错误 context 会被拒绝', () => {

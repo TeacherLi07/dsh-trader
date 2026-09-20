@@ -40,6 +40,20 @@ const SYSTEM_PROMPT = [
   '缺失、过期或暖机不足不是数值 0。不得声称未展开或未提供的内容已经被观察。',
 ].join('\n')
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function configuredMaxChars(context: DecisionContext): number | undefined {
+  const mandate = context.sections.mandate.value
+  if (!isRecord(mandate) || !Object.prototype.hasOwnProperty.call(mandate, 'contextConfig')) return undefined
+  const contextConfig = mandate.contextConfig
+  if (!isRecord(contextConfig) || !Number.isSafeInteger(contextConfig.maxChars) || Number(contextConfig.maxChars) <= 0) {
+    throw new Error('DecisionContext mandate.contextConfig.maxChars 无效')
+  }
+  return Number(contextConfig.maxChars)
+}
+
 /**
  * 把完整 canonical context 放入一个 user message。超预算时抛错并拒绝调用，永不静默截断事实、
  * 计划、订单、额度或失败状态；调用方可将该异常记为 REVIEW/decision_only。
@@ -49,7 +63,12 @@ export function renderDecisionRequest(
   options: { readonly maxChars?: number; readonly promptVersion?: string } = {},
 ): RenderedDecisionRequest {
   assertDecisionContext(context)
-  const maxChars = decisionContextConfig({ maxChars: options.maxChars ?? DEFAULT_DECISION_CONTEXT_CONFIG.maxChars }).maxChars
+  const frozenLimit = configuredMaxChars(context) ?? DEFAULT_DECISION_CONTEXT_CONFIG.maxChars
+  const callerLimit = options.maxChars === undefined
+    ? undefined
+    : decisionContextConfig({ maxChars: options.maxChars }).maxChars
+  // 调用方可以进一步收紧限制，但不能覆盖冻结上下文里审计过的预算。
+  const maxChars = Math.min(frozenLimit, callerLimit ?? frozenLimit)
   const promptVersion = options.promptVersion ?? DECISION_REQUEST_PROMPT_VERSION
   if (promptVersion.trim() === '') throw new Error('promptVersion 不能为空')
   const contextJson = canonicalDecisionContext(context)

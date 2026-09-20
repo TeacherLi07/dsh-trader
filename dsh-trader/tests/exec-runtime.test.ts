@@ -4,7 +4,7 @@ import { ReplayClock } from '../src/clock.js'
 import { EXAMPLE_LIMITS } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
 import { Statements } from '../src/db/statements.js'
-import type { CcxtBalanceLike, CcxtOrderLike, CcxtPositionLike, CcxtProExchangeLike, CcxtTradeLike } from '../src/exec/ccxt-broker.js'
+import type { CcxtBalanceLike, CcxtMarketLike, CcxtOrderLike, CcxtPositionLike, CcxtProExchangeLike, CcxtTradeLike } from '../src/exec/ccxt-broker.js'
 import type { AccountSnapshot, OrderRequest } from '../src/exec/broker.js'
 import { validateIntent } from '../src/exec/gate.js'
 import { DecisionJournal } from '../src/exec/journal.js'
@@ -31,9 +31,14 @@ class FakeExchange implements CcxtProExchangeLike {
   cancelCalls: string[] = []
   balance: CcxtBalanceLike = { total: { USDT: '1234.5' } }
   positions: readonly CcxtPositionLike[] = []
+  markets: Readonly<Record<string, CcxtMarketLike>> = {}
   openOrders: readonly CcxtOrderLike[] = []
   trades: readonly CcxtTradeLike[] = []
+  directOrder: CcxtOrderLike | undefined
+  createdOrders: CcxtOrderLike[] = []
   createOrderCalls = 0
+  fetchOpenOrdersCalls = 0
+  failFetchOpenOrdersCall: number | undefined
 
   async loadMarkets(): Promise<unknown> {
     this.loads += 1
@@ -55,6 +60,8 @@ class FakeExchange implements CcxtProExchangeLike {
     _limit?: number,
     _params?: Readonly<Record<string, unknown>>,
   ): Promise<readonly CcxtOrderLike[]> {
+    this.fetchOpenOrdersCalls += 1
+    if (this.fetchOpenOrdersCalls === this.failFetchOpenOrdersCall) throw new Error('temporary order read failure')
     return symbol === undefined
       ? this.openOrders
       : this.openOrders.filter((order) => order.symbol === undefined || order.symbol === symbol)
@@ -69,20 +76,27 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>,
   ): Promise<CcxtOrderLike> {
     this.createOrderCalls += 1
-    return {
-      id: 'fake-order',
+    const order: CcxtOrderLike = {
+      id: `fake-order-${this.createOrderCalls}`,
       clientOrderId: params?.['clientOrderId'],
       symbol,
       type,
       side,
       amount,
       ...(price === undefined ? {} : { price }),
+      ...(params?.['reduceOnly'] === undefined ? {} : { reduceOnly: params['reduceOnly'] }),
+      ...(params?.['stopLossPrice'] === undefined ? {} : { stopPrice: params['stopLossPrice'] }),
       status: 'open',
     }
+    this.createdOrders.push(order)
+    this.openOrders = [...this.openOrders, order]
+    return order
   }
 
   async cancelOrder(id: string): Promise<void> {
     this.cancelCalls.push(id)
+    if (this.directOrder?.id === id) this.directOrder = { ...this.directOrder, status: 'canceled' }
+    this.openOrders = this.openOrders.filter((order) => order.id !== id)
   }
 
   async fetchOrder(
@@ -90,7 +104,9 @@ class FakeExchange implements CcxtProExchangeLike {
     _symbol?: string,
     _params?: Readonly<Record<string, unknown>>,
   ): Promise<CcxtOrderLike | undefined> {
-    return undefined
+    return this.directOrder?.id === _id
+      ? this.directOrder
+      : this.openOrders.find((order) => order.id === _id)
   }
 
   async fetchMyTrades(
@@ -321,6 +337,141 @@ describe('ExecRuntime 组合根', () => {
     db.close()
   })
 
+  it('report-only 模式发现远端孤儿挂单时冻结该 symbol', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const exchange = new FakeExchange()
+    exchange.openOrders = [{ id: 'orphan-order', clientOrderId: 'foreign-client', symbol: SYMBOL, status: 'open', type: 'limit', amount: 1, price: 100 }]
+    const runtime = await createExecRuntime(
+      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret', liveAckOrphans: false }),
+      { db, clock, createExchange: () => exchange },
+    )
+    try {
+      const report = await runtime.reconcileOnce()
+      expect(report.result.actions.some((action) => action.kind === 'cancel_orphan')).toBe(true)
+      expect(report.freezeTrading).toBe(true)
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(true)
+      expect(exchange.cancelCalls).toEqual([])
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('acked intent 按交易所订单号查不到时转 unknown 并冻结，不能静默跳过', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const journal = new DecisionJournal(db)
+    journal.recordDecision({
+      decisionId: 'missing-order-decision', symbol: SYMBOL, decidedAt: NOW,
+      contextHash: 'missing-order-context', action: 'open', executed: false,
+    })
+    journal.recordIntent({
+      intentId: 'missing-order-intent', clientOrderId: 'missing-order-client', decisionId: 'missing-order-decision',
+      venue: 'htx', symbol: SYMBOL, state: 'acked', type: 'market', side: 'buy', qty: 1,
+      stopPrice: 90, reduceOnly: false, createdAt: NOW, exchangeOrderId: 'missing-exchange-id',
+    })
+    const runtime = await createExecRuntime(
+      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      { db, clock, createExchange: () => new FakeExchange() },
+    )
+    try {
+      expect(journal.pollableIntents()[0]?.clientOrderId).toBe('missing-order-client')
+      expect(journal.inFlightIntents()[0]?.state).toBe('unknown')
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(true)
+      const account = await runtime.broker.getAccount()
+      expect(validateIntent({
+        intentId: 'new-open', clientOrderId: 'new-open', decisionId: 'new-open',
+        symbol: SYMBOL, type: 'market', side: 'buy', qty: 0.01, notionalUsd: 1,
+      }, account, {
+        mode: 'live_auto', limits: EXAMPLE_LIMITS, duplicateDecision: false,
+        paperVenue: 'paper', frozenSymbols: runtime.frozenSymbols(),
+      })).toMatchObject({ kind: 'deny' })
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('周期状态轮询把延迟部分成交落账并补挂交易所侧保护', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const journal = new DecisionJournal(db)
+    journal.recordDecision({
+      decisionId: 'late-open-decision', symbol: SYMBOL, decidedAt: NOW,
+      contextHash: 'late-open-context', action: 'open', executed: false,
+    })
+    journal.recordIntent({
+      intentId: 'late-open-intent', clientOrderId: 'late-open-client', decisionId: 'late-open-decision',
+      venue: 'htx', symbol: SYMBOL, state: 'acked', type: 'market', side: 'buy', qty: 1,
+      stopPrice: 90, reduceOnly: false, createdAt: NOW, exchangeOrderId: 'late-open-exchange',
+    })
+    const exchange = new FakeExchange()
+    exchange.markets = { [SYMBOL]: { linear: true, contractSize: 0.1, precision: { amount: 0.1 } } }
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2.5, entryPrice: 100, markPrice: 100 }]
+    exchange.directOrder = {
+      id: 'late-open-exchange', clientOrderId: 'late-open-client', symbol: SYMBOL,
+      type: 'market', side: 'buy', amount: 10, filled: 2.5, average: 100, status: 'partial',
+    }
+    exchange.openOrders = [exchange.directOrder]
+
+    const runtime = await createExecRuntime(
+      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      { db, clock, createExchange: () => exchange },
+    )
+    try {
+      expect(journal.fillIds()).toEqual(['fill:late-open-exchange:terminal'])
+      expect(journal.fillsForDecision('late-open-decision')).toMatchObject([{ qty: 0.25, price: 100 }])
+      expect(exchange.createdOrders.some((order) => order.stopPrice === 90)).toBe(true)
+      const position = (await runtime.broker.getPositions()).find((item) => item.symbol === SYMBOL)
+      expect(position).toMatchObject({ qty: 0.25, protectedStopPrice: 90 })
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(false)
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('启动对账短暂失败时保留 runtime：冻结新敞口但仍可走减险硬闸', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const exchange = new FakeExchange()
+    // CrashRecovery 会按单标的读 6 个普通/算法列表；让随后的第一次完整对账读失败一次。
+    exchange.failFetchOpenOrdersCall = 7
+    const runtime = await createExecRuntime(
+      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      { db, clock, createExchange: () => exchange },
+    )
+    try {
+      expect(runtime.getPorts()).toBeDefined()
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(true)
+      const account = await runtime.broker.getAccount()
+      const reducing: OrderRequest = {
+        intentId: 'reduce-after-startup-reconcile-failure',
+        clientOrderId: 'reduce-after-startup-reconcile-failure',
+        decisionId: 'reduce-after-startup-reconcile-failure',
+        symbol: SYMBOL,
+        type: 'market',
+        side: 'sell',
+        qty: 0.01,
+        notionalUsd: 1,
+        reduceOnly: true,
+      }
+      expect(validateIntent(reducing, account, {
+        mode: 'live_auto', limits: EXAMPLE_LIMITS, duplicateDecision: false,
+        paperVenue: 'paper', frozenSymbols: runtime.frozenSymbols(),
+      })).toEqual({ kind: 'allow' })
+
+      const report = await runtime.reconcileOnce()
+      expect(report.consistent).toBe(true)
+      await Promise.resolve()
+      expect(runtime.frozenSymbols().has(SYMBOL)).toBe(false)
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
   it('Docker 重启恢复先收敛在途意图，再进入普通对账', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
@@ -482,6 +633,7 @@ describe('ExecRuntime 组合根', () => {
         venue: 'htx',
         equityQuote: 4_321,
         totalExposureUsd: 0,
+        pendingExposureUsd: 0,
         openOrders: 0,
         leverage: 0,
         dailyLossUsd: 0,

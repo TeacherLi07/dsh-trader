@@ -131,6 +131,11 @@ CREATE TABLE IF NOT EXISTS decision_runs (
 );
 CREATE INDEX IF NOT EXISTS decision_runs_context_lookup
   ON decision_runs (context_hash, symbol, status, created_at);
+CREATE TRIGGER IF NOT EXISTS decision_runs_terminal_no_update
+  BEFORE UPDATE ON decision_runs
+  WHEN OLD.status IN ('completed', 'review', 'failed') BEGIN
+    SELECT RAISE(ABORT, 'decision run is terminal');
+  END;
 
 CREATE TABLE IF NOT EXISTS plan_cards (
   plan_id TEXT PRIMARY KEY,

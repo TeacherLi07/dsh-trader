@@ -82,11 +82,15 @@ export class SupervisorWindowQueue {
   }
 
   /** 原子领取一个最早 pending fire；busy 时调用方不领取，因此不会制造跳过。 */
-  claimOne(now: number): WindowQueueItem | undefined {
+  claimOne(now: number, activeWindowIds?: readonly string[]): WindowQueueItem | undefined {
+    if (activeWindowIds !== undefined && activeWindowIds.length === 0) return undefined
+    const activeFilter = activeWindowIds === undefined
+      ? ''
+      : ` AND window_id IN (${activeWindowIds.map(() => '?').join(', ')})`
     const select = this.#statements.get(
       `SELECT window_id, fire_ts, attempts, last_error
        FROM supervisor_windows
-       WHERE state = 'pending'
+       WHERE state = 'pending'${activeFilter}
        ORDER BY fire_ts ASC, window_id ASC
        LIMIT 1`,
     )
@@ -96,7 +100,7 @@ export class SupervisorWindowQueue {
        WHERE window_id = ? AND fire_ts = ? AND state = 'pending'`,
     )
     const claim = this.db.transaction(() => {
-      const row = select.get() as WindowRow | undefined
+      const row = select.get(...(activeWindowIds ?? [])) as WindowRow | undefined
       if (row === undefined) return undefined
       const result = update.run(now, row.window_id, row.fire_ts)
       if (Number(result.changes) !== 1) return undefined

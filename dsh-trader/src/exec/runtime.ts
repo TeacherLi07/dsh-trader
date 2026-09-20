@@ -14,7 +14,7 @@ import { BarArchive } from '../market/archive.js'
 import { FeatureArchive } from '../market/feature-archive.js'
 import { PlanStore } from '../plan/store.js'
 import { HtxBroker, type CcxtProExchangeLike, type RiskStateProvider } from './ccxt-broker.js'
-import type { Broker, Venue } from './broker.js'
+import type { Broker, OrderAck, PositionSnapshot, Venue } from './broker.js'
 import { DecisionJournal } from './journal.js'
 import { StartupTracker } from './startup.js'
 import { PaperBroker } from './paper.js'
@@ -31,6 +31,8 @@ import { CrashRecovery, type ClientOrderLookup } from './recovery.js'
 import { SettlementScheduler } from '../memory/settle.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
 import { decisionContextConfig } from '../agents/context-config.js'
+import { protectPositionOrClose, protectionClientOrderId } from './protection.js'
+import { withExposureLock } from './exposure-lock.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx']
@@ -299,13 +301,12 @@ function defaultPriceOf(bars: BarArchive, symbols: readonly string[], timeframes
   }
 }
 
-type FreezeAction = Extract<
-  ReconciliationAction,
-  { readonly kind: 'alert_unknown_position' | 'alert_unprotected_position' | 'alert_qty_mismatch' }
->
+type FreezeAction = Extract<ReconciliationAction, { readonly symbol?: string }>
 
 function isFreezeAction(action: ReconciliationAction): action is FreezeAction {
   return (
+    action.kind === 'cancel_orphan' ||
+    action.kind === 'alert_missing_order' ||
     action.kind === 'alert_unknown_position' ||
     action.kind === 'alert_unprotected_position' ||
     action.kind === 'alert_qty_mismatch'
@@ -403,6 +404,8 @@ export async function createExecRuntime(
   // plan §4.2/§6.3「冻结自动交易」的唯一通道。旧实现只把冻结算进 Set、无任何消费方，
   // 于是"已冻结"的同时照常开仓（审计说冻结、行为没冻结）。
   const frozen = new Set<string>()
+  // 读取失败造成的组合级临时冻结可在一次完整成功对账后解除；具体订单/持仓冲突仍留在 frozen。
+  const reconciliationFailureFrozen = new Set<string>()
 
   const freezeSymbol = (symbol: string): void => {
     frozen.add(symbol)
@@ -414,7 +417,7 @@ export async function createExecRuntime(
   }
 
   const frozenSymbols = (): ReadonlySet<string> => {
-    const current = new Set(frozen)
+    const current = new Set([...frozen, ...reconciliationFailureFrozen])
     if (heartbeat.isHalted()) {
       // halt 是组合级的死人开关，不只冻结触发故障的标的；否则其它配置标的
       // 仍能增加敞口，/halt 的安全承诺会被分片绕过。每次读取数据库使得
@@ -454,8 +457,91 @@ export async function createExecRuntime(
   let running: Promise<ExecReconciliationReport> | undefined
 
   const updateFrozen = (actions: readonly ReconciliationAction[]): void => {
-    for (const action of actions) if (isFreezeAction(action)) frozen.add(action.symbol)
+    for (const action of actions) {
+      if (!isFreezeAction(action)) continue
+      if ('symbol' in action && action.symbol !== undefined && action.symbol !== '') frozen.add(action.symbol)
+      else for (const symbol of config.symbols) frozen.add(symbol)
+    }
   }
+
+  const protectLateOpen = async (
+    intent: ReturnType<DecisionJournal['pollableIntents']>[number],
+    ack?: OrderAck,
+  ): Promise<void> => withExposureLock(journal, async () => {
+    if (intent.reduceOnly) return
+    if (intent.decisionId === null) {
+      frozen.add(intent.symbol)
+      journal.appendAudit({
+        actor: 'system', kind: 'late_open_without_decision',
+        payload: { symbol: intent.symbol, clientOrderId: intent.clientOrderId }, ts: deps.clock.now(),
+      })
+      return
+    }
+    try {
+      let position: PositionSnapshot | undefined
+      try {
+        position = (await broker.getPositions()).find((item) => item.symbol === intent.symbol)
+      } catch (error) {
+        if (ack?.filledQty === undefined || ack.filledQty <= 0 ||
+            (intent.side !== 'buy' && intent.side !== 'sell')) throw error
+        position = {
+          symbol: intent.symbol,
+          qty: intent.side === 'buy' ? ack.filledQty : -ack.filledQty,
+          avgPrice: ack.avgPrice ?? intent.price ?? 0,
+          unrealizedPnlUsd: 0,
+        }
+      }
+      const localPosition = local.positions().find((item) => item.symbol === intent.symbol)
+      if (localPosition !== undefined && localPosition.qty !== 0 &&
+          (position === undefined || position.qty === 0 ||
+           Math.sign(position.qty) !== Math.sign(localPosition.qty) ||
+           Math.abs(position.qty) + 1e-12 < Math.abs(localPosition.qty))) {
+        frozen.add(intent.symbol)
+        journal.appendAudit({
+          actor: 'system', kind: 'late_open_position_snapshot_mismatch',
+          payload: { symbol: intent.symbol, clientOrderId: intent.clientOrderId, localQty: localPosition.qty, remoteQty: position?.qty ?? null },
+          ts: deps.clock.now(),
+        })
+        position = {
+          symbol: intent.symbol,
+          qty: localPosition.qty,
+          avgPrice: position?.avgPrice ?? ack?.avgPrice ?? intent.price ?? 0,
+          unrealizedPnlUsd: position?.unrealizedPnlUsd ?? 0,
+        }
+      }
+      if (position === undefined && ack?.filledQty !== undefined && ack.filledQty > 0 &&
+          (intent.side === 'buy' || intent.side === 'sell')) {
+        position = {
+          symbol: intent.symbol,
+          qty: intent.side === 'buy' ? ack.filledQty : -ack.filledQty,
+          avgPrice: ack.avgPrice ?? intent.price ?? 0,
+          unrealizedPnlUsd: 0,
+        }
+      }
+      if (position === undefined || position.qty === 0) return
+      await protectPositionOrClose({
+        broker,
+        journal,
+        clock: deps.clock,
+        symbol: intent.symbol,
+        decisionId: intent.decisionId,
+        clientOrderId: protectionClientOrderId(intent.decisionId, position.qty),
+        position,
+        ...(intent.stopPrice === null ? {} : { stopPrice: intent.stopPrice }),
+        referencePrice: position.avgPrice,
+        reflectionHorizonMs: config.reflectionHorizonMs ?? 4 * 3_600_000,
+        freezeSymbol,
+        reason: 'late_or_partial_open_fill',
+      })
+    } catch (error) {
+      frozen.add(intent.symbol)
+      journal.appendAudit({
+        actor: 'system', kind: 'late_open_protection_check_failed',
+        payload: { symbol: intent.symbol, clientOrderId: intent.clientOrderId, error: String(error) },
+        ts: deps.clock.now(),
+      })
+    }
+  })
 
   const reconcileOperation = async (): Promise<ExecReconciliationReport> => {
     const ranAt = deps.clock.now()
@@ -463,19 +549,72 @@ export async function createExecRuntime(
     // 把 delayed fill 走同一 journal 状态机，避免只更新远端仓位却丢本地成交链。
     if (broker.findOrderByExchangeOrderId !== undefined) {
       for (const intent of journal.pollableIntents()) {
+        let ack: Awaited<ReturnType<NonNullable<Broker['findOrderByExchangeOrderId']>>> | undefined
         try {
-          const ack = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
-          if (ack !== undefined) {
-            const applied = journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now(), {
-              fallbackQty: intent.qty,
-              fallbackPrice: intent.price ?? undefined,
-            })
-            if (applied.unknown) frozen.add(intent.symbol)
-          }
+          ack = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
         } catch (error) {
-          frozen.add(intent.symbol)
-          journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          if (intent.feePending) {
+            journal.appendAudit({ actor: 'system', kind: 'fill_fee_refresh_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          } else {
+            frozen.add(intent.symbol)
+            journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          }
         }
+        if (intent.feePending) {
+          // 终态成交只因费用尚未回填而重试；不重复运行迟到开仓保护逻辑，避免旧决策给新仓位挂旧止损。
+          if (ack?.fee !== undefined && ack.state === intent.state) {
+            journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now())
+          } else if (ack?.fee !== undefined) {
+            journal.appendAudit({
+              actor: 'system', kind: 'fill_fee_refresh_state_mismatch',
+              payload: { symbol: intent.symbol, clientOrderId: intent.clientOrderId, expectedState: intent.state, observedState: ack.state },
+              ts: deps.clock.now(),
+            })
+          }
+          continue
+        }
+        if (ack === undefined) {
+          journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+          frozen.add(intent.symbol)
+          journal.appendAudit({ actor: 'system', kind: 'order_lookup_missing', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, clientOrderId: intent.clientOrderId }, ts: deps.clock.now() })
+          await protectLateOpen(intent)
+          continue
+        }
+        if (broker.venue === 'htx' && !intent.reduceOnly && ack.state === 'acked') {
+          let finalLookupMissing = false
+          try {
+            await broker.cancelOrder(intent.exchangeOrderId)
+          } catch (error) {
+            journal.appendAudit({ actor: 'system', kind: 'open_order_cancel_uncertain', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          }
+          try {
+            const settled = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
+            if (settled !== undefined) ack = settled
+            else {
+              journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+              frozen.add(intent.symbol)
+              finalLookupMissing = true
+            }
+          } catch (error) {
+            journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+            frozen.add(intent.symbol)
+            finalLookupMissing = true
+            journal.appendAudit({ actor: 'system', kind: 'open_order_final_lookup_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          }
+          if (finalLookupMissing) {
+            await protectLateOpen(intent, ack)
+            continue
+          }
+          if (ack.state === 'acked') {
+            journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+            frozen.add(intent.symbol)
+            await protectLateOpen(intent)
+            continue
+          }
+        }
+        const applied = journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now())
+        if (applied.unknown) frozen.add(intent.symbol)
+        await protectLateOpen(intent, ack)
       }
     }
     if (!acknowledgeOrphans) {
@@ -485,6 +624,7 @@ export async function createExecRuntime(
         remoteOrders: remoteOrders.map((order) => ({
           ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
           ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
+          ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
         })),
         localPositions: local.positions(),
         remotePositions: remotePositions.map((position) => ({
@@ -522,7 +662,7 @@ export async function createExecRuntime(
       localOrders: () => local.orders(),
       localPositions: () => local.positions(),
       onAlert: (event) => {
-        if (isFreezeAction(event.action)) frozen.add(event.action.symbol)
+        updateFrozen([event.action])
         journal.appendAudit({ actor: 'system', kind: 'reconcile_action', payload: event, ts: event.at })
       },
     })
@@ -551,7 +691,8 @@ export async function createExecRuntime(
     const operation = reconcileOperation()
     running = operation
     void operation.then(
-      () => {
+      (report) => {
+        if (report.consistent && report.actions.length === 0) reconciliationFailureFrozen.clear()
         if (running === operation) running = undefined
       },
       () => {
@@ -564,7 +705,7 @@ export async function createExecRuntime(
   const onPeriodicError = (error: unknown): void => {
     // 周期任务不能把 rejected Promise 变成未处理异常；错误仍须可审计，且未知状态时
     // 把配置范围全部冻结，避免上层把一次不完整对账当成一致。
-    for (const symbol of config.symbols) frozen.add(symbol)
+    for (const symbol of config.symbols) reconciliationFailureFrozen.add(symbol)
     journal.appendAudit({
       actor: 'system',
       kind: 'reconcile_failed',
@@ -673,28 +814,34 @@ export async function createExecRuntime(
     startup.fail('recovery', error)
   }
 
+  let startupReconcileFailed = false
   try {
-    // 启动先对账，再注册周期任务；启动报告失败就不返回看似可用的 runtime。
     startup.start('reconcile')
     await reconcileOnce()
     startup.succeed('reconcile')
-    if (!disposed) timer = deps.clock.setInterval(() => void reconcileOnce().catch(onPeriodicError), config.reconcileMs)
-    if (!disposed) {
-      settleTimer = deps.clock.setInterval(
-        () => void runSettlementsSingleFlight().catch(onSettlementError),
-        config.settleMs ?? 60_000,
-      )
-    }
+  } catch (error) {
+    // 初始读失败时仍发布只允许降险的组合根：broker 后续若恢复可读，减仓/平仓可重新取实时状态执行。
+    // 新增敞口由 reconciliationFailureFrozen 拦截；周期对账成功且完整后才解除该临时冻结。
+    startupReconcileFailed = true
+    startup.fail('reconcile', error)
+    for (const symbol of config.symbols) reconciliationFailureFrozen.add(symbol)
+    journal.appendAudit({
+      actor: 'system',
+      kind: 'reconcile_failed',
+      payload: { startup: true, error: String(error), freezeSymbols: [...config.symbols] },
+      ts: deps.clock.now(),
+    })
+  }
+  if (!disposed) timer = deps.clock.setInterval(() => void reconcileOnce().catch(onPeriodicError), config.reconcileMs)
+  if (!disposed) {
+    settleTimer = deps.clock.setInterval(
+      () => void runSettlementsSingleFlight().catch(onSettlementError),
+      config.settleMs ?? 60_000,
+    )
+  }
+  if (!startupReconcileFailed) {
     startup.start('ready')
     startup.succeed('ready')
-  } catch (error) {
-    startup.fail('reconcile', error)
-    disposed = true
-    timer?.()
-    settleTimer?.()
-    unsubscribe()
-    await closeExchange?.()
-    throw error
   }
 
   return {

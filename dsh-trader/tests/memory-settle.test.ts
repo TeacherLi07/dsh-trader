@@ -72,7 +72,7 @@ function flatBars(symbol: string, closes: readonly number[], range = 1): void {
 /** 一条"已成交"的决策：decisions → order_intents → orders → fills 全链打通。 */
 function executedDecision(
   over: Partial<DecisionRecord> & { readonly decisionId: string },
-  fill: { readonly side: 'buy' | 'sell'; readonly price: number; readonly qty: number; readonly fee: number },
+  fill: { readonly side: 'buy' | 'sell'; readonly price: number; readonly qty: number; readonly fee: number | null },
 ): void {
   const decision: DecisionRecord = {
     symbol: 'BTC/USDT',
@@ -279,6 +279,32 @@ describe('acceptReflection', () => {
 })
 
 describe('SettlementScheduler', () => {
+  it('真实成交手续费未知时保持 pending，不把未知成本按 0 结算', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecision({ decisionId: 'fee-unknown' }, { side: 'buy', price: 100, qty: 1, fee: null })
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.scanned).toBeGreaterThan(0)
+    expect(result.deferred).toBe(1)
+    expect(result.deferredIds).toContain('fee-unknown')
+    expect(journal.outcomeFor('fee-unknown')).toBeUndefined()
+    expect(journal.pendingSettlements(NOW)).toHaveLength(1)
+  })
+
+  it('真实成交手续费未知时保持 pending，不把未知成本按 0 结算', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecision({ decisionId: 'fee-unknown' }, { side: 'buy', price: 100, qty: 1, fee: null })
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.scanned).toBeGreaterThan(0)
+    expect(result.deferred).toBe(1)
+    expect(result.deferredIds).toContain('fee-unknown')
+    expect(journal.outcomeFor('fee-unknown')).toBeUndefined()
+    expect(journal.pendingSettlements(NOW)).toHaveLength(1)
+  })
+
   it('未显式传 horizonMs 时按计划卡 tf 推导并写入 outcome', async () => {
     flatBars('BTC/USDT', [100, 101, 102, 103, 104])
     flatBars(BENCH, [100, 100, 100, 100, 100])

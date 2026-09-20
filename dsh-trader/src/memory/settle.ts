@@ -80,7 +80,10 @@ export function computeSettlement(
 ): SettlementComputation {
   const { decision, fills, entryPrice, direction, bars, benchmarkBars } = inputs
 
-  const feesQuote = fills.reduce((sum, fill) => sum + (Number.isFinite(fill.fee) ? fill.fee : 0), 0)
+  if (fills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) {
+    throw new Error('成交手续费未知，不能按 0 结算')
+  }
+  const feesQuote = fills.reduce((sum, fill) => sum + (fill.fee as number), 0)
   // 仓位规模取**首笔（入场腿）**的数量，而不是所有成交之和：
   // 保护单成交现在也会归属到同一条决策，求和会把两条腿叠加成 2× 仓位。
   const qty = fills.length > 0 ? Math.abs((fills[0] as FillView).qty) : 0
@@ -298,6 +301,11 @@ export class SettlementScheduler {
       try {
         const fills = this.deps.journal.fillsForDecision(decision.decisionId)
         const entry = fills.length > 0 ? (fills[0] as FillView) : undefined
+
+        if (fills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) {
+          deferredIds.push(decision.decisionId)
+          continue
+        }
 
         const horizonEnd = decision.decidedAt + horizonMs
         // `until` 是**开区间**：`open_time < horizonEnd` ⇒ 只取在 horizon 内收盘的 bar。

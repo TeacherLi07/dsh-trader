@@ -16,7 +16,7 @@
 
 当前已完成行情、DSL、paper/HTX broker、订单状态机、保护单、恢复、对账与审计基础，以及 R1
 的 schema v5 / context / run 存储和 R2 的双时间行情归档、DecisionContext 组装与请求渲染。R2
-使用固定 PIT 样本捕获渲染结果，未调用真实模型；生产判断仍走旧多分析师链，R3 才接通新渲染器、
+使用固定 PIT 样本捕获渲染结果，未调用真实模型；2026-09-20 的 SR1 安全审查修复已合并，生产判断仍走旧多分析师链，R3 才接通新渲染器、
 single/critique 与 eligibility。生产结算已启动，reflector 尚未接入；W2/W3 尚未驱动生产判断。
 
 本计划评估的是价格、衍生品、组合状态支持的交易判断，不宣称覆盖 LLM 的全部交易能力。当前
@@ -30,7 +30,7 @@ single/critique 与 eligibility。生产结算已启动，reflector 尚未接入
 
 1. 密钥不进 prompt、日志和数据库；实盘 key 禁止提现并绑定 IP。
 2. 交易所 + SQLite 是权威状态；模型上下文只是可重建投影。
-3. 每次增加敞口前重取账户、持仓、挂单、价格与市场规格。
+3. 每次增加敞口前在同 runtime 的账户锁内重取账户、持仓、挂单及其未成交名义金额、价格与市场规格；agent 工具、机械执行、撤单和迟到保护共用锁；无法估值的在途单阻止新增敞口。
 4. 最大单笔名义、总敞口、杠杆、日亏、回撤、连续亏损、点差和挂单数由代码强制。
 5. 数量、精度、最小额和保护价由代码计算；模型不得直接给最终 `qty`。
 6. 幂等、订单状态机、启动恢复、周期对账、冻结与 kill switch 不可绕过。
@@ -169,7 +169,7 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 表组 | 表 | 不变量 |
 |---|---|---|
 | 行情 | `bars`, `features`, `bar_processing`, `market_observations` | 只处理已收盘 bar；PIT 观测按 event/available 双时间只追加；同一 bar 成功后才推进游标 |
-| 判断 | `decision_contexts`, `decision_runs`, `decisions`, `plan_cards` | context 全文可复现；一轮一个最终裁决；每标的一张 active 卡 |
+| 判断 | `decision_contexts`, `decision_runs`, `decisions`, `plan_cards` | context 全文可复现；终态 run 由 SQLite trigger 禁止改写；一轮一个最终裁决；每标的一张 active 卡 |
 | 执行 | `order_intents`, `orders`, `fills` | client id 唯一；状态单向迁移；重复回报不重复成交 |
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
 | 触发 | `triggers`, `supervisor_window_cursors`, `supervisor_windows` | 去重、限流、失败重试、重启恢复 |
@@ -213,7 +213,7 @@ reduce/close 仍可执行。
 | market | `15m/1h/4h` 有界已收盘序列；趋势、波动、位置、斜率、分位及其计算窗口 |
 | derivatives | funding/OI/basis/清算当前值与 `1h/4h/24h` 变化；资金费周期/下次结算时点，无法取得时显式缺失 |
 | benchmark | BTC 真实序列、相对强弱、相关性及样本数；不能只给 symbol |
-| portfolio | 权益、持仓、普通单、算法保护单、未决订单、剩余保证金、集中度、冻结与对账状态 |
+| portfolio | 权益、持仓、普通单、算法保护单、未决订单及其敞口、剩余保证金、集中度、冻结与新鲜对账状态 |
 | activePlan | 完整论点、承诺、失效条件、禁则和期限；不能只给 id/hash |
 | history | 最近命中/拒绝/执行及原因、已结算 outcome 数字与证据、仍未结算的状态 |
 | lessons | 默认关闭；启用时最多 3 条相关项与 2 条反例，含正文、结算数字、适用范围和证据 |
@@ -337,8 +337,9 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 
 | 阶段 | 工作 | 完成判据 |
 |---|---|---|
-| R1 | schema v5 + DecisionContext 类型与 store | ✅ `decision_contexts` 保存 canonical 全文或不可变 content ref；`decision_runs` 保存 draft/critique/final/eligibility 与模型成本；旧 context/token 表已从生产 schema/引用移除；验收：`dsh-trader/scripts/r1-acceptance.mjs` |
-| R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；正常空、读取失败脱敏、过期、暖机、晚到数据、未来计划/对账/订单排除及超长拒发均通过；验收：`scripts/r2-acceptance.mjs`，证据见 `docs/r2-decision-context-2026-09-20.md` |
+| R1 | schema v5 + DecisionContext 类型与 store | ✅ `decision_contexts` 保存 canonical 全文或不可变 content ref；`decision_runs` 保存 draft/critique/final/eligibility 与模型成本；终态 run 由 store 与 SQLite trigger 双重禁止改写；旧 context/token 表已从生产 schema/引用移除；验收：`dsh-trader/scripts/r1-acceptance.mjs` |
+| R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，历史证据见 `docs/r2-decision-context-2026-09-20.md` |
+| SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | R3 | 单次/三步 workflow + evidence/eligibility | 先实现 single，再组合 critique；共用 schema/适配器；单轮调用数 1/3，修复最多 +1；伪造引用、失效 run 和必要缺失不能开仓，可选缺失不误杀 |
 | R4 | 即时动作、W2/W3、结算与成本 | 仅一条执行路径；即时/DSL 去重、持久队列重试、过期事件、预算准入实际生效；结算区分估值/实现与未知成本，lesson 默认关闭 |
 | R5 | 真实 LLM 回放 + forward paper | 分别完成 §10.3 工程与 §10.4 经济验收；交付完整样本、实验清单、对照结果和方案选择，不用替身或成交子集宣称增益 |

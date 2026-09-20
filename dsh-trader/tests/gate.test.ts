@@ -7,6 +7,7 @@ const account: AccountSnapshot = {
   venue: 'paper',
   equityQuote: 10_000,
   totalExposureUsd: 0,
+  pendingExposureUsd: 0,
   openOrders: 0,
   leverage: 0,
   dailyLossUsd: 0,
@@ -73,6 +74,16 @@ describe('validateIntent (hard gate)', () => {
     expect(validateIntent(intent(), { ...account, spreadBps: 26 }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), { ...account, openOrders: 10 }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), account, policy({ tradingWindowOpen: false }))).toMatchObject({ kind: 'deny' })
+  })
+
+  it('reserves pending-order notional and fails closed when it is unknown', () => {
+    const tight = policy({ limits: { ...EXAMPLE_LIMITS, maxExposureUsd: 250 } })
+    const pending = { ...account, totalExposureUsd: 155, pendingExposureUsd: 50 }
+    expect(validateIntent(intent({ notionalUsd: 100 }), pending, tight)).toMatchObject({ kind: 'deny' })
+    expect(validateIntent(intent({ notionalUsd: 100 }), { ...account, pendingExposureUsd: null }, tight)).toMatchObject({
+      kind: 'deny',
+      reason: expect.stringContaining('未成交挂单敞口'),
+    })
   })
 
   it('never blocks risk-reducing orders — you can always close', () => {

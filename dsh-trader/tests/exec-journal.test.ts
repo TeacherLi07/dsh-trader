@@ -171,4 +171,76 @@ describe('DecisionJournal', () => {
     expect(ack.unknown).toBe(true)
     expect(journal.inFlightIntents()[0]?.state).toBe('unknown')
   })
+
+  it('filled ack 缺少真实成交量或均价时保留 unknown，不用请求值伪造成交', () => {
+    journal.recordDecisionAndIntent(
+      decision({ executed: false }),
+      {
+        intentId: 'missing-fill-i', clientOrderId: 'missing-fill-c', decisionId: 'd1',
+        venue: 'paper', symbol: 'BTC/USDT', state: 'created', type: 'market', side: 'buy',
+        qty: 2, notionalUsd: 200, reduceOnly: false, createdAt: NOW,
+      },
+    )
+    const result = journal.applyOrderAck({
+      intentId: 'missing-fill-i', clientOrderId: 'missing-fill-c', exchangeOrderId: 'missing-fill-ex',
+      state: 'filled', avgPrice: 100, ts: NOW,
+    }, NOW)
+    expect(result).toMatchObject({ state: 'unknown', filled: false, unknown: true })
+    expect(journal.fillIds()).toEqual([])
+    expect(journal.inFlightIntents()[0]?.state).toBe('unknown')
+
+    journal.recordDecision(decision({ decisionId: 'missing-average', executed: false }))
+    journal.recordIntent({
+      intentId: 'missing-average-i', clientOrderId: 'missing-average-c', decisionId: 'missing-average',
+      venue: 'paper', symbol: 'BTC/USDT', state: 'created', type: 'market', side: 'buy',
+      qty: 1, notionalUsd: 100, reduceOnly: false, createdAt: NOW,
+    })
+    expect(journal.applyOrderAck({
+      intentId: 'missing-average-i', clientOrderId: 'missing-average-c', exchangeOrderId: 'missing-average-ex',
+      state: 'filled', filledQty: 1, ts: NOW,
+    }, NOW)).toMatchObject({ state: 'unknown', filled: false, unknown: true })
+    expect(journal.fillIds()).toEqual([])
+  })
+
+  it('累积保存部分成交量，终态撤单只结算一次实际部分成交', () => {
+    journal.recordDecisionAndIntent(
+      decision({ executed: false }),
+      {
+        intentId: 'partial-i', clientOrderId: 'partial-c', decisionId: 'd1',
+        venue: 'paper', symbol: 'BTC/USDT', state: 'created', type: 'market', side: 'buy',
+        qty: 2, notionalUsd: 200, reduceOnly: false, createdAt: NOW,
+      },
+    )
+    const partial = journal.applyOrderAck({
+      intentId: 'partial-i', clientOrderId: 'partial-c', exchangeOrderId: 'partial-ex',
+      state: 'acked', filledQty: 0.5, avgPrice: 99, ts: NOW,
+    }, NOW)
+    expect(partial).toMatchObject({ state: 'acked', filled: false, unknown: false })
+    expect(db.prepare('SELECT filled_qty, avg_price FROM orders WHERE order_id = ?').get('partial-ex')).toMatchObject({
+      filled_qty: 0.5,
+      avg_price: 99,
+    })
+    expect(db.prepare('SELECT executed, reflection_due_at FROM decisions WHERE decision_id = ?').get('d1'))
+      .toMatchObject({ executed: 1, reflection_due_at: null })
+    expect(journal.fillIds()).toEqual([])
+    expect(journal.pendingSettlements(NOW + 24 * 3_600_000, 10)).toEqual([])
+
+    const canceled = journal.applyOrderAck({
+      intentId: 'partial-i', clientOrderId: 'partial-c', exchangeOrderId: 'partial-ex',
+      state: 'canceled', filledQty: 0.75, avgPrice: 100, ts: NOW + 1,
+    }, NOW + 1)
+    expect(canceled).toMatchObject({ state: 'canceled', filled: true, unknown: false })
+    expect(journal.fillsForDecision('d1')).toMatchObject([{ qty: 0.75, price: 100 }])
+    expect(db.prepare('SELECT reflection_due_at FROM decisions WHERE decision_id = ?').get('d1'))
+      .toMatchObject({ reflection_due_at: NOW + 1 + 4 * 3_600_000 })
+    expect(journal.pollableIntents()).toMatchObject([{ clientOrderId: 'partial-c', state: 'canceled', feePending: true }])
+
+    journal.applyOrderAck({
+      intentId: 'partial-i', clientOrderId: 'partial-c', exchangeOrderId: 'partial-ex',
+      state: 'canceled', filledQty: 0.75, avgPrice: 100, fee: 0.03, ts: NOW + 2,
+    }, NOW + 2)
+    expect(journal.fillIds()).toEqual(['fill:partial-ex:terminal'])
+    expect(journal.fillsForDecision('d1')).toMatchObject([{ fee: 0.03 }])
+    expect(journal.pollableIntents()).toEqual([])
+  })
 })

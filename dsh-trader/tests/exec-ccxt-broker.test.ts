@@ -55,6 +55,8 @@ class FakeExchange implements CcxtProExchangeLike {
   markets: Readonly<Record<string, CcxtMarketLike>> = {}
   balance: CcxtBalanceLike = { total: { USDT: '10000' } }
   positions: readonly CcxtPositionLike[] = []
+  positionsReadCount = 0
+  positionsOnRead: { readonly read: number; readonly value: readonly CcxtPositionLike[] } | undefined
   openOrders: CcxtOrderLike[] = []
   /** HTX 算法挂单不出现在普通列表；按请求的 flag 提供独立返回，复现真实端点语义。 */
   algorithmOrders: Partial<Record<'stopLossTakeProfit' | 'stopLoss' | 'takeProfit' | 'trigger' | 'trailing', readonly CcxtOrderLike[]>> = {}
@@ -80,6 +82,8 @@ class FakeExchange implements CcxtProExchangeLike {
   }
 
   async fetchPositions(): Promise<readonly CcxtPositionLike[]> {
+    this.positionsReadCount += 1
+    if (this.positionsOnRead?.read === this.positionsReadCount) this.positions = this.positionsOnRead.value
     return this.positions
   }
 
@@ -215,6 +219,7 @@ describe('CcxtBroker', () => {
       venue: 'htx',
       equityQuote: 10_000,
       totalExposureUsd: 220,
+      pendingExposureUsd: null,
       openOrders: 3,
       dailyLossUsd: 12,
       drawdownUsd: 34,
@@ -248,6 +253,28 @@ describe('CcxtBroker', () => {
 
     exchange.balance = { total: { USDT: '10000' } }
     expect((await broker.getAccount()).freeMarginQuote).toBeNull()
+  })
+
+  it('为有价格的未成交增加敞口订单预留名义，无法估值时返回 unknown', async () => {
+    const exchange = new FakeExchange()
+    exchange.openOrders = [{
+      id: 'pending-limit', symbol: SYMBOL, status: 'open', type: 'limit', side: 'buy',
+      amount: 3, remaining: 2, price: 100,
+    }]
+    expect((await makeBroker(exchange).getAccount()).pendingExposureUsd).toBe(200)
+
+    exchange.openOrders = [{
+      id: 'pending-market', symbol: SYMBOL, status: 'open', type: 'market', amount: 3,
+      filled: 1, remaining: 2, price: 100, average: 100, cost: 100,
+    }]
+    expect((await makeBroker(exchange).getAccount()).pendingExposureUsd).toBeNull()
+
+    // ccxt 的 cost 是已成交金额，不能将它外推成剩余委托的保证名义。
+    exchange.openOrders = [{
+      id: 'pending-partial-no-price', symbol: SYMBOL, status: 'open', type: 'limit',
+      amount: 3, filled: 1, remaining: 2, cost: 100,
+    }]
+    expect((await makeBroker(exchange).getAccount()).pendingExposureUsd).toBeNull()
   })
 
   it('fails closed with infinite spread when bid or ask is missing', async () => {
@@ -344,6 +371,44 @@ describe('CcxtBroker', () => {
     expect(missing).toBeUndefined()
   })
 
+  it('converts HTX contract fill quantities back to the broker base-quantity unit', async () => {
+    const exchange = new FakeExchange()
+    exchange.markets = { [SYMBOL]: { linear: true, contractSize: 10 } }
+    exchange.directOrder = {
+      id: 'contract-fill', clientOrderId: 'contract-client', symbol: SYMBOL,
+      status: 'closed', filled: 2, average: 100,
+    }
+    const order = await makeBroker(exchange).findOrderByExchangeOrderId('contract-fill', SYMBOL)
+    expect(order).toMatchObject({ symbol: SYMBOL, filledQty: 20, avgPrice: 100 })
+  })
+
+  it('order 缺少费用时只回填同一订单且 USDT 计价的逐笔手续费', async () => {
+    const exchange = new FakeExchange()
+    exchange.directOrder = {
+      id: 'fee-order', clientOrderId: 'fee-client', symbol: SYMBOL,
+      status: 'closed', filled: 2, average: 100,
+    }
+    exchange.trades = [
+      { id: 'fee-trade-1', order: 'fee-order', symbol: SYMBOL, fee: { cost: 0.01, currency: 'USDT' } },
+      { id: 'fee-trade-2', order: 'fee-order', symbol: SYMBOL, fee: { cost: 0.02, currency: 'USDT' } },
+      { id: 'other-order-trade', order: 'other-order', symbol: SYMBOL, fee: { cost: 100, currency: 'USDT' } },
+    ]
+
+    const order = await makeBroker(exchange).findOrderByExchangeOrderId('fee-order', SYMBOL)
+    expect(order).toMatchObject({ state: 'filled', fee: 0.03 })
+  })
+
+  it('非计价币手续费不冒充 USDT 成本', async () => {
+    const exchange = new FakeExchange()
+    exchange.directOrder = {
+      id: 'base-fee-order', clientOrderId: 'base-fee-client', symbol: SYMBOL,
+      status: 'closed', filled: 1, average: 100, fee: { cost: 0.001, currency: 'BTC' },
+    }
+
+    const order = await makeBroker(exchange).findOrderByExchangeOrderId('base-fee-order', SYMBOL)
+    expect(order).not.toHaveProperty('fee')
+  })
+
   it('places a configurable protective reduceOnly conditional order', async () => {
     const exchange = new FakeExchange()
     exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, notional: 200 }]
@@ -364,8 +429,8 @@ describe('CcxtBroker', () => {
   it('cancels every open order after fetching them', async () => {
     const exchange = new FakeExchange()
     exchange.openOrders = [
-      { id: 'open-1', clientOrderId: 'one', symbol: SYMBOL, status: 'open' },
-      { id: 'open-2', clientOrderId: 'two', symbol: SYMBOL, status: 'open' },
+      { id: 'open-1', clientOrderId: 'one', symbol: SYMBOL, type: 'limit', status: 'open' },
+      { id: 'open-2', clientOrderId: 'two', symbol: SYMBOL, type: 'limit', status: 'open' },
     ]
     await makeBroker(exchange).cancelAll(SYMBOL)
 
@@ -391,7 +456,7 @@ describe('CcxtBroker', () => {
     expect(exchange.fetchOpenOrdersCalls.some((call) => call.params?.['stopLossTakeProfit'] === true)).toBe(true)
   })
 
-  it('cancelAll finds and cancels algorithm-only orders, then verifies no residue', async () => {
+  it('explicit includeProtection cancels algorithm-only orders only when flat', async () => {
     const exchange = new FakeExchange()
     const protective: CcxtOrderLike = {
       id: 'algo-only-1',
@@ -404,17 +469,65 @@ describe('CcxtBroker', () => {
     }
     exchange.algorithmOrders.stopLossTakeProfit = [protective]
 
-    await makeBroker(exchange).cancelAll(SYMBOL)
+    await makeBroker(exchange).cancelAll(SYMBOL, { includeProtection: true })
 
     expect(exchange.cancelCalls).toEqual(['algo-only-1'])
     expect(exchange.cancelOrderCalls[0]).toMatchObject({ id: 'algo-only-1', symbol: SYMBOL })
     expect((await makeBroker(exchange).getOpenOrders(SYMBOL)).length).toBe(0)
   })
 
+  it('保护单批量撤销期间若仓位快照转为非空就立即停止，不能继续撤止损', async () => {
+    const exchange = new FakeExchange()
+    exchange.algorithmOrders.stopLossTakeProfit = [{
+      id: 'race-stop', clientOrderId: 'race-protect', symbol: SYMBOL,
+      status: 'open', type: 'stop', reduceOnly: true, stopPrice: 95,
+    }]
+    exchange.positionsOnRead = {
+      read: 2,
+      value: [{ symbol: SYMBOL, side: 'long', contracts: 1, entryPrice: 100, notional: 100 }],
+    }
+
+    await expect(makeBroker(exchange).cancelAll(SYMBOL, { includeProtection: true })).rejects.toThrow(/撤保护前发现持仓/)
+    expect(exchange.cancelCalls).toEqual([])
+  })
+
+  it('includeProtection 发现普通/未知挂单时不开始撤单', async () => {
+    const exchange = new FakeExchange()
+    exchange.openOrders = [{ id: 'still-entry', symbol: SYMBOL, type: 'limit', status: 'open', amount: 1, price: 100 }]
+    exchange.algorithmOrders.stopLossTakeProfit = [{
+      id: 'still-stop', symbol: SYMBOL, type: 'stop', status: 'open', reduceOnly: true, stopPrice: 95,
+    }]
+
+    await expect(makeBroker(exchange).cancelAll(SYMBOL, { includeProtection: true })).rejects.toThrow(/仍有未撤普通/)
+    expect(exchange.cancelCalls).toEqual([])
+  })
+
+  it('default cancelAll preserves reduce-only protection even while canceling entries', async () => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 1, entryPrice: 100, markPrice: 100 }]
+    exchange.openOrders = [{ id: 'entry-1', clientOrderId: 'entry', symbol: SYMBOL, status: 'open', type: 'limit', amount: 1, price: 101 }]
+    exchange.algorithmOrders.stopLossTakeProfit = [{
+      id: 'stop-1', clientOrderId: 'protect', symbol: SYMBOL, status: 'open',
+      type: 'stop', stopPrice: 95,
+    }]
+
+    await makeBroker(exchange).cancelAll(SYMBOL)
+    expect(exchange.cancelCalls).toEqual(['entry-1'])
+    expect((await makeBroker(exchange).getOpenOrders(SYMBOL)).map((order) => order.exchangeOrderId)).toContain('stop-1')
+    await expect(makeBroker(exchange).cancelAll(SYMBOL, { includeProtection: true })).rejects.toThrow(/仍有持仓/)
+  })
+
+  it('refuses to cancel an order whose type cannot be classified as entry vs protection', async () => {
+    const exchange = new FakeExchange()
+    exchange.openOrders = [{ id: 'unknown-kind', symbol: SYMBOL, status: 'open' }]
+    await expect(makeBroker(exchange).cancelAll(SYMBOL)).rejects.toThrow(/类型不可识别/)
+    expect(exchange.cancelCalls).toEqual([])
+  })
+
   it('uses each order symbol when canceling all markets instead of spreadSymbol', async () => {
     const exchange = new FakeExchange()
     const ethSymbol = 'ETH/USDT:USDT'
-    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, status: 'open' }]
+    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, type: 'limit', status: 'open' }]
 
     await makeBroker(exchange).cancelAll()
 
@@ -425,7 +538,7 @@ describe('CcxtBroker', () => {
   it('resolves the actual symbol for public cancelOrder when only exchange id is supplied', async () => {
     const exchange = new FakeExchange()
     const ethSymbol = 'ETH/USDT:USDT'
-    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, status: 'open' }]
+    exchange.openOrders = [{ id: 'eth-order', clientOrderId: 'eth-1', symbol: ethSymbol, type: 'limit', status: 'open' }]
 
     await makeBroker(exchange).cancelOrder('eth-order')
 

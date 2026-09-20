@@ -277,10 +277,10 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     expect(positions[0]!.qty).toBeGreaterThan(0)
 
     // 两条意图：下单 + 成交后立即挂的保护单（保护单也必须有审计行，否则恢复会当它是孤儿单）
-    expect(ports.journal.intentIds()).toEqual(
-      expect.arrayContaining(['oi:dec-1:open:BTC/USDT', 'pi:dec-1:open:BTC/USDT']),
-    )
-    expect(ports.journal.intentIds()).toHaveLength(2)
+    const intentIds = ports.journal.intentIds()
+    expect(intentIds).toContain('oi:dec-1:open:BTC/USDT')
+    expect(intentIds.some((id) => id.startsWith('pi-open:dec-1:open:BTC/USDT:'))).toBe(true)
+    expect(intentIds).toHaveLength(2)
     expect(ports.journal.fillIds()).toHaveLength(1)
     const decision = ports.journal.recentDecisions()[0]
     expect(decision?.decisionId).toBe('dec-1:open:BTC/USDT')
@@ -292,10 +292,54 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     expect(row.executed).toBe(1)
   })
 
+  it('并发开仓在同一 journal 锁内串行重取敞口，不能同时通过旧快照', async () => {
+    setup({ limits: { ...LIMITS, maxExposureUsd: 4_000 } })
+    const args = (decisionId: string) => ({
+      ...openArgs,
+      decisionId,
+      method: 'market',
+      stopMethod: 'structure',
+      stopValue: lastClose * 0.9,
+      riskPct: 0.03,
+    })
+
+    const results = await Promise.all([
+      call('trade_execute_order', args('concurrent-a')),
+      call('trade_execute_order', args('concurrent-b')),
+    ]) as { executed: boolean; reason?: string }[]
+
+    expect(results.filter((result) => result.executed)).toHaveLength(1)
+    expect(results.filter((result) => result.reason?.includes('总敞口'))).toHaveLength(1)
+    const account = await broker.getAccount()
+    expect(account.totalExposureUsd).toBeLessThanOrEqual(4_000)
+    await expect(broker.getPositions()).resolves.toHaveLength(1)
+  })
+
   it('places a protective order immediately after an opening fill', async () => {
     await call('trade_execute_order', openArgs)
     const openOrders = await broker.getOpenOrders(SYMBOL)
     expect(openOrders.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('agent 工具在已回报成交量但仓位快照暂时为空时仍尝试挂保护', async () => {
+    const readPositions = broker.getPositions.bind(broker)
+    const placeProtective = broker.placeProtective.bind(broker)
+    let reads = 0
+    let expectedPositionQty: number | undefined
+    broker.getPositions = async () => {
+      reads += 1
+      return reads >= 2 ? [] : readPositions()
+    }
+    broker.placeProtective = async (request) => {
+      expectedPositionQty = request.expectedPositionQty
+      return placeProtective(request)
+    }
+
+    const result = (await call('trade_execute_order', openArgs)) as { executed: boolean }
+
+    expect(result.executed).toBe(true)
+    expect(expectedPositionQty).toBeGreaterThan(0)
+    expect((await readPositions()).some((position) => position.protectedStopPrice !== undefined)).toBe(true)
   })
 
   it('is refused by the hard gate when the order would exceed the cap, and records the denial', async () => {

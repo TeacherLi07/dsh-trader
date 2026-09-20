@@ -19,13 +19,14 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0–P2 与 T3.2–T3.5 的执行安全基础已完成；当前模式为 `paper`。
+**当前阶段**：P0–P2 与 T3.2–T3.5 的执行安全基础已完成；SR1 安全审查修复已合并；当前模式为 `paper`。
 **下一步**：R1 存储根与 R2 context/请求渲染已完成，按 [plan.md](plan.md) R3 实现并接通 single/critique 与 eligibility，再做 R4 即时动作、W2/W3、结算/成本和 R5 真实模型对照；分别通过工程与经济验收后再评估 R6 小额 `live_auto`。R2 用固定 PIT 样本捕获渲染请求，没有真实模型调用；当前生产判断仍是旧多分析师链。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账。
 
-**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与非空验收均已接线。R1 已移除旧 context/token 表；R2 建立双时间行情归档与 DecisionContext 渲染器，但尚未接入生产模型调用。旧多 agent 判断链按 R3 重写，不保留兼容层。
+**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与非空验收均已接线。SR1 补上未成交挂单名义、远端保护验证、部分成交恢复与终态审计锁。R1 已移除旧 context/token 表；R2 建立双时间行情归档与 DecisionContext 渲染器，但尚未接入生产模型调用。旧多 agent 判断链按 R3 重写，不保留兼容层。
 
 **永久硬边界**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
+同一 runtime 的 agent / 机械开仓必须共用 journal 账户锁，并在锁内重读状态；不能只靠 client id 幂等防不同订单并发超限。
 
 ## 环境与命令
 
@@ -129,7 +130,12 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
 | `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
 | HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |
-| HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 实测 `client_order_id` 由交易所生成=订单号，**不采用我们传的 id** | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()` + `cancelOrder` 逐个标志尝试；恢复对"未 ack 意图"只能判 unknown+冻结（fail-closed） |
+| HTX 市价单部分/延迟成交 | `filledQty` 是累计张数，`acked/partial` 可能已产生真实仓位；只看终态会漏量/漏保护 | `CcxtBroker` 把张数换回基础币；缺量/均价保持 unknown；开仓余量有界撤销，按远端仓位挂保护，失败则 reduce-only 平仓 |
+| HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 实测 `client_order_id` 由交易所生成=订单号，**不采用我们传的 id** | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()`；默认 `cancelAll` 保留保护单，只有远端确认空仓后才可显式撤；本地 stop intent 不证明远端仍有保护 |
+| 未成交开仓单也是敞口 | HTX 的 `totalExposureUsd` 只覆盖当前持仓；部分成交市价单的 `price/average` 不是剩余量的滑点上界 | 只用明确限价估值；市价余量或字段不全令 `pendingExposureUsd=null`，新增敞口 fail-closed |
+| 并发开仓共用旧账户快照 | 不同 client id 的两条路径可同时通过总敞口闸门 | agent、机械执行、撤单和迟到保护共用 journal 实例锁；开仓在锁内重读状态、落意图并执行 |
+| 成交手续费缺失 | `OrderAck.fee` 可缺失；按 0 结算会把未知成本伪装成零成本 | `fills.fee` 保持 null；结算延迟，周期回查同单成交明细，仅在订单号与计价币可核验时回填 |
+| 对账状态只信交易所当前值 | 本地 stop intent 只证明“曾发出请求”，远端挂单缺失/孤儿订单属于未知在途状态 | 保护由 merged 远端订单证明；missing/orphan order 与未决查询都冻结相关 symbol |
 | 免费 ccxt 无 WS | `has.watchOHLCV === undefined` | v0/v1 只用 REST 轮询（分钟级足够） |
 
 ## 常见改动落点

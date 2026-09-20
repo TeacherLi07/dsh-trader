@@ -66,7 +66,7 @@
         timeframes: [15m, 1h, 4h]
         benchmark: BTC/USDT:USDT
         decisionContext:
-          version: context-r2-v1
+          version: context-r2-v2
           barsPerTimeframe: 64
           statisticsWindow: 32
           historyLimit: 12
@@ -76,6 +76,7 @@
           marketGraceMs: 120000
           derivativesMaxAgeMs: 3600000
           specMaxAgeMs: 86400000
+          reconciliationMaxAgeMs: 600000
         venue: htx             # 生产执行只支持 HTX；不保留多 venue 兼容分支
         # 组合根：lazy 启动 broker + ports + 启动/周期对账；paper 模式**不触网**
         reconcileEnabled: true
@@ -112,11 +113,14 @@
         # ★ W2/W3 判断通道当前**未接线**（P1.5 判定：关闭；decideWake 与 TriggerQueue.claim
         #   在生产路径没有调用方）。因此这里不配置 l2 / l3MinIntervalMs / dailyBudgetUsd ——
         #   配了会被 config-guard 拒绝启动（审计 S7），避免"配了却不生效"的假象。
-        # W1 审议窗（plan §2）：00:30Z、每 4h、23:30Z。`at` 为 UTC 时刻，`everyMs` 为间隔。
+        # W1 审议窗（plan §2）：固定 UTC 每 4 小时一次，共 6 次/日；不叠加旧 session 窗口。
         windows:
-          - { id: pre_session, at: '00:30Z' }
-          - { id: midday, everyMs: 14400000 }
-          - { id: post_session, at: '23:30Z' }
+          - { id: w1-00, at: '00:00Z' }
+          - { id: w1-04, at: '04:00Z' }
+          - { id: w1-08, at: '08:00Z' }
+          - { id: w1-12, at: '12:00Z' }
+          - { id: w1-16, at: '16:00Z' }
+          - { id: w1-20, at: '20:00Z' }
         windowScanMs: 60000
         wakeTimeoutMs: 300000
         deskCwd: /workspace

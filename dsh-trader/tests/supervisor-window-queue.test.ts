@@ -38,6 +38,16 @@ describe('SupervisorWindowQueue', () => {
     expect(afterRestart.claimOne(1_200)?.fireTs).toBe(1_200)
   })
 
+  it('does not execute pending fires from window ids removed by a config change', () => {
+    const queue = new SupervisorWindowQueue(db)
+    const oldSpec = { id: 'midday', everyMs: 100 } as const
+    queue.ensure([oldSpec], 1_000)
+    expect(queue.enqueueDue([oldSpec], 1_100)).toBe(1)
+
+    expect(queue.claimOne(1_100, ['w1-00', 'w1-04'])).toBeUndefined()
+    expect(queue.pendingCount()).toBe(1)
+  })
+
   it('recovers a running fire after process restart', () => {
     const spec = { id: 'pre', everyMs: 100 } as const
     const queue = new SupervisorWindowQueue(db)

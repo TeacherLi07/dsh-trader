@@ -79,6 +79,7 @@ export const Config = z.object({
     marketGraceMs: z.number(),
     derivativesMaxAgeMs: z.number(),
     specMaxAgeMs: z.number(),
+    reconciliationMaxAgeMs: z.number(),
   }),
   venue: z.union(['htx']).default('htx'),
 })

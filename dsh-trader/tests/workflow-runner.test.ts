@@ -162,6 +162,7 @@ describe('trade_workflow_run production runner', () => {
       const pack = await buildJudgmentPack(testPorts, 'BTC/USDT', '1h')
       const fake = {
         start: async (_provider: string, request: SubagentStartRequest): Promise<SubagentRun> => {
+          starts += 1
           const label = String(request.label)
           const value = label === 'market'
             ? report(pack, 'market', 'bar.close')
@@ -182,6 +183,7 @@ describe('trade_workflow_run production runner', () => {
           }
         },
       }
+      let starts = 0
       const result = await runJudgmentWorkflow(testPorts, 'BTC/USDT', '1h', {
         subagents: fake,
         parent: { id: 'desk' } as never,
@@ -192,6 +194,15 @@ describe('trade_workflow_run production runner', () => {
       expect(run).toMatchObject({ symbol: 'BTC/USDT', status: 'completed', final: { packId: pack.packId } })
       const context = new DecisionContextStore(db).get(run?.contextId ?? '')
       expect(context).toMatchObject({ symbol: 'BTC/USDT', canonicalJson: expect.stringContaining('BTC/USDT') })
+
+      const retry = await runJudgmentWorkflow(testPorts, 'BTC/USDT', '1h', {
+        subagents: fake,
+        parent: { id: 'desk' } as never,
+        signal: new AbortController().signal,
+      })
+      expect(retry.runId).toBe(result.runId)
+      expect(starts).toBe(7)
+      expect(new DecisionRunStore(db).get(result.runId as string)?.final).toEqual(run?.final)
     } finally {
       db.close()
     }

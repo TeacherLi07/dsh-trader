@@ -60,6 +60,7 @@ interface PaperOrder {
   readonly symbol: string
   readonly side: OrderSide
   readonly qty: number
+  readonly price?: number
   filledQty: number
   avgPrice?: number
   /** 本单累计手续费（从现金里扣除过）—— 回填到 OrderAck 供结算对账。 */
@@ -161,6 +162,7 @@ export class PaperBroker implements Broker {
       // paper 撮合没有逐仓/全仓保证金模型，不能把现金余额冒充交易所可用保证金。
       freeMarginQuote: null,
       totalExposureUsd: this.#exposure(),
+      pendingExposureUsd: this.#pendingExposure(),
       openOrders: this.#openOrders().length,
       leverage: equity > 0 ? this.#exposure() / equity : Number.POSITIVE_INFINITY,
       dailyLossUsd: dailyLoss,
@@ -221,6 +223,7 @@ export class PaperBroker implements Broker {
       symbol: request.symbol,
       side: request.side,
       qty: request.qty,
+      ...(request.price === undefined ? {} : { price: request.price }),
       filledQty: 0,
       feePaid: 0,
       status: 'acked',
@@ -260,6 +263,12 @@ export class PaperBroker implements Broker {
     if (position === undefined || position.qty === 0) {
       throw new Error(`placeProtective：${request.symbol} 没有持仓`)
     }
+    if (request.expectedPositionQty !== undefined &&
+        (!Number.isFinite(request.expectedPositionQty) || request.expectedPositionQty === 0 ||
+         Math.sign(position.qty) !== Math.sign(request.expectedPositionQty) ||
+         Math.abs(position.qty) + 1e-12 < Math.abs(request.expectedPositionQty))) {
+      throw new Error(`placeProtective：${request.symbol} 实际持仓小于已确认成交暴露`)
+    }
     const side: OrderSide = position.qty > 0 ? 'sell' : 'buy'
     const now = this.options.clock.now()
     // 调用方给了幂等键就用它（审计/恢复能对上）；没给才退回自造键
@@ -296,10 +305,16 @@ export class PaperBroker implements Broker {
     if (order !== undefined && order.status === 'acked') order.status = 'canceled'
   }
 
-  async cancelAll(symbol?: string): Promise<void> {
+  async cancelAll(symbol?: string, options: { readonly includeProtection?: boolean } = {}): Promise<void> {
+    if (options.includeProtection === true) {
+      const hasPosition = [...this.#positions].some(([positionSymbol, position]) =>
+        position.qty !== 0 && (symbol === undefined || positionSymbol === symbol))
+      if (hasPosition) throw new Error('拒绝在仍有持仓时撤销保护单')
+    }
     for (const order of this.#orders.values()) {
       if (order.status !== 'acked') continue
       if (symbol !== undefined && order.symbol !== symbol) continue
+      if (options.includeProtection !== true && order.protective.reduceOnly) continue
       order.status = 'canceled'
     }
   }
@@ -413,16 +428,29 @@ export class PaperBroker implements Broker {
     return exposure
   }
 
+  #pendingExposure(): number | null {
+    let total = 0
+    for (const order of this.#openOrders()) {
+      if (order.protective.reduceOnly) continue
+      const remaining = Math.max(0, order.qty - order.filledQty)
+      if (remaining === 0) continue
+      if (order.price === undefined || !Number.isFinite(order.price) || order.price <= 0) return null
+      total += remaining * order.price
+    }
+    return Number.isFinite(total) ? total : null
+  }
+
   #ack(order: PaperOrder): OrderAck {
     return {
       intentId: order.clientOrderId,
       clientOrderId: order.clientOrderId,
+      symbol: order.symbol,
       exchangeOrderId: order.orderId,
       state: order.status,
       ts: this.options.clock.now(),
       filledQty: order.filledQty,
       ...(order.avgPrice === undefined ? {} : { avgPrice: order.avgPrice }),
-      ...(order.feePaid > 0 ? { fee: order.feePaid } : {}),
+      ...(order.filledQty > 0 ? { fee: order.feePaid } : {}),
     }
   }
 

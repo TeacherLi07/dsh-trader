@@ -54,8 +54,11 @@ export function increasesExposure(intent: Pick<OrderRequest, 'reduceOnly'>): boo
 }
 
 export function projectedExposureUsd(intent: OrderRequest, account: AccountSnapshot): number {
-  const delta = increasesExposure(intent) ? intent.notionalUsd : -intent.notionalUsd
-  return Math.max(0, account.totalExposureUsd + delta)
+  const increasing = increasesExposure(intent)
+  if (increasing && account.pendingExposureUsd === null) return Number.POSITIVE_INFINITY
+  const pending = increasing ? account.pendingExposureUsd ?? Number.POSITIVE_INFINITY : 0
+  const delta = increasing ? intent.notionalUsd : -intent.notionalUsd
+  return Math.max(0, account.totalExposureUsd + pending + delta)
 }
 
 export function projectedLeverage(intent: OrderRequest, account: AccountSnapshot): number {
@@ -115,6 +118,13 @@ export function validateIntent(
   ]
   for (const [name, value] of accountNumbers) {
     if (!Number.isFinite(value) || value < 0) return deny(`账户状态 ${name} 非有限非负数，拒绝执行`)
+  }
+  if (account.pendingExposureUsd !== null &&
+      (!Number.isFinite(account.pendingExposureUsd) || account.pendingExposureUsd < 0)) {
+    return deny('账户状态 pendingExposureUsd 无效，拒绝执行')
+  }
+  if (increasesExposure(intent) && account.pendingExposureUsd === null) {
+    return deny('无法核算未成交挂单敞口，拒绝增加风险')
   }
 
   const limits = policy.limits

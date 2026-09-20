@@ -52,6 +52,12 @@ interface ReadResult<T> {
   readonly errorType?: string
 }
 
+interface UnresolvedIntentSnapshot {
+  readonly items: readonly UnresolvedIntentRow[]
+  readonly count: number
+  readonly truncated: boolean
+}
+
 export interface DecisionContextBuildOptions {
   readonly config?: Partial<DecisionContextConfig>
 }
@@ -100,6 +106,7 @@ function safeAccount(account: AccountSnapshot): Readonly<Record<string, unknown>
     equityQuote: finiteOrNull(account.equityQuote),
     freeMarginQuote: finiteOrNull(account.freeMarginQuote),
     totalExposureUsd: finiteOrNull(account.totalExposureUsd),
+    pendingExposureUsd: finiteOrNull(account.pendingExposureUsd),
     openOrders: account.openOrders,
     leverage: finiteOrNull(account.leverage),
     dailyLossUsd: finiteOrNull(account.dailyLossUsd),
@@ -110,7 +117,9 @@ function safeAccount(account: AccountSnapshot): Readonly<Record<string, unknown>
 }
 
 function accountNumbersValid(account: AccountSnapshot): boolean {
-  return [
+  const pendingExposureValid = account.pendingExposureUsd === null ||
+    (Number.isFinite(account.pendingExposureUsd) && account.pendingExposureUsd >= 0)
+  return pendingExposureValid && [
     account.equityQuote, account.totalExposureUsd, account.openOrders, account.leverage,
     account.dailyLossUsd, account.drawdownUsd, account.consecutiveLosses, account.spreadBps,
   ].every((value) => typeof value === 'number' && Number.isFinite(value)) && account.equityQuote > 0
@@ -170,14 +179,22 @@ function contractSpecification(
   }
 }
 
-function unresolvedIntents(statements: Statements, asOf: number): readonly UnresolvedIntentRow[] {
-  return statements.get(`SELECT intent_id, client_order_id, exchange_order_id, symbol, state, type, side,
+function unresolvedIntents(statements: Statements, asOf: number): UnresolvedIntentSnapshot {
+  const countRow = statements.get(`SELECT COUNT(*) AS n FROM order_intents
+    WHERE created_at <= ? AND state IN ('created', 'acked', 'unknown')`).get(asOf) as { n: number }
+  const items = statements.get(`SELECT intent_id, client_order_id, exchange_order_id, symbol, state, type, side,
       qty, price, stop_price, notional_usd, reduce_only, created_at
     FROM order_intents WHERE created_at <= ? AND state IN ('created', 'acked', 'unknown')
     ORDER BY created_at DESC, client_order_id ASC LIMIT 100`).all(asOf) as UnresolvedIntentRow[]
+  const count = Number(countRow.n)
+  return { items, count, truncated: count > items.length }
 }
 
-function reconciliationAt(statements: Statements, asOf: number): Readonly<Record<string, unknown>> | null {
+function reconciliationAt(
+  statements: Statements,
+  asOf: number,
+  maxAgeMs: number,
+): Readonly<Record<string, unknown>> | null {
   const row = statements.get(`SELECT ts, payload_json FROM audit_events
     WHERE kind = 'reconcile_report' AND ts <= ? ORDER BY ts DESC, seq DESC LIMIT 1`).get(asOf) as AuditReportRow | undefined
   if (row === undefined) return null
@@ -200,9 +217,12 @@ function reconciliationAt(statements: Statements, asOf: number): Readonly<Record
     : null
   const consistent = typeof result.consistent === 'boolean' ? result.consistent : null
   const freezeTrading = typeof result.freezeTrading === 'boolean' ? result.freezeTrading : null
+  const ageMs = asOf - row.ts
+  const reportState = consistent === true ? 'consistent' : consistent === false ? 'inconsistent' : 'unknown'
   return {
-    state: consistent === true ? 'consistent' : consistent === false ? 'inconsistent' : 'unknown',
+    state: ageMs > maxAgeMs ? 'stale' : reportState,
     observedAt: row.ts,
+    ageMs,
     consistent,
     freezeTrading,
     acknowledgeOrphans: typeof payload.acknowledgeOrphans === 'boolean' ? payload.acknowledgeOrphans : null,
@@ -287,6 +307,13 @@ export async function buildDecisionContext(
   if (futureAccount) portfolioMissing.push('account.observedAt:future')
   if (invalidAccount) portfolioMissing.push('account.numeric_fields:invalid')
   if (account !== undefined && account.freeMarginQuote == null) portfolioMissing.push('account.freeMarginQuote:missing')
+  if (account !== undefined) {
+    const pendingExposure = account.pendingExposureUsd
+    if (pendingExposure === null) portfolioMissing.push('account.pendingExposureUsd:unknown')
+    else if (!Number.isFinite(pendingExposure) || pendingExposure < 0) {
+      portfolioMissing.push('account.pendingExposureUsd:invalid')
+    }
+  }
   if (positionsRead.errorType !== undefined) portfolioMissing.push(`positions.read_failed:${positionsRead.errorType}`)
   if (ordersRead.errorType !== undefined) portfolioMissing.push(`openOrders.read_failed:${ordersRead.errorType}`)
   for (const position of positions ?? []) {
@@ -310,15 +337,16 @@ export async function buildDecisionContext(
   const heartbeat = statements.get('SELECT beat_at, halted FROM heartbeat WHERE id = 1 AND beat_at <= ?').get(asOf) as HeartbeatRow | undefined
   if (heartbeat === undefined) portfolioMissing.push('heartbeat.not_observed_at_asOf')
   const unresolved = unresolvedIntents(statements, asOf)
-  const reconciliation = reconciliationAt(statements, asOf)
+  const reconciliation = reconciliationAt(statements, asOf, config.reconciliationMaxAgeMs)
   if (reconciliation === null) portfolioMissing.push('reconciliation.not_reported_at_asOf')
   else if (reconciliation.state !== 'consistent') portfolioMissing.push(`reconciliation.${String(reconciliation.state)}`)
+  if (unresolved.truncated) portfolioMissing.push('unresolvedIntents.truncated')
 
-  const remainingLimits = visibleAccount === undefined || invalidAccount || ports.limits === null
+  const remainingLimits = visibleAccount === undefined || invalidAccount || visibleAccount.pendingExposureUsd === null || ports.limits === null
     ? null
     : {
         perOrderCapUsd: ports.limits.perOrderCapUsd,
-        exposureUsd: ports.limits.maxExposureUsd - visibleAccount.totalExposureUsd,
+        exposureUsd: ports.limits.maxExposureUsd - visibleAccount.totalExposureUsd - visibleAccount.pendingExposureUsd,
         dailyLossUsd: ports.limits.dailyLossLimitUsd - visibleAccount.dailyLossUsd,
         drawdownUsd: ports.limits.maxDrawdownUsd - visibleAccount.drawdownUsd,
         consecutiveLosses: ports.limits.maxConsecutiveLosses - visibleAccount.consecutiveLosses,
@@ -376,7 +404,7 @@ export async function buildDecisionContext(
   }
   const portfolioValue = {
     status: accountRead.errorType === undefined && positionsRead.errorType === undefined && ordersRead.errorType === undefined
-      ? futureAccount || invalidAccount ? 'invalid' : staleAccount ? 'stale' : hiddenPositionCount > 0 || hiddenOrderCount > 0 ? 'partial' : 'ok'
+      ? futureAccount || invalidAccount ? 'invalid' : staleAccount ? 'stale' : hiddenPositionCount > 0 || hiddenOrderCount > 0 || unresolved.truncated || portfolioMissing.length > 0 ? 'partial' : 'ok'
       : 'partial',
     account: visibleAccount === undefined ? null : safeAccount(visibleAccount),
     accountReadErrorType: accountRead.errorType ?? null,
@@ -386,7 +414,9 @@ export async function buildDecisionContext(
     openOrdersReadErrorType: ordersRead.errorType ?? null,
     hiddenPositionCount,
     hiddenOpenOrderCount: hiddenOrderCount,
-    unresolvedIntents: unresolved,
+    unresolvedIntents: unresolved.items,
+    unresolvedIntentCount: unresolved.count,
+    unresolvedIntentsTruncated: unresolved.truncated,
     remainingLimits,
     frozenSymbols,
     reconciliation: reconciliation ?? { state: frozenSymbols.length > 0 ? 'frozen' : 'not_reported' },

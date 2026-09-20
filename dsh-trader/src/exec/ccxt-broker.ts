@@ -340,6 +340,24 @@ function feeFrom(value: Readonly<Record<string, unknown>>): number | undefined {
   return found ? total : undefined
 }
 
+function feeCurrencyFrom(value: Readonly<Record<string, unknown>>): string | null | undefined {
+  const fee = value['fee']
+  if (isRecord(fee)) return asString(fee['currency'])
+  const fees = value['fees']
+  if (!Array.isArray(fees)) return undefined
+  const currencies = [...new Set(fees.flatMap((item) =>
+    isRecord(item) ? [asString(item['currency'])].filter((currency): currency is string => currency !== undefined) : [],
+  ))]
+  return currencies.length === 1 ? currencies[0] : currencies.length > 1 ? null : undefined
+}
+
+function tradeOrderId(value: CcxtTradeLike): string | undefined {
+  const order = value['order']
+  if (typeof order === 'string' && order.length > 0) return order
+  if (typeof order === 'number' && Number.isFinite(order)) return String(order)
+  return undefined
+}
+
 function truthyBoolean(value: unknown): boolean {
   if (value === true) return true
   if (value === 1) return true
@@ -356,6 +374,24 @@ function isReduceOnly(value: Readonly<Record<string, unknown>>): boolean {
       truthyBoolean(info['reduce_only']) ||
       truthyBoolean(info['reduce-only']))
   )
+}
+
+function isProtectionOrder(value: Readonly<Record<string, unknown>>): boolean {
+  if (isReduceOnly(value) || stopPriceFrom(value) !== undefined) return true
+  const type = asString(value['type'])?.toLowerCase().replaceAll('-', '_') ?? ''
+  if (['stop', 'trigger', 'trailing', 'take_profit', 'takeprofit', 'conditional'].some((part) => type.includes(part))) {
+    return true
+  }
+  const info = infoOf(value)
+  return info !== undefined && [
+    'stopLossPrice', 'stop_loss_price', 'takeProfitPrice', 'take_profit_price',
+    'triggerPrice', 'trigger_price', 'trailingPercent', 'callbackRate',
+  ].some((key) => valueFromRecordOrInfo(value, [key]) !== undefined)
+}
+
+function isKnownEntryOrder(value: Readonly<Record<string, unknown>>): boolean {
+  const type = asString(value['type'])?.toLowerCase().replaceAll('-', '_')
+  return (type === 'market' || type === 'limit') && !isProtectionOrder(value)
 }
 
 function stopPriceFrom(value: Readonly<Record<string, unknown>>): number | undefined {
@@ -492,6 +528,7 @@ export class HtxBroker implements Broker {
 
     const readings = positions.map((position) => this.#readPosition(position))
     const totalExposureUsd = this.#exposure(readings)
+    const pendingExposureUsd = this.#pendingExposure(openOrders)
     const spreadSymbol = this.#spreadSymbol ?? this.#firstSymbol(positions, openOrders)
     const spreadBps = await this.#spread(spreadSymbol)
     const observedAt = this.#clock.now()
@@ -500,6 +537,7 @@ export class HtxBroker implements Broker {
       equityQuote: equity,
       freeMarginQuote: quoteFreeAmount(balance, this.#quoteCurrency) ?? null,
       totalExposureUsd,
+      pendingExposureUsd,
       openOrders: openOrders.length,
       leverage: equity > 0 ? totalExposureUsd / equity : Number.POSITIVE_INFINITY,
       dailyLossUsd: risk.dailyLossUsd,
@@ -537,7 +575,7 @@ export class HtxBroker implements Broker {
     const observedAt = this.#clock.now()
     const stops = new Map<string, number>()
     for (const order of openOrders) {
-      if (!isReduceOnly(order)) continue
+      if (!isProtectionOrder(order)) continue
       const symbol = asString(order['symbol'])
       const stop = stopPriceFrom(order)
       if (symbol !== undefined && stop !== undefined && !stops.has(symbol)) stops.set(symbol, stop)
@@ -565,14 +603,14 @@ export class HtxBroker implements Broker {
     for (const order of orders) {
       if (symbol !== undefined && order['symbol'] !== symbol) continue
       const ack = this.#orderAck(order, undefined, 'acked')
-      if (ack !== undefined) acks.push({ ...ack, observedAt })
+      if (ack !== undefined) acks.push({ ...ack, symbol: asString(order['symbol']), observedAt })
       else {
         const exchangeOrderId = exchangeOrderIdFrom(order)
         // HTX 算法单常不回显 client id；exchangeOrderId 是对账主键，使用它作为
         // 仅用于展示/孤儿检测的占位 client id，绝不拿它去做本地意图匹配。
         if (exchangeOrderId !== undefined) {
           const synthetic = this.#orderAck(order, { clientOrderId: exchangeOrderId }, 'acked')
-          if (synthetic !== undefined) acks.push({ ...synthetic, observedAt })
+          if (synthetic !== undefined) acks.push({ ...synthetic, symbol: asString(order['symbol']), observedAt })
         }
       }
     }
@@ -613,6 +651,12 @@ export class HtxBroker implements Broker {
     if (position === undefined) {
       throw this.#safeError(new Error(`placeProtective：${request.symbol} 没有持仓`))
     }
+    if (request.expectedPositionQty !== undefined &&
+        (!Number.isFinite(request.expectedPositionQty) || request.expectedPositionQty === 0 ||
+         Math.sign(position.snapshot.qty) !== Math.sign(request.expectedPositionQty) ||
+         Math.abs(position.snapshot.qty) + 1e-12 < Math.abs(request.expectedPositionQty))) {
+      throw this.#safeError(new Error(`placeProtective：${request.symbol} 实际持仓小于已确认成交暴露`))
+    }
 
     const params: CcxtParams = { clientOrderId, reduceOnly: true }
     // HTX 线性永续的算法触发单必须显式带 position_side（实测 code 1067）。
@@ -634,7 +678,7 @@ export class HtxBroker implements Broker {
         params,
       ),
     )
-    return this.#requirePlacedAck(created, { clientOrderId, intentId: clientOrderId })
+    return this.#requirePlacedAck(created, { clientOrderId, intentId: clientOrderId, symbol: request.symbol })
   }
 
   async cancelOrder(exchangeOrderId: string): Promise<void> {
@@ -678,10 +722,29 @@ export class HtxBroker implements Broker {
     throw this.#safeError(lastError)
   }
 
-  async cancelAll(symbol?: string): Promise<void> {
+  async cancelAll(symbol?: string, options: { readonly includeProtection?: boolean } = {}): Promise<void> {
     await this.#ensureMarketsLoaded()
     const orders = await this.#fetchOpenOrdersMerged(symbol)
+    if (options.includeProtection === true) {
+      if (orders.some((order) => !isProtectionOrder(order))) {
+        throw this.#safeError(new Error('仍有未撤普通/未知挂单；为避免裸仓而拒绝撤保护单'))
+      }
+      const positions = await this.#call(() => this.#exchange.fetchPositions())
+      const openPosition = positions
+        .map((position) => this.#readPosition(position))
+        .some((position) => position !== undefined && position.snapshot.qty !== 0 &&
+          (symbol === undefined || position.snapshot.symbol === symbol))
+      if (openPosition) {
+        throw this.#safeError(new Error('拒绝在仍有持仓时撤销保护单'))
+      }
+    }
     for (const order of orders) {
+      if (options.includeProtection !== true) {
+        if (isProtectionOrder(order)) continue
+        if (!isKnownEntryOrder(order)) {
+          throw this.#safeError(new Error('挂单类型不可识别；为保留可能的保护单而拒绝 cancelAll'))
+        }
+      }
       const exchangeOrderId = exchangeOrderIdFrom(order)
       if (exchangeOrderId === undefined) {
         throw this.#safeError(new Error('挂单缺少 exchange order id，无法安全执行 cancelAll'))
@@ -690,6 +753,21 @@ export class HtxBroker implements Broker {
       if (orderSymbol === undefined) {
         // 即使调用方传了 symbol，也不能把查询参数冒充成订单字段；未知标的撤单可能误伤另一市场。
         throw this.#safeError(new Error(`挂单 ${exchangeOrderId} 缺少 symbol，无法安全执行 cancelAll`))
+      }
+      if (options.includeProtection === true) {
+        // 撤单过程可能恰好有最后一笔部分成交；每撤一张保护单前都复核没有新增 entry 单和仓位。
+        const remainingOrders = await this.#fetchOpenOrdersMerged(symbol)
+        if (remainingOrders.some((candidate) => !isProtectionOrder(candidate))) {
+          throw this.#safeError(new Error('撤保护前发现新增普通/未知挂单，拒绝继续'))
+        }
+        const currentPositions = await this.#call(() => this.#exchange.fetchPositions())
+        const currentOpenPosition = currentPositions
+          .map((candidate) => this.#readPosition(candidate))
+          .some((candidate) => candidate !== undefined && candidate.snapshot.qty !== 0 &&
+            (symbol === undefined || candidate.snapshot.symbol === symbol))
+        if (currentOpenPosition) {
+          throw this.#safeError(new Error('撤保护前发现持仓，拒绝继续'))
+        }
       }
       await this.#cancelOrder(exchangeOrderId, orderSymbol)
     }
@@ -766,7 +844,7 @@ export class HtxBroker implements Broker {
         try {
           const order = await this.#exchange.fetchOrder(clientOrderId, marketSymbol, attempt.params)
           if (order !== undefined && clientOrderIdFrom(order) === clientOrderId) {
-            return this.#orderAck(order, { clientOrderId }, 'acked')
+            return this.#orderAck(order, { clientOrderId, ...(marketSymbol === undefined ? {} : { symbol: marketSymbol }) }, 'acked')
           }
         } catch (error) {
           if (!lookupMiss(error)) throw this.#safeError(error)
@@ -778,7 +856,9 @@ export class HtxBroker implements Broker {
       try {
         const orders = await this.#exchange.fetchOpenOrders()
         for (const order of orders) {
-          if (clientOrderIdFrom(order) === clientOrderId) return this.#orderAck(order, { clientOrderId }, 'acked')
+          if (clientOrderIdFrom(order) === clientOrderId) {
+            return this.#orderAck(order, { clientOrderId, ...(marketSymbol === undefined ? {} : { symbol: marketSymbol }) }, 'acked')
+          }
         }
       } catch (error) {
         if (!lookupMiss(error)) throw this.#safeError(error)
@@ -806,7 +886,28 @@ export class HtxBroker implements Broker {
     try {
       const order = await this.#exchange.fetchOrder(exchangeOrderId, symbol)
       if (order === undefined || exchangeOrderIdFrom(order) !== exchangeOrderId) return undefined
-      return this.#orderAck(order, { clientOrderId: exchangeOrderId }, 'acked')
+      const ack = this.#orderAck(order, { clientOrderId: exchangeOrderId, symbol }, 'acked')
+      if (ack === undefined || ack.fee !== undefined || ack.filledQty === undefined || ack.filledQty <= 0 ||
+          !['filled', 'canceled', 'rejected'].includes(ack.state) || symbol === undefined || !this.#can('fetchMyTrades')) {
+        return ack
+      }
+      // CCXT 的 order 响应可能没有 fee；成交明细才带逐笔费用。只聚合同一 exchange order，
+      // 且所有成交费用都必须可读、计价币必须一致，否则保留 null 并让结算继续 deferred。
+      let trades: readonly CcxtTradeLike[]
+      try {
+        trades = await this.#call(() => this.#exchange.fetchMyTrades(symbol))
+      } catch {
+        // 成交状态已由订单端点确认；费用查询失败只延迟结算，不能把已知订单降成未知。
+        return ack
+      }
+      const matched = trades.filter((trade) => tradeOrderId(trade) === exchangeOrderId)
+      if (matched.length === 0) return ack
+      const costs = matched.map((trade) => feeFrom(trade as Readonly<Record<string, unknown>>))
+      const currencies = matched.map((trade) => feeCurrencyFrom(trade as Readonly<Record<string, unknown>>))
+      if (costs.some((cost) => cost === undefined || !Number.isFinite(cost) || cost < 0) ||
+          currencies.some((currency) => currency !== this.#quoteCurrency)) return ack
+      const fee = costs.reduce<number>((sum, cost) => sum + (cost ?? 0), 0)
+      return Number.isFinite(fee) ? { ...ack, fee } : ack
     } catch (error) {
       if (lookupMiss(error)) return undefined
       throw this.#safeError(error)
@@ -834,7 +935,7 @@ export class HtxBroker implements Broker {
     )
     const ack = this.#requirePlacedAck(
       created,
-      { clientOrderId: request.clientOrderId, intentId: request.intentId },
+      { clientOrderId: request.clientOrderId, intentId: request.intentId, symbol: request.symbol },
     )
     // ★ HTX 市价单的 create 响应常是 open/new，成交要再查一次。不回填的后果不是"显示问题"：
     // execute-action 只在 `state==='filled'` 时记 fill / 登记结算 / 挂保护单 —— 于是一笔真实成交
@@ -858,7 +959,7 @@ export class HtxBroker implements Broker {
         if (order === undefined) continue
         const refreshed = this.#orderAck(
           order,
-          { clientOrderId: ack.clientOrderId, intentId: ack.intentId },
+          { clientOrderId: ack.clientOrderId, intentId: ack.intentId, symbol },
           'acked',
         )
         if (refreshed !== undefined) {
@@ -876,7 +977,7 @@ export class HtxBroker implements Broker {
 
   #requirePlacedAck(
     value: CcxtOrderLike,
-    fallback: { readonly clientOrderId: string; readonly intentId: string },
+    fallback: { readonly clientOrderId: string; readonly intentId: string; readonly symbol: string },
   ): OrderAck {
     const ack = this.#orderAck(value, fallback, 'acked')
     if (ack === undefined || ack.state === 'unknown' || ack.state === 'created') {
@@ -984,6 +1085,12 @@ export class HtxBroker implements Broker {
       )
     }
     return amount
+  }
+
+  /** ccxt 永续回报量是张数；Broker/Journal 的统一数量单位是基础币。 */
+  #toBaseQty(symbol: string, contracts: number): number {
+    this.#assertLinear(symbol)
+    return contracts * this.#contractSize(symbol)
   }
 
   #riskState(): RiskState {
@@ -1095,6 +1202,29 @@ export class HtxBroker implements Broker {
     return total
   }
 
+  /** 对所有可能增加仓位的未成交订单预留最大可识别名义；缺关键字段时返回 null。 */
+  #pendingExposure(orders: readonly CcxtOrderLike[]): number | null {
+    let total = 0
+    for (const order of orders) {
+      if (isProtectionOrder(order)) continue
+      const symbol = asString(order['symbol'])
+      const amount = firstNumber(order, ['amount', 'qty', 'contracts', 'volume'])
+      const filled = firstNumber(order, ['filled', 'filledQty', 'filled_qty']) ?? 0
+      const remaining = firstNumber(order, ['remaining']) ??
+        (amount === undefined ? undefined : Math.max(0, amount - filled))
+      if (remaining === undefined) return null
+      if (!Number.isFinite(remaining) || remaining < 0) return null
+      if (remaining === 0) continue
+      const price = firstNumber(order, ['price'])
+      const type = asString(order['type'])?.toLowerCase()
+      // 只把明确的 limit price 当作剩余量上界。市价单的 price/average 可能是已成交均价，
+      // 不能约束未成交余量的滑点；ccxt cost 也通常只表示已成交部分成本。
+      if (type !== 'limit' || symbol === undefined || price === undefined || price <= 0) return null
+      total += remaining * this.#contractSize(symbol) * price
+    }
+    return Number.isFinite(total) && total >= 0 ? total : null
+  }
+
   #firstSymbol(
     positions: readonly CcxtPositionLike[],
     orders: readonly CcxtOrderLike[],
@@ -1137,7 +1267,7 @@ export class HtxBroker implements Broker {
 
   #orderAck(
     value: CcxtOrderLike,
-    fallback: { readonly clientOrderId?: string; readonly intentId?: string } | undefined,
+    fallback: { readonly clientOrderId?: string; readonly intentId?: string; readonly symbol?: string } | undefined,
     defaultState: OrderState,
   ): OrderAck | undefined {
     const raw = value as Readonly<Record<string, unknown>>
@@ -1148,12 +1278,22 @@ export class HtxBroker implements Broker {
     const state = orderState(raw, defaultState)
     const timestamp = firstNumber(raw, ['timestamp', 'lastTradeTimestamp']) ?? this.#clock.now()
     const average = firstNumber(raw, ['average', 'avgPrice'])
-    const filled = firstNumber(raw, ['filled', 'filledQty', 'filled_qty'])
-    const fee = feeFrom(raw)
+    const filledContracts = firstNumber(raw, ['filled', 'filledQty', 'filled_qty'])
+    const rawFee = feeFrom(raw)
+    const feeCurrency = feeCurrencyFrom(raw)
+    const fee = feeCurrency === null || (feeCurrency !== undefined && feeCurrency !== this.#quoteCurrency)
+      ? undefined
+      : rawFee
     const exchangeOrderId = exchangeOrderIdFrom(raw)
+    const symbol = asString(raw['symbol']) ?? fallback?.symbol
+    const filled = filledContracts === undefined || symbol === undefined
+      ? filledContracts
+      : this.#toBaseQty(symbol, filledContracts)
     return {
       intentId,
       clientOrderId,
+      ...(symbol === undefined ? {} : { symbol }),
+      ...(asString(raw['symbol']) === undefined ? {} : { symbol: asString(raw['symbol']) }),
       state,
       ts: timestamp,
       ...(exchangeOrderId === undefined ? {} : { exchangeOrderId }),
@@ -1165,6 +1305,7 @@ export class HtxBroker implements Broker {
 
   #tradeAck(value: CcxtTradeLike, clientOrderId: string): OrderAck {
     const raw = value as Readonly<Record<string, unknown>>
+    const symbol = asString(raw['symbol'])
     const order = raw['order']
     const exchangeOrderId =
       typeof order === 'string' && order.length > 0
@@ -1174,11 +1315,19 @@ export class HtxBroker implements Broker {
           : undefined
     const timestamp = firstNumber(raw, ['timestamp']) ?? this.#clock.now()
     const price = firstNumber(raw, ['price'])
-    const filled = firstNumber(raw, ['amount', 'filled', 'qty'])
-    const fee = feeFrom(raw)
+    const filledContracts = firstNumber(raw, ['amount', 'filled', 'qty'])
+    const filled = filledContracts === undefined || symbol === undefined
+      ? filledContracts
+      : this.#toBaseQty(symbol, filledContracts)
+    const rawFee = feeFrom(raw)
+    const feeCurrency = feeCurrencyFrom(raw)
+    const fee = feeCurrency === null || (feeCurrency !== undefined && feeCurrency !== this.#quoteCurrency)
+      ? undefined
+      : rawFee
     return {
       intentId: clientOrderId,
       clientOrderId,
+      ...(symbol === undefined ? {} : { symbol }),
       ...(exchangeOrderId === undefined ? {} : { exchangeOrderId }),
       state: 'filled',
       ts: timestamp,

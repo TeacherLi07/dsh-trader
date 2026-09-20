@@ -82,10 +82,7 @@ export class CrashRecovery {
         })
         continue
       }
-      const applied = journal.applyOrderAck(outcome.ack, this.deps.clock.now(), {
-        fallbackQty: intent.qty ?? undefined,
-        fallbackPrice: intent.price ?? undefined,
-      })
+      const applied = journal.applyOrderAck(outcome.ack, this.deps.clock.now())
       if (applied.unknown) {
         freeze.add(intent.symbol)
         alerts.push({

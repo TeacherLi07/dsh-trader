@@ -13,6 +13,7 @@ import type {
   UserDataEvent,
 } from '../src/exec/broker.js'
 import { createLiveEngine, type LiveEngineDeps } from '../src/exec/live-engine.js'
+import { executeAction } from '../src/exec/execute-action.js'
 import { DecisionJournal } from '../src/exec/journal.js'
 import { PaperBroker } from '../src/exec/paper.js'
 import { replay, type ReplayDeps } from '../src/exec/replay.js'
@@ -88,8 +89,8 @@ class FakeBroker implements Broker {
     return this.paper.cancelOrder(exchangeOrderId)
   }
 
-  cancelAll(symbol?: string): Promise<void> {
-    return this.paper.cancelAll(symbol)
+  cancelAll(symbol?: string, options?: { readonly includeProtection?: boolean }): Promise<void> {
+    return this.paper.cancelAll(symbol, options)
   }
 
   subscribeUserData(_onEvent: (event: UserDataEvent) => void): () => void {
@@ -207,7 +208,38 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     h.db.close()
   })
 
-  it('市价单回填超时（acked）时重取持仓确认，仍然挂保护单并登记结算', async () => {
+  it('机械执行与工具共享敞口锁，并在锁内重读而非复用进入锁前的账户快照', async () => {
+    const h = harness()
+    const staleAccount = await h.broker.getAccount()
+    const plan = makeCard({
+      planId: 'concurrent-live-plan', symbol: SYMBOL, createdAt: START,
+      windowEndsAt: START + 10 * HOUR,
+    })
+    const limits = { ...LIMITS, maxExposureUsd: 4_000 }
+    const run = (conditionId: string, barTs: number) => executeAction({
+      journal: h.journal, broker: h.broker, clock: h.clock, plan, conditionId,
+      action: {
+        action: 'open', side: 'long', method: 'market',
+        stop: { method: 'structure', level: 90 }, riskPct: 0.03,
+      },
+      symbol: SYMBOL, timeframe: TF, barTs, referencePrice: 100, atr: null,
+      account: staleAccount, position: undefined,
+      riskPct: 0.03, mode: 'paper', limits, reflectionHorizonMs: 4 * HOUR,
+      alreadyIntended: (clientOrderId) => h.journal.hasClientOrderId(clientOrderId),
+    })
+
+    try {
+      const results = await Promise.all([run('concurrent-live-a', START), run('concurrent-live-b', START + 1)])
+      expect(results.filter((result) => result.executed)).toHaveLength(1)
+      expect(results.filter((result) => result.denied)).toHaveLength(1)
+      expect(h.broker.orderCalls).toBe(1)
+      expect((await h.broker.getAccount()).totalExposureUsd).toBeLessThanOrEqual(limits.maxExposureUsd)
+    } finally {
+      h.db.close()
+    }
+  })
+
+  it('市价单回填超时（acked）时重取持仓并挂保护单，但终态前不登记结算', async () => {
     const h = harness()
     const realPlace = h.broker.placeOrder.bind(h.broker)
     // 模拟 HTX：createOrder 只回 open/new，且 #awaitFill 到点仍未确认 ⇒ ack.state='acked'
@@ -226,7 +258,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     const due = h.db
       .prepare('SELECT decision_id FROM decisions WHERE reflection_due_at IS NOT NULL')
       .all() as { decision_id: string }[]
-    expect(due.length).toBeGreaterThan(0)
+    expect(due).toEqual([])
     h.db.close()
   })
 

@@ -151,9 +151,8 @@ export async function runReadOnlyPreflight(
  *
  * 两条口径：
  *   · `created` → `pending`、`acked` → `open`；其余状态（filled/canceled/rejected）不参与对账；
- *   · 本地持仓由**全部成交**按与 `PaperBroker` 相同的均价规则重建；停止价没有持久化到
- *     `order_intents`，因此本地 `protectedStopPrice` 一律不填 —— 对账会保守地把"本地有仓"
- *     报告为缺保护单（宁可多报，不可漏报）。
+ *   · 本地持仓由**全部成交**按与 `PaperBroker` 相同的均价规则重建；本地 stop intent 只证明
+ *     我们曾经请求过挂单，不能证明交易所现在仍有算法保护，所以这里永远不填 protectedStopPrice。
  */
 export class LocalStateReader {
   readonly #statements: Statements
@@ -181,22 +180,28 @@ export class LocalStateReader {
   positions(): readonly LocalPositionSnapshot[] {
     const rows = this.#statements
       .get(
-        `SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price, COALESCE(oi.side, 'buy') AS side,
-                (SELECT p.stop_price FROM order_intents p
-                 WHERE p.symbol = oi.symbol AND p.reduce_only = 1 AND p.stop_price IS NOT NULL
-                   AND p.state IN ('created', 'acked')
-                 ORDER BY p.created_at DESC LIMIT 1) AS protected_stop_price
-         FROM fills f
-         JOIN orders o ON o.order_id = f.order_id
-         JOIN order_intents oi ON oi.client_order_id = o.client_order_id
-         ORDER BY f.ts ASC, f.fill_id ASC`,
+        `SELECT symbol, qty, price, side FROM (
+           SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price,
+                  COALESCE(oi.side, 'buy') AS side, f.ts AS fill_ts, f.fill_id AS fill_id
+           FROM fills f
+           JOIN orders o ON o.order_id = f.order_id
+           JOIN order_intents oi ON oi.client_order_id = o.client_order_id
+           UNION ALL
+           -- 非终态累计成交尚未进入 fills；在本地仓位镜像中只取该订单最新累计量。
+           SELECT oi.symbol AS symbol, o.filled_qty AS qty, o.avg_price AS price,
+                  COALESCE(oi.side, 'buy') AS side, o.updated_at AS fill_ts, o.order_id AS fill_id
+           FROM orders o
+           JOIN order_intents oi ON oi.client_order_id = o.client_order_id
+           WHERE o.filled_qty > 0 AND o.avg_price IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM fills f WHERE f.order_id = o.order_id)
+         ) ORDER BY fill_ts ASC, fill_id ASC`,
       )
-      .all() as { symbol: string; qty: number; price: number; side: string; protected_stop_price: number | null }[]
+      .all() as { symbol: string; qty: number; price: number; side: string }[]
 
-    const bySymbol = new Map<string, { qty: number; price: number; side: string; protectedStopPrice: number | null }[]>()
+    const bySymbol = new Map<string, { qty: number; price: number; side: string }[]>()
     for (const row of rows) {
       const list = bySymbol.get(row.symbol) ?? []
-      list.push({ qty: row.qty, price: row.price, side: row.side, protectedStopPrice: row.protected_stop_price })
+      list.push({ qty: row.qty, price: row.price, side: row.side })
       bySymbol.set(row.symbol, list)
     }
 
@@ -204,8 +209,7 @@ export class LocalStateReader {
     for (const [symbol, fills] of bySymbol) {
       const position = reconstructPosition(fills)
       if (position.qty === 0) continue
-      const protectedStopPrice = fills.find((fill) => fill.protectedStopPrice !== null)?.protectedStopPrice ?? null
-      out.push({ symbol, qty: position.qty, ...(protectedStopPrice === null ? {} : { protectedStopPrice }) })
+      out.push({ symbol, qty: position.qty })
     }
     return out.sort((a, b) => a.symbol.localeCompare(b.symbol))
   }

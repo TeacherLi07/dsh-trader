@@ -12,7 +12,7 @@ const clean: ReconciliationInput = {
   localOrders: [{ clientOrderId: 'o1', symbol: 'BTC/USDT', state: 'open' }],
   remoteOrders: [{ clientOrderId: 'o1', symbol: 'BTC/USDT' }],
   localPositions: [{ symbol: 'BTC/USDT', qty: 1, protectedStopPrice: 95 }],
-  remotePositions: [{ symbol: 'BTC/USDT', qty: 1 }],
+  remotePositions: [{ symbol: 'BTC/USDT', qty: 1, protectedStopPrice: 95 }],
 }
 
 describe('reconcile', () => {
@@ -30,10 +30,10 @@ describe('reconcile', () => {
     })
 
     expect(result.actions).toEqual([
-      { kind: 'cancel_orphan', clientOrderId: 'ghost', reason: '本地无记录' },
+      { kind: 'cancel_orphan', clientOrderId: 'ghost', symbol: 'BTC/USDT', reason: '本地无记录' },
     ])
     expect(result.consistent).toBe(false)
-    expect(result.freezeTrading).toBe(false)
+    expect(result.freezeTrading).toBe(true)
     expect(severityOf(result.actions[0]!)).toBe('P1')
   })
 
@@ -43,8 +43,9 @@ describe('reconcile', () => {
       localOrders: [{ clientOrderId: 'o1', symbol: 'BTC/USDT', state: 'canceled' }],
     })
     expect(result.actions).toEqual([
-      { kind: 'cancel_orphan', clientOrderId: 'o1', reason: '本地状态为 canceled' },
+      { kind: 'cancel_orphan', clientOrderId: 'o1', symbol: 'BTC/USDT', reason: '本地状态为 canceled' },
     ])
+    expect(result.freezeTrading).toBe(true)
   })
 
   it('flags a locally-open order that the exchange does not have', () => {
@@ -53,9 +54,11 @@ describe('reconcile', () => {
       {
         kind: 'alert_missing_order',
         clientOrderId: 'o1',
+        symbol: 'BTC/USDT',
         reason: '本地标记为未结，但交易所无此单',
       },
     ])
+    expect(result.freezeTrading).toBe(true)
   })
 
   it('freezes trading on an unknown position rather than guessing', () => {
@@ -80,6 +83,7 @@ describe('reconcile', () => {
     const result = reconcile({
       ...clean,
       localPositions: [{ symbol: 'BTC/USDT', qty: 1 }],
+      remotePositions: [{ symbol: 'BTC/USDT', qty: 1 }],
     })
     expect(result.actions).toEqual([{ kind: 'alert_unprotected_position', symbol: 'BTC/USDT' }])
     expect(severityOf(result.actions[0]!)).toBe('P0')
@@ -93,6 +97,16 @@ describe('reconcile', () => {
     })
     expect(result.actions).toEqual([])
     expect(result.freezeTrading).toBe(false)
+  })
+
+  it('本地 stop intent 不能替代远端算法保护单证据', () => {
+    const result = reconcile({
+      ...clean,
+      localPositions: [{ symbol: 'BTC/USDT', qty: 1, protectedStopPrice: 95 }],
+      remotePositions: [{ symbol: 'BTC/USDT', qty: 1 }],
+    })
+    expect(result.actions).toContainEqual({ kind: 'alert_unprotected_position', symbol: 'BTC/USDT' })
+    expect(result.freezeTrading).toBe(true)
   })
 
   it('数量不一致与无保护都属于冻结级结果', () => {
@@ -141,7 +155,7 @@ describe('reconcile', () => {
       ],
     })
     expect(result.actions).toEqual([
-      { kind: 'cancel_orphan', clientOrderId: 'ghost', exchangeOrderId: 'ex-9', reason: '本地无记录' },
+      { kind: 'cancel_orphan', clientOrderId: 'ghost', symbol: 'BTC/USDT', exchangeOrderId: 'ex-9', reason: '本地无记录' },
     ])
   })
 })
@@ -177,7 +191,7 @@ describe('Reconciler：孤儿单撤单的 ID 语义', () => {
     const { canceled, reconciler } = build([{ clientOrderId: 'c1', exchangeOrderId: 'ex9' }])
     const result = await reconciler.runOnce()
     expect(canceled).toEqual(['ex9'])
-    expect(result.freezeTrading).toBe(false)
+    expect(result.freezeTrading).toBe(true)
   })
 
   it('缺 exchangeOrderId ⇒ 不调用撤单、冻结、P0 告警', async () => {

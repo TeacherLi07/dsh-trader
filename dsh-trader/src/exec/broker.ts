@@ -20,6 +20,8 @@ export interface AccountSnapshot {
   /** 交易所可用保证金/余额；paper 不模拟保证金时必须为 null/undefined。 */
   readonly freeMarginQuote?: number | null
   readonly totalExposureUsd: number
+  /** 未成交、可能增加敞口订单的保守名义金额；null 表示无法可靠计算。 */
+  readonly pendingExposureUsd: number | null
   readonly openOrders: number
   readonly leverage: number
   readonly dailyLossUsd: number
@@ -65,6 +67,7 @@ export interface OrderAck {
   readonly intentId: string
   readonly clientOrderId: string
   readonly exchangeOrderId?: string
+  readonly symbol?: string
   readonly state: OrderState
   readonly ts: number
   /** 查询交易所当前订单列表的时刻；ts 仍保留订单/ack 自身时刻。 */
@@ -84,6 +87,8 @@ export interface ProtectiveRequest {
   readonly symbol: string
   /** 幂等键；由调用方给出后 broker 必须原样使用，保证审计链与恢复对得上。 */
   readonly clientOrderId?: string
+  /** 开仓保护要求覆盖的已确认仓位；broker 读到更小/反向持仓时必须拒绝。 */
+  readonly expectedPositionQty?: number
   readonly stopLossPrice?: number
   readonly takeProfitPrice?: number
   readonly trailingPercent?: number
@@ -111,6 +116,7 @@ export interface Broker {
   /** 兼容仅能按 client id 查询的 paper/sim 适配器；生产 HTX 优先使用 exchange id。 */
   findOrderByClientOrderId?(clientOrderId: string, symbol?: string): Promise<OrderAck | undefined>
   cancelOrder(exchangeOrderId: string): Promise<void>
-  cancelAll(symbol?: string): Promise<void>
+  /** 默认保留所有 reduce-only/保护单；只有确认目标仓位为空后才可 includeProtection。 */
+  cancelAll(symbol?: string, options?: { readonly includeProtection?: boolean }): Promise<void>
   subscribeUserData(onEvent: (event: UserDataEvent) => void): () => void
 }
