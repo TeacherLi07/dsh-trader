@@ -1,5 +1,6 @@
 /**
- * P1.5 通道有效性闸门（plan §10 / T1.7）。
+ * P1.5 历史通道有效性闸门（plan §10 / T1.7），使用逐笔样本与确定性替身。
+ * 它不是 R5 经济验收；R5 必须使用下方的完整账户共同时间网格与时间块 bootstrap，且必须是真实模型调用。
  *
  * 问题：W2/W3 这套"判断通道"到底值不值得留？
  * 判据是**预注册**的（避免事后挑指标）：
@@ -95,6 +96,137 @@ export interface ConfidenceInterval {
   readonly samples: number
   readonly iterations: number
   readonly confidence: number
+}
+
+export interface EquityCurvePoint {
+  readonly at: number
+  /** 全部标的合计的账户权益，包含已实现与未实现项目；不能是逐笔成交子集。 */
+  readonly equityUsd: number
+}
+
+export interface PairedEquityPoint {
+  readonly at: number
+  readonly equityAUsd: number
+  readonly equityBUsd: number
+}
+
+export interface EquityBlockBootstrapInterval extends ConfidenceInterval {
+  readonly blockLength: number
+  readonly independentTimeBlocks: number
+  readonly totalEquityDeltaUsd: number
+}
+
+function assertEquityCurve(name: string, curve: readonly EquityCurvePoint[]): void {
+  if (curve.length < 2) throw new Error(`${name} equity curve needs at least two non-empty time samples`)
+  let priorAt = -1
+  for (const point of curve) {
+    if (!Number.isSafeInteger(point.at) || point.at < 0 || point.at <= priorAt) {
+      throw new Error(`${name} equity timestamps must be non-negative safe integers in strict order`)
+    }
+    if (!Number.isFinite(point.equityUsd) || point.equityUsd < 0) {
+      throw new Error(`${name} equity must be finite and non-negative`)
+    }
+    priorAt = point.at
+  }
+}
+
+/** 只按共同时间网格配对账户级样本；缺少任一时间点就拒绝比较，不改用成交前缀补齐。 */
+export function alignEquityCurves(
+  a: readonly EquityCurvePoint[],
+  b: readonly EquityCurvePoint[],
+): readonly PairedEquityPoint[] {
+  assertEquityCurve('A', a)
+  assertEquityCurve('B', b)
+  if (a.length !== b.length) throw new Error(`equity curves must share one complete time grid: ${a.length} != ${b.length}`)
+  const initialGap = Math.abs(a[0]!.equityUsd - b[0]!.equityUsd)
+  if (initialGap > Math.max(1e-9, Math.abs(a[0]!.equityUsd) * 1e-12)) {
+    throw new Error('equity curves must start from the same initial account value')
+  }
+  const stepMs = a[1]!.at - a[0]!.at
+  for (let index = 2; index < a.length; index += 1) {
+    if (a[index]!.at - a[index - 1]!.at !== stepMs) throw new Error(`equity time grid is irregular at index ${index}`)
+  }
+  return a.map((point, index) => {
+    const other = b[index]
+    if (other === undefined || point.at !== other.at) throw new Error(`equity time grid mismatch at index ${index}`)
+    return { at: point.at, equityAUsd: point.equityUsd, equityBUsd: other.equityUsd }
+  })
+}
+
+/** 全账户权益曲线的美元最大回撤；完整权益点为空时拒绝给出空跑“0 回撤”。 */
+export function maxEquityDrawdown(curve: readonly EquityCurvePoint[]): number {
+  assertEquityCurve('equity', curve)
+  let peak = curve[0]!.equityUsd
+  let worst = 0
+  for (const point of curve) {
+    peak = Math.max(peak, point.equityUsd)
+    worst = Math.max(worst, peak - point.equityUsd)
+  }
+  return worst
+}
+
+/**
+ * 在共同账户网格上先求每个区间的收益差，再按连续时间块配对重采样。
+ * 这样保留持仓期间的串行相关；不能把逐笔成交或每个 timestamp 当成独立 iid 样本。
+ */
+export function pairedEquityBlockBootstrapCi(
+  a: readonly EquityCurvePoint[],
+  b: readonly EquityCurvePoint[],
+  options: BootstrapOptions & { readonly blockLength: number },
+): EquityBlockBootstrapInterval {
+  const aligned = alignEquityCurves(a, b)
+  const blockLength = options.blockLength
+  const iterations = options.iterations ?? 10_000
+  const confidence = options.confidence ?? 0.95
+  const seed = options.seed ?? 20_260_914
+  if (!Number.isSafeInteger(blockLength) || blockLength < 1) throw new Error('blockLength must be a positive integer')
+  if (!Number.isSafeInteger(iterations) || iterations < 1 || iterations > 1_000_000) throw new Error('iterations must be in 1..1000000')
+  if (!Number.isFinite(confidence) || confidence <= 0 || confidence >= 1) throw new Error('confidence must be in (0,1)')
+  if (!Number.isSafeInteger(seed)) throw new Error('seed must be a safe integer')
+
+  const differences = aligned.slice(1).map((point, index) => {
+    const previous = aligned[index]!
+    return (point.equityBUsd - previous.equityBUsd) - (point.equityAUsd - previous.equityAUsd)
+  })
+  const independentTimeBlocks = Math.floor(differences.length / blockLength)
+  if (independentTimeBlocks < 2) {
+    throw new Error(`insufficient independent time blocks: ${independentTimeBlocks} < 2`)
+  }
+
+  const random = mulberry32(seed)
+  const blockCount = Math.ceil(differences.length / blockLength)
+  const means = new Array<number>(iterations)
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    let total = 0
+    let sampled = 0
+    for (let block = 0; block < blockCount && sampled < differences.length; block += 1) {
+      const start = Math.floor(random() * (differences.length - blockLength + 1))
+      for (let offset = 0; offset < blockLength && sampled < differences.length; offset += 1) {
+        total += differences[start + offset]!
+        sampled += 1
+      }
+    }
+    means[iteration] = total / differences.length
+  }
+  means.sort((left, right) => left - right)
+  const alpha = (1 - confidence) / 2
+  const lowerIndex = Math.max(0, Math.floor(alpha * iterations))
+  const upperIndex = Math.min(iterations - 1, Math.ceil((1 - alpha) * iterations) - 1)
+  const mean = differences.reduce((sum, value) => sum + value, 0) / differences.length
+
+  return {
+    mean,
+    lower: means[lowerIndex]!,
+    upper: means[upperIndex]!,
+    samples: differences.length,
+    iterations,
+    confidence,
+    blockLength,
+    independentTimeBlocks,
+    totalEquityDeltaUsd:
+      (aligned.at(-1)!.equityBUsd - aligned[0]!.equityBUsd) -
+      (aligned.at(-1)!.equityAUsd - aligned[0]!.equityAUsd),
+  }
 }
 
 /**

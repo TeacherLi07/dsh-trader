@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_GATE_THRESHOLDS,
+  alignEquityCurves,
   computeArmMetrics,
   evaluateChannelGate,
+  maxEquityDrawdown,
   maxDrawdown,
   pairDifferences,
+  pairedEquityBlockBootstrapCi,
   pairedBootstrapCi,
   renderGateReport,
   standInJudge,
@@ -93,6 +96,31 @@ describe('pairDifferences', () => {
 
   it('样本量不同时取较短者，不补零（补零会伪造样本）', () => {
     expect(pairDifferences([1, 2, 3, 4], [1, 1])).toEqual([0, -1])
+  })
+})
+
+describe('R5 full-account equity alignment and block bootstrap', () => {
+  const aCurve = Array.from({ length: 13 }, (_, index) => ({ at: index * 3_600_000, equityUsd: 1_000 + index * 10 }))
+  const bCurve = Array.from({ length: 13 }, (_, index) => ({ at: index * 3_600_000, equityUsd: 1_000 + index * 15 }))
+
+  it('requires the exact common time grid and uses non-empty account samples', () => {
+    const aligned = alignEquityCurves(aCurve, bCurve)
+    expect(aligned.length).toBeGreaterThan(0)
+    expect(aligned).toHaveLength(13)
+    expect(aligned[0]).toMatchObject({ equityAUsd: 1_000, equityBUsd: 1_000 })
+    expect(maxEquityDrawdown(aCurve)).toBe(0)
+    expect(() => alignEquityCurves(aCurve, bCurve.slice(1))).toThrow(/complete time grid/)
+    expect(() => alignEquityCurves(aCurve, bCurve.map((point, index) => index === 4 ? { ...point, at: point.at + 1 } : point))).toThrow(/grid mismatch/)
+    expect(() => alignEquityCurves(aCurve, bCurve.map((point, index) => index === 0 ? { ...point, equityUsd: point.equityUsd + 1 } : point))).toThrow(/same initial account value/)
+    expect(() => alignEquityCurves(aCurve.map((point, index) => index === 4 ? { ...point, at: point.at + 1 } : point), aCurve.map((point, index) => index === 4 ? { ...point, at: point.at + 1 } : point))).toThrow(/irregular/)
+  })
+
+  it('block-resamples paired equity increments deterministically and rejects too few independent blocks', () => {
+    const first = pairedEquityBlockBootstrapCi(aCurve, bCurve, { blockLength: 3, iterations: 200, seed: 42 })
+    const second = pairedEquityBlockBootstrapCi(aCurve, bCurve, { blockLength: 3, iterations: 200, seed: 42 })
+    expect(first).toEqual(second)
+    expect(first).toMatchObject({ mean: 5, lower: 5, upper: 5, samples: 12, blockLength: 3, independentTimeBlocks: 4, totalEquityDeltaUsd: 60 })
+    expect(() => pairedEquityBlockBootstrapCi(aCurve.slice(0, 4), bCurve.slice(0, 4), { blockLength: 3, iterations: 50 })).toThrow(/insufficient independent time blocks/)
   })
 })
 

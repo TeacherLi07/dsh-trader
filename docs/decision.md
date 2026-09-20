@@ -1862,3 +1862,8 @@ Luna Max 复核指出，“存在一条 market 路径”不足以证明 PM 信�
 生产 `dailyBudgetUsd` 仍有意未配置，所以 W1/W2/W3 不发真实模型请求。R3/R4 工程 stub 输出分别见
 [R3](../dsh-trader/docs/r3-decision-envelope-2026-09-20.md) 与 [R4](../dsh-trader/docs/r4-trigger-worker-2026-09-20.md)；
 它们不替代 R5 真实模型回放、forward-paper 和经济验收。
+
+R5 的统计实现不得继续使用旧 P1.5 的逐笔共同前缀配对。已在 `supervisor/ab.ts` 增加严格共同时间网格的
+完整账户权益对齐、权益回撤与时间块配对 bootstrap；缺失时间点、空曲线或少于两个独立时间块均拒绝产出有效 CI。
+旧 `scripts/ab-gate.mjs` 与逐笔 bootstrap 只留作历史 P1.5 替身诊断，不能作为 R5 结论。真实 LLM/forward-paper
+执行仍等待 §12 的显式预算/额度决定，因此 R5 未完成。
