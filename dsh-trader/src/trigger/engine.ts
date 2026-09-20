@@ -170,6 +170,7 @@ export interface GovernorDecision {
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
+export const DEFAULT_TRIGGER_TTL_MS = HOUR_MS
 
 export interface SubmitOptions {
   readonly payload?: unknown
@@ -302,6 +303,8 @@ export interface WatchOutcome {
 export interface RuleWatchOptions {
   /** 规则无法求值时的审计钩子；失败不是“无命中”，不能只留在返回值里。 */
   readonly onFailure?: (failure: RuleFailure) => void
+  /** 未处理的行情触发不沿用旧快照；缺省一小时后作废。 */
+  readonly triggerTtlMs?: number
 }
 
 /** 单根 bar 的盯盘入口：求值 + 治理。可以安全地对同一根 bar 重复调用（幂等）。 */
@@ -310,7 +313,11 @@ export class RuleWatch {
     private readonly rules: readonly RuleSpec[],
     private readonly governor: TriggerGovernor,
     private readonly options: RuleWatchOptions = {},
-  ) {}
+  ) {
+    if (options.triggerTtlMs !== undefined && (!Number.isSafeInteger(options.triggerTtlMs) || options.triggerTtlMs <= 0)) {
+      throw new Error('triggerTtlMs 必须是正的安全整数')
+    }
+  }
 
   onBar(input: BarInput): WatchOutcome {
     const evaluation = evaluateRules({
@@ -325,7 +332,10 @@ export class RuleWatch {
 
     const decisions = evaluation.hits.map((hit) => {
       const rule = this.rules.find((candidate) => candidate.id === hit.ruleId)
-      return this.governor.submit(hit, { cooldownMs: rule?.cooldownMs ?? 0 })
+      return this.governor.submit(hit, {
+        cooldownMs: rule?.cooldownMs ?? 0,
+        ttlMs: this.options.triggerTtlMs ?? DEFAULT_TRIGGER_TTL_MS,
+      })
     })
 
     return { hits: evaluation.hits, failures: evaluation.failures, decisions }

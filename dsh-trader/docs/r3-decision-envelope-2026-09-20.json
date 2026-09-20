@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 7,
+  "asOf": 1789905600000,
+  "externalModelCalls": 0,
+  "stubProviderCalls": 1,
+  "runId": "run-dec92506ae9f3e015b1ed7848658369203df6cdbe537cd76b6d7e04e700d8ec7",
+  "contextHash": "sha256:bb70a5a52c6c4d75911417bd25b059f0d1668404898cf9d10f5b40b0bd78bc4d",
+  "status": "completed",
+  "outcome": "no_trade",
+  "replayWasIdempotent": true,
+  "usage": {
+    "inputTokens": 256,
+    "outputTokens": 48,
+    "costKnown": true,
+    "costUsd": 0.0000672
+  },
+  "noOrderIntent": true,
+  "secretAbsentFromFrozenContext": true
+}

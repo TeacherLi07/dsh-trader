@@ -1,75 +1,60 @@
-/**
- * trade-supervisor —— 无人值守的发动机：W1 窗口唤醒 + 心跳。
- *
- * 职责边界（plan §2）：
- *   · **W1**：审议窗到点 ⇒ 用 `notice` 唤醒 desk agent，让它产出/刷新计划卡；
- *   · **机械执行**不在本插件：由 `live-engine` 在每根已收盘 bar 上匹配计划卡并执行（market 插件驱动）；
- *   · **W2/W3** 的路由是纯函数（`supervisor/windows.ts` 的 `decideWake`），预算/限流都走代码。
- *
- * ⚠️ 两条实测约束（plan §2 ★、`plugins/probe.ts`）：
- *   1. **不能在 `apply` 期间调用 `ctx.agents.create/resume`** —— agent factory 由 `dsh-agent-loop`
- *      注册，若在 apply 里 await 等待会死锁 plugin loader。这里只在**窗口触发时**（定时器回调，
- *      早已脱离 apply）才 attach。
- *   2. 心跳只用于持久化 liveness/熔断状态与启动后的可观测性；进程死亡后由 Docker 重启 dsh，
- *      交易状态由启动时 CrashRecovery + reconcile 收敛，不启动第二个撤单进程（plan §6.3）。
- */
+/** W1 直接驱动受限 DecisionEnvelope workflow；无持久 desk agent、无通用工具回合。 */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type {
-  Agent,
-  AgentOptions,
-  AgentSetup,
-  CreateAgentOptions,
-  ResumeAgentOptions,
-} from '@deepseek-ai/dsh-agent'
-import type {} from '@deepseek-ai/dsh-agent' // 载入 cordis Events/Context 的模块增强
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-llm'
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
-import { dayKey, PriceTableStore, priceTableStaleAlert } from '../cost-ledger.js'
+import { BudgetLedger, dayKey, PriceTableStore, priceTableStaleAlert } from '../cost-ledger.js'
 import { getDatabase } from '../db/runtime.js'
 import { Statements } from '../db/statements.js'
 import { DecisionJournal } from '../exec/journal.js'
-import { RUNTIME_IMPLEMENTED_TOOL_NAMES } from '../agents/tool-roster.js'
 import type { TradePorts } from '../exec/ports.js'
 import { HeartbeatStore } from '../supervisor/heartbeat.js'
-import { validateWindowSpec, windowDedupKey, type WindowFire, type WindowSpec } from '../supervisor/windows.js'
+import { validateWindowSpec, type WindowSpec } from '../supervisor/windows.js'
 import { SupervisorWindowQueue, type WindowQueueItem } from '../supervisor/window-queue.js'
+import { dispatchNextTrigger, resolvePredictionTriggerTarget } from '../supervisor/trigger-dispatcher.js'
+import { DEFAULT_TRIGGER_LIMITS, type TriggerLimits } from '../trigger/engine.js'
+import { TriggerQueue } from '../trigger/queue.js'
+import { getPmRuntime } from '../predictions/runtime.js'
 import { getExecPorts } from './exec.js'
-import { assertWiredSupervisorConfig } from '../supervisor/config-guard.js'
-import { setupRoleToolRestriction } from './tools-adapter.js'
+import { runDecisionRuntime } from '../agents/decision-runtime.js'
+import type { DecisionStrategy } from '../agents/decision-workflow.js'
+import type { DecisionModelRoute } from '../agents/decision-workflow.js'
 
 export const name = 'trade-supervisor'
-/** 需要 agents 服务才能唤醒 desk；心跳与行情不依赖它。 */
-export const inject = ['agents']
+export const inject = ['llm']
+
+const windowSchema = z.object({ id: z.string().required(), at: z.string(), everyMs: z.number() })
 
 export const Config = z.object({
-  deskSessionId: z.string().required(),
-  l2: z.object({ provider: z.string(), model: z.string() }),
   l3: z.object({ provider: z.string(), model: z.string() }),
-  l3MinIntervalMs: z.number(),
   dailyBudgetUsd: z.number(),
+  dailyTokenCap: z.number(),
+  wakeLimits: z.object({
+    judgmentPerHour: z.number(), judgmentPerDay: z.number(),
+    noveltyPerHour: z.number(), noveltyPerDay: z.number(),
+  }),
+  maxOutputTokens: z.number(),
+  planWindowMs: z.number(),
+  decisionStrategy: z.string(),
   heartbeatMs: z.number(),
-  windows: z.array(z.object({ id: z.string(), at: z.string(), everyMs: z.number() })),
+  windows: z.array(windowSchema),
   windowScanMs: z.number(),
   wakeTimeoutMs: z.number(),
-  /** desk 会话的 cwd；系统提示的 `{{cwd}}` 变量（persona-suffix）需要它，缺了会直接报错。 */
-  deskCwd: z.string(),
 })
 
 export interface SupervisorConfig {
-  deskSessionId: string
-  l2?: { provider?: string; model?: string }
   l3?: { provider?: string; model?: string }
-  l3MinIntervalMs?: number
   dailyBudgetUsd?: number
+  dailyTokenCap?: number
+  wakeLimits?: Partial<TriggerLimits>
+  maxOutputTokens?: number
+  planWindowMs?: number
+  decisionStrategy?: string
   heartbeatMs?: number
-  /** W1 审议窗；`at` 为 UTC 时刻，`everyMs` 为间隔（`at` 优先）。 */
   windows?: readonly WindowSpec[]
   windowScanMs?: number
   wakeTimeoutMs?: number
-  /** 默认取 dsh 进程的 cwd；必须是**绝对路径**（会话元数据会校验）。 */
-  deskCwd?: string
 }
 
 const DEFAULT_WINDOWS: readonly WindowSpec[] = [
@@ -81,117 +66,77 @@ const DEFAULT_WINDOWS: readonly WindowSpec[] = [
   { id: 'w1-20', at: '20:00Z' },
 ]
 
-const MAX_NOTICE_SUMMARY = 120
-
-export interface DeskAgentLifecycleInput {
-  readonly sessionId: string
-  readonly agentOptions: AgentOptions
-  readonly deskCwd: string
-  /** 当前已注册且允许作为 judge 候选的工具；workflow 专用工具由调用方追加。 */
-  readonly availableToolNames: readonly string[]
+function strategyOf(value: string | undefined): DecisionStrategy {
+  const strategy = value ?? 'single'
+  if (strategy !== 'single' && strategy !== 'critique') throw new Error(`decisionStrategy 必须是 single|critique，收到 ${strategy}`)
+  return strategy
 }
 
-export interface DeskAgentLifecycleOptions {
-  readonly setup: AgentSetup
-  readonly create: CreateAgentOptions
-  readonly resume: ResumeAgentOptions
-}
-
-/**
- * 生成 desk 的两条真实生命周期 options。
- *
- * DSH 的 resume 同样会重新创建 scoped context；只给 create 安装限制会让崩溃恢复
- * 后的 desk 回到全局工具面，因此 create/resume 明确共享同一份 judge setup。
- */
-export function deskAgentLifecycleOptions(
-  input: DeskAgentLifecycleInput,
-): DeskAgentLifecycleOptions {
-  // 当前生产路径只有 supervisor → desk judge；analyst/research/risk 子 agent 尚未由
-  // supervisor 创建，因此这里只给通用 helper 留角色参数，不伪造不存在的生命周期路径。
-  const setup = setupRoleToolRestriction('judge', input.availableToolNames)
+function routeOf(config: SupervisorConfig): DecisionModelRoute {
+  const provider = config.l3?.provider
+  const model = config.l3?.model
+  if (provider === undefined || provider.trim() === '' || model === undefined || model.trim() === '') {
+    throw new Error('trade-supervisor 需要固定的 strategist l3 provider/model')
+  }
+  const maxTokens = config.maxOutputTokens ?? 1_024
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 8_192) {
+    throw new Error('maxOutputTokens 必须是 1..8192 的整数')
+  }
   return {
-    setup,
-    create: {
-      sessionId: input.sessionId as never,
-      agentOptions: input.agentOptions,
-      meta: { cwd: input.deskCwd },
-      setup,
-    },
-    resume: {
-      resumeSessionId: input.sessionId as never,
-      agentOptions: input.agentOptions,
-      setup,
-    },
+    provider,
+    model,
+    maxTokens,
+    maxChars: 180_000,
   }
 }
 
-/**
- * W1 事件包 + notice 文案（plan §5.1：`summary` ≤ 120 字符硬上限）。
- *
- * 数字只用于**理解**，不用于计算：真正的仓位/权益由工具在下单前重新向交易所重取（§6.2）。
- */
-export function buildWindowNotice(
-  fire: WindowFire,
-  ports: TradePorts | undefined,
-): { readonly summary: string; readonly text: string } {
-  const lines: string[] = [`W1 审议窗 ${fire.id}（${new Date(fire.fireTs).toISOString()}）。`]
-  if (ports === undefined) {
-    lines.push('执行组合根尚未就绪：本轮只做判断，不要调用下单类工具。')
-  } else {
-    try {
-      const active = ports.plans.active(ports.symbols[0] ?? '')
-      lines.push(
-        `标的 ${ports.symbols.join(', ')}；时间框 ${ports.timeframes.join(', ')}；` +
-          `active 计划卡 ${active === undefined ? '无' : active.planId}。`,
-      )
-    } catch (error) {
-      lines.push(`读取本地计划卡失败：${String(error)}。`)
-    }
+function triggerLimitsOf(input: Partial<TriggerLimits> | undefined): TriggerLimits {
+  const limits: TriggerLimits = {
+    judgmentPerHour: input?.judgmentPerHour ?? DEFAULT_TRIGGER_LIMITS.judgmentPerHour,
+    judgmentPerDay: input?.judgmentPerDay ?? DEFAULT_TRIGGER_LIMITS.judgmentPerDay,
+    noveltyPerHour: input?.noveltyPerHour ?? DEFAULT_TRIGGER_LIMITS.noveltyPerHour,
+    noveltyPerDay: input?.noveltyPerDay ?? DEFAULT_TRIGGER_LIMITS.noveltyPerDay,
   }
-  lines.push(
-    '请按你的角色判断本窗口是否有值得执行的机会：',
-    '1) 对每个配置标的/时间框先调用 trade_workflow_run；不得跳过协作直接提交开仓计划。',
-    '2) 阅读 workflow 返回的 evidenceIssues、openDisagreements 与 risk，再决定下一步；',
-    '3) 只有证据收敛且风险允许时才调用 trade_plan_card；否则记录 NO_TRADE 或 REVIEW；',
-    '4) 数量/价位由代码推导，拿不准时不要硬凑方向。',
-  )
-  return {
-    summary: `W1 ${fire.id}: 交易窗口到点，请复核并决定是否更新计划卡`.slice(0, MAX_NOTICE_SUMMARY),
-    text: lines.join('\n'),
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`wakeLimits.${name} 必须是非负整数`)
   }
+  return limits
 }
 
 export function apply(ctx: Context, config: SupervisorConfig): void {
-  // `l2` / `l3MinIntervalMs` / `dailyBudgetUsd` 目前不生效（W2/W3 未接线）：配了就拒绝启动。
-  assertWiredSupervisorConfig({
-    l2: config.l2,
-    l3MinIntervalMs: config.l3MinIntervalMs,
-    dailyBudgetUsd: config.dailyBudgetUsd,
-  })
+  const strategy = strategyOf(config.decisionStrategy)
+  const route = routeOf(config)
+  if (config.dailyBudgetUsd !== undefined && (!Number.isFinite(config.dailyBudgetUsd) || config.dailyBudgetUsd <= 0)) {
+    throw new Error('dailyBudgetUsd 必须为正数；未配置时 fail-closed 禁止调用模型')
+  }
+  if (config.dailyTokenCap !== undefined && (!Number.isSafeInteger(config.dailyTokenCap) || config.dailyTokenCap <= 0)) {
+    throw new Error('dailyTokenCap 必须是正整数')
+  }
+  const planWindowMs = config.planWindowMs ?? 4 * 3_600_000
+  if (!Number.isSafeInteger(planWindowMs) || planWindowMs <= 0) throw new Error('planWindowMs 必须是正整数')
+  const wakeLimits = triggerLimitsOf(config.wakeLimits)
+
   const logger = ctx.logger('trade-supervisor')
   const clock = systemClock()
   const database = getDatabase()
   const journal = new DecisionJournal(database)
-  const heartbeat = new HeartbeatStore(new Statements(database), (event) => {
-    journal.appendAudit(event)
-  })
+  const heartbeat = new HeartbeatStore(new Statements(database), (event) => journal.appendAudit(event))
   const heartbeatMs = config.heartbeatMs ?? 15_000
+  const specs = config.windows ?? DEFAULT_WINDOWS
+  for (const spec of specs) {
+    const errors = validateWindowSpec(spec)
+    if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
+  }
 
-  // 显式声明 W2/W3 的状态（审计 S7）。旧实现是"不接线"的静默状态：配置和纯函数都在，
-  // 看起来逃逸通道在工作，实际 `decideWake`/`claim` 都没有调用方。把关闭写成可审计的事实。
-  logger.info('W2/W3 判断通道未启用（P1.5 判定：关闭；decideWake/claim 未接线）；本进程只驱动 W1 审议窗')
-  journal.appendAudit({
-    actor: 'system',
-    kind: 'w2w3_disabled',
-    payload: {
-      reason: 'P1.5 闸门判定关闭 W2/W3；decideWake 与 TriggerQueue.claim 在生产路径未接线',
-      windows: (config.windows ?? DEFAULT_WINDOWS).map((window) => window.id),
-    },
-    ts: clock.now(),
-  })
+  if (config.dailyBudgetUsd === undefined) {
+    journal.appendAudit({
+      actor: 'system', kind: 'decision_budget_unconfigured',
+      payload: { reason: 'dailyBudgetUsd 未显式设置；W1/W2/W3 均不调用模型', strategy, provider: route.provider, model: route.model },
+      ts: clock.now(),
+    })
+    logger.warn('dailyBudgetUsd 未设置：W1/W2/W3 模型调用 fail-closed')
+  }
 
-  // 价目表年龄检查（plan §12 #19）：>90 天 ⇒ P2 告警，**不阻塞**。
-  // 按天节流：15s 心跳若每次都写审计会把 append-only 表刷爆，而价目表天级才变化。
   const prices = new PriceTableStore(database)
   let lastStaleDay: string | null = null
   const checkPriceTableAge = (): void => {
@@ -204,15 +149,26 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     const day = dayKey(now)
     if (day === lastStaleDay) return
     lastStaleDay = day
+    journal.appendAudit({ actor: 'system', kind: 'price_table_stale', payload: { alert, ageDays: prices.ageDays(now) }, ts: now })
+  }
+
+  const windowQueue = new SupervisorWindowQueue(database)
+  const triggerQueue = new TriggerQueue(database)
+  const budget = new BudgetLedger(database)
+  const queueNow = clock.now()
+  windowQueue.ensure([...specs], queueNow)
+  windowQueue.recover(queueNow)
+  for (const trigger of triggerQueue.recoverClaims(queueNow)) {
     journal.appendAudit({
-      actor: 'system',
-      kind: 'price_table_stale',
-      payload: { alert, ageDays: prices.ageDays(now) },
-      ts: now,
+      actor: 'system', kind: trigger.state === 'expired' ? 'trigger.expired' : 'trigger.recovered',
+      payload: {
+        triggerId: trigger.triggerId, dedupKey: trigger.dedupKey, state: trigger.state,
+        attempts: trigger.attempts, nextAttemptAt: trigger.nextAttemptAt, reason: trigger.lastError,
+      },
+      ts: queueNow,
     })
   }
 
-  // 先写一条初始心跳，供 Docker 重启后的状态面显示进程已重新进入运行态；心跳不触发外部撤单。
   heartbeat.beat(clock.now())
   checkPriceTableAge()
   const stopHeartbeat = clock.setInterval(() => {
@@ -220,193 +176,151 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     checkPriceTableAge()
   }, heartbeatMs)
 
-  // ── W1 审议窗 ───────────────────────────────────────────────────────────────
-  const specs = config.windows ?? DEFAULT_WINDOWS
-  for (const spec of specs) {
-    const errors = validateWindowSpec(spec)
-    if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
-  }
-
-  // W1 的 cursor/pending fire 是权威运行状态：重启只恢复未完成项，不把 everyMs
-  // 重新锚到新的进程启动时刻，也不会因为 agent 忙或 attach 失败而把窗口吞掉。
-  const windowQueue = new SupervisorWindowQueue(database)
-  const queueNow = clock.now()
-  windowQueue.ensure([...specs], queueNow)
-  windowQueue.recover(queueNow)
-
-  let deskAgent: Agent | undefined
-  let attaching: Promise<Agent | undefined> | undefined
   let busy = false
+  let currentAbort: AbortController | undefined
+  const wakeTimeoutMs = config.wakeTimeoutMs ?? 300_000
+  if (!Number.isSafeInteger(wakeTimeoutMs) || wakeTimeoutMs <= 0) throw new Error('wakeTimeoutMs 必须是正整数')
 
-  // 诊断：统计 desk 会话上的事件类型。用来回答"followup 到底有没有开出回合"，
-  // 而不是靠"没看到计划卡"反推（实测：idleMs=9ms、会话只有 header）。
-  const deskEventCounts: Record<string, number> = {}
-  ctx.on(
-    'session/event',
-    ((session: { id?: string }, event: { type?: string }): void => {
-      if (session?.id !== config.deskSessionId) return
-      const type = String(event?.type ?? 'unknown')
-      deskEventCounts[type] = (deskEventCounts[type] ?? 0) + 1
-    }) as never,
-  )
-  const resetDeskEvents = (): void => {
-    for (const key of Object.keys(deskEventCounts)) delete deskEventCounts[key]
-  }
+  const model = { stream: (options: Parameters<typeof ctx.llm.stream>[0]) => ctx.llm.stream(options) }
+  const decisionConfig = (ports: TradePorts) => ({
+    strategy,
+    route: { ...route, maxChars: ports.decisionContextConfig?.maxChars ?? route.maxChars },
+    ...(config.dailyBudgetUsd === undefined ? {} : { dailyBudgetUsd: config.dailyBudgetUsd }),
+    ...(config.dailyTokenCap === undefined ? {} : { dailyTokenCap: config.dailyTokenCap }),
+    planWindowMs,
+  })
+  const runDecision = (
+    ports: TradePorts,
+    trigger: {
+      readonly source: 'W1' | 'W2' | 'W3'
+      readonly id: string
+      readonly at: number
+      readonly attempt: number
+      readonly expiresAt?: number
+      readonly predictionAlias?: string
+    },
+    symbol: string,
+    timeframe: string,
+    signal: AbortSignal,
+  ) => runDecisionRuntime({ ports, model, config: decisionConfig(ports), trigger, symbol, timeframe, signal })
 
-  // desk 回合若在模型调用处失败，错误经 `agent/error` 广播并被 kick 吞掉（不落会话）。
-  // 必须显式接住它，否则"回合没产出"将永远不可诊断。
-  ctx.on(
-    'agent/error',
-    ((payload: { agent?: { id?: string }; error?: unknown }): void => {
-      if (payload?.agent?.id !== config.deskSessionId) return
-      const message = String((payload.error as { message?: string } | undefined)?.message ?? payload.error)
-      logger.error(`desk agent error：${message}`)
+  const expireQueuedTriggers = (now: number): void => {
+    for (const trigger of triggerQueue.expire(now)) {
       journal.appendAudit({
-        actor: 'system',
-        kind: 'desk_agent_error',
-        payload: { message },
-        ts: clock.now(),
+        actor: 'system', kind: 'trigger.expired',
+        payload: { triggerId: trigger.triggerId, dedupKey: trigger.dedupKey, attempts: trigger.attempts, reason: trigger.lastError },
+        ts: now,
       })
-    }) as never,
-  )
-
-  const ensureDeskAgent = async (): Promise<Agent | undefined> => {
-    if (deskAgent !== undefined) return deskAgent
-    if (attaching !== undefined) return attaching
-    const agentOptions: { provider?: string; model?: string } = {}
-    if (config.l3?.provider !== undefined) agentOptions.provider = config.l3.provider
-    if (config.l3?.model !== undefined) agentOptions.model = config.l3.model
-    // ★ 必须给 cwd：系统提示的 persona-suffix 段含 `{{cwd}}`，缺值会直接抛
-    // `prompt variable "{{cwd}}" has no value for this assembly`，回合在模型调用前就失败
-    // （实测：turn/start→step/end 6ms、零 assistant/message）。cwd 是**持久会话元数据**，
-    // resume 时沿用会话里的值，因此只有在 create 时必须给对。
-    const deskCwd = config.deskCwd ?? process.cwd()
-    const lifecycle = deskAgentLifecycleOptions({
-      sessionId: config.deskSessionId,
-      agentOptions,
-      deskCwd,
-      availableToolNames: RUNTIME_IMPLEMENTED_TOOL_NAMES,
-    })
-    attaching = (async () => {
-      // 首次 resume 失败（会话还不存在）即 create；两次都失败就本轮放弃并告警，不阻塞心跳。
-      try {
-        const handle = await ctx.agents.resume(lifecycle.resume)
-        deskAgent = handle.agent
-        return handle.agent
-      } catch (resumeError) {
-        try {
-          const handle = await ctx.agents.create(lifecycle.create)
-          deskAgent = handle.agent
-          return handle.agent
-        } catch (createError) {
-          logger.error(`desk agent attach 失败：resume=${String(resumeError)} create=${String(createError)}`)
-          return undefined
-        }
-      }
-    })()
-    try {
-      return await attaching
-    } finally {
-      attaching = undefined
     }
   }
 
   const driveWindow = async (fire: WindowQueueItem): Promise<void> => {
-    const now = clock.now()
     if (busy) {
-      // 防御性分支：正常调用方不会 claim pending fire 直到 busy=false；即使未来
-      // 调度方式改变，也必须回到 pending，不能用一条审计代替待处理状态。
-      windowQueue.fail(fire, 'desk agent 忙，窗口保留待重试', now)
-      journal.appendAudit({
-        actor: 'system',
-        kind: 'w1_deferred_busy',
-        payload: { windowId: fire.id, fireTs: fire.fireTs },
-        ts: now,
-      })
+      windowQueue.fail(fire, 'W1 runner busy；fire 保留到下一次扫描', clock.now())
       return
     }
     busy = true
+    currentAbort = new AbortController()
+    const abort = currentAbort
+    const timeout = setTimeout(() => abort.abort(), wakeTimeoutMs)
     try {
-      const agent = await ensureDeskAgent()
-      if (agent === undefined) {
-        windowQueue.fail(fire, 'desk agent 不可用', clock.now())
-        journal.appendAudit({
-          actor: 'system',
-          kind: 'w1_wake_failed',
-          payload: { windowId: fire.id, fireTs: fire.fireTs, reason: 'desk agent 不可用' },
-          ts: clock.now(),
-        })
+      const ports: TradePorts | undefined = getExecPorts()
+      if (ports === undefined) throw new Error('执行组合根尚未就绪，W1 fire 重试')
+      const results = []
+      for (const symbol of ports.symbols) {
+        const result = await runDecision(
+          ports,
+          { source: 'W1', id: fire.id, at: fire.fireTs, attempt: fire.attempts },
+          symbol,
+          '1h',
+          abort.signal,
+        )
+        results.push({ symbol, runId: result.runId, status: result.status, retryable: result.retryable === true, reason: result.reason ?? null })
+        if (result.retryable === true) throw new Error(`W1 ${symbol} model call transient failure: ${result.reason ?? 'unknown'}`)
+      }
+      journal.appendAudit({
+        actor: 'system', kind: 'w1_decision_batch',
+        payload: { windowId: fire.id, fireTs: fire.fireTs, strategy, results },
+        ts: clock.now(),
+      })
+      windowQueue.complete(fire, clock.now())
+      logger.info(`W1 ${fire.id}: ${results.length} symbol decisions persisted`)
+    } catch (error) {
+      windowQueue.fail(fire, safeError(error), clock.now())
+      journal.appendAudit({
+        actor: 'system', kind: 'w1_decision_batch_failed',
+        payload: { windowId: fire.id, fireTs: fire.fireTs, reason: safeError(error) },
+        ts: clock.now(),
+      })
+      logger.error(`W1 ${fire.id} failed: ${safeError(error)}`)
+    } finally {
+      clearTimeout(timeout)
+      if (currentAbort === abort) currentAbort = undefined
+      busy = false
+    }
+  }
+
+  const driveTrigger = async (): Promise<void> => {
+    if (busy) return
+    busy = true
+    currentAbort = new AbortController()
+    const abort = currentAbort
+    const timeout = setTimeout(() => abort.abort(), wakeTimeoutMs)
+    try {
+      const ports: TradePorts | undefined = getExecPorts()
+      if (ports === undefined) {
+        logger.warn('W2/W3 队列待处理：执行组合根尚未就绪')
         return
       }
-      const { summary, text } = buildWindowNotice(fire, getExecPorts())
-      // 诊断：把"followup 到底有没有驱动出回合"变成可读证据，而不是靠猜。
-      // （实测：会话只写了 header，w1_wake 在触发后 39ms 就落库 ⇒ 回合没跑。）
-      const probe = agent as unknown as {
-        readonly id?: string
-        readonly status?: string
-        followup?: (message: unknown) => unknown
-        whenIdle?: () => Promise<void>
-      }
-      const followup = probe.followup
-      const whenIdle = probe.whenIdle
-      const hasFollowup = typeof followup === 'function'
-      const hasWhenIdle = typeof whenIdle === 'function'
-      if (!hasFollowup || followup === undefined) throw new Error('desk agent 缺少 followup，窗口未被接受')
-      let followupError: string | null = null
-      // 必须在 followup **之前**清零：wakeDriver 会立刻开跑，事件可能在 followup 返回前就发出。
-      resetDeskEvents()
-      try {
-        followup(
-          createUserMessage({
-            content: [{ type: 'text', text }],
-            source: { kind: 'plugin', plugin: 'trade-supervisor', form: 'notice', summary },
-          }),
-        )
-      } catch (error) {
-        followupError = String(error)
-      }
-      if (followupError !== null) throw new Error(followupError)
-      const idleStart = clock.now()
-      const timeoutMs = config.wakeTimeoutMs ?? 300_000
-      if (hasWhenIdle && whenIdle !== undefined) {
-        const completed = await Promise.race([
-          whenIdle().then(() => true),
-          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-        ])
-        if (!completed) throw new Error(`desk agent 在 ${timeoutMs}ms 内未完成窗口回合`)
-      }
-      journal.appendAudit({
-        actor: 'system',
-        kind: 'w1_wake',
-        payload: {
-          windowId: fire.id,
-          fireTs: fire.fireTs,
-          dedupKey: windowDedupKey(fire.id, fire.fireTs),
-          agentId: probe.id ?? null,
-          agentStatus: probe.status ?? null,
-          hasFollowup,
-          hasWhenIdle,
-          followupError,
-          idleMs: clock.now() - idleStart,
-          deskEvents: { ...deskEventCounts },
-        },
-        ts: clock.now(),
+      const predictionStore = getPmRuntime()?.store ?? ports.pm
+      const decisionPorts: TradePorts = predictionStore === undefined || ports.pm !== undefined
+        ? ports
+        : { ...ports, pm: predictionStore }
+      const outcome = await dispatchNextTrigger({
+        queue: triggerQueue,
+        journal,
+        clock,
+        budget,
+        symbols: ports.symbols,
+        timeframes: ports.timeframes,
+        ...(config.dailyBudgetUsd === undefined ? {} : { dailyBudgetUsd: config.dailyBudgetUsd }),
+        ...(config.dailyTokenCap === undefined ? {} : { dailyTokenCap: config.dailyTokenCap }),
+        limits: wakeLimits,
+        retryPolicy: { maxAttempts: 5, baseDelayMs: 1_000, maxDelayMs: 60_000 },
+        ...(ports.freezeSymbol === undefined ? {} : { freezeSymbol: ports.freezeSymbol }),
+        ...(ports.halt === undefined ? {} : { halt: ports.halt }),
+        resolvePredictionTrigger: (trigger) => resolvePredictionTriggerTarget({
+          trigger, plans: ports.plans, predictions: predictionStore, symbols: ports.symbols,
+          now: clock.now(), maxSnapshotAgeMs: ports.decisionContextConfig?.marketGraceMs ?? 120_000,
+        }),
+        run: ({ trigger, source, symbol, timeframe, predictionAlias }) => runDecision(
+          decisionPorts,
+          {
+            source,
+            id: trigger.triggerId,
+            at: trigger.createdAt,
+            attempt: trigger.attempts,
+            ...(trigger.expiresAt === undefined ? {} : { expiresAt: trigger.expiresAt }),
+            ...(predictionAlias === undefined ? {} : { predictionAlias }),
+          },
+          symbol,
+          timeframe,
+          abort.signal,
+        ),
       })
-      logger.info(
-        `W1 ${fire.id}: agent=${String(probe.id)} followup=${String(hasFollowup)} ` +
-          `whenIdle=${String(hasWhenIdle)} idleMs=${String(clock.now() - idleStart)} err=${String(followupError)}`,
-      )
-      windowQueue.complete(fire, clock.now())
+      if (outcome.kind !== 'idle') {
+        logger.info(`${outcome.source ?? 'W2/W3'} ${outcome.triggerId ?? ''}: ${outcome.kind}${outcome.reason === undefined ? '' : `（${outcome.reason}）`}`)
+      }
     } catch (error) {
-      logger.error(`W1 唤醒失败：${String(error)}`)
-      windowQueue.fail(fire, error, clock.now())
+      const reason = safeError(error)
       journal.appendAudit({
-        actor: 'system',
-        kind: 'w1_wake_failed',
-        payload: { windowId: fire.id, fireTs: fire.fireTs, reason: String(error) },
-        ts: clock.now(),
+        actor: 'system', kind: 'trigger.dispatcher_failed',
+        payload: { reason }, ts: clock.now(),
       })
+      logger.error(`W2/W3 dispatcher failed: ${reason}`)
     } finally {
+      clearTimeout(timeout)
+      if (currentAbort === abort) currentAbort = undefined
       busy = false
     }
   }
@@ -415,18 +329,21 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
   const stopWindows = clock.setInterval(() => {
     const now = clock.now()
     windowQueue.enqueueDue([...specs], now)
+    expireQueuedTriggers(now)
     if (busy) return
-    // 旧配置留下的 pending fire 必须保留审计但不再执行；只领取当前配置声明的窗口。
     const fire = windowQueue.claimOne(now, specs.map((spec) => spec.id))
     if (fire !== undefined) void driveWindow(fire)
+    else if (triggerQueue.queuedCount() > 0) void driveTrigger()
   }, windowScanMs)
 
-  ctx.effect(
-    () => () => {
-      stopHeartbeat()
-      stopWindows()
-      /* 解除会话绑定由 agent handle 的 owner（本插件的 fiber）负责 */
-    },
-    'trade.supervisor.close',
-  )
+  ctx.effect(() => () => {
+    currentAbort?.abort()
+    stopHeartbeat()
+    stopWindows()
+  }, 'trade.supervisor.close')
+}
+
+function safeError(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  return raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)
 }

@@ -3,7 +3,7 @@
  *
  * 四条不可协商性质：可判定 · 有期限 · 幂等根 · 不可事后改写。
  * 模型只表达"判断与方法"，**数字由代码推导**：`open` 的 qty/止损/止盈一律由
- * `stop` + `riskPct` 算出（plan §3.4），模型给不出危险的数量。
+ * `stop` + 配置风险算出，模型仅能以 `riskFraction` 下调风险（plan §3.4）。
  */
 
 import { canonicalJson, fingerprint } from '../util/canonical.js'
@@ -66,8 +66,8 @@ export interface OpenAction {
   readonly limitOffsetBps?: number
   readonly stop: StopSpec
   readonly target?: { readonly rMultiple: number }
-  /** 省略则取启动参数 riskPct；模型不得给绝对数量。 */
-  readonly riskPct?: number
+  /** (0,1]；只能缩小配置 riskPct。 */
+  readonly riskFraction?: number
 }
 
 export interface ReduceAction {
@@ -177,6 +177,21 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
     errors.push(`${path}.action 非法：${JSON.stringify(action)}`)
     return
   }
+  const allowedFields: Readonly<Record<ActionKind, readonly string[]>> = {
+    noop: ['action'],
+    open: ['action', 'side', 'method', 'limitOffsetBps', 'stop', 'target', 'riskFraction'],
+    reduce: ['action', 'fraction', 'method'],
+    close: ['action'],
+    set_stop: ['action', 'price'],
+    set_target: ['action', 'price'],
+    set_trailing: ['action', 'percent'],
+    cancel_all: ['action', 'scope'],
+    halt: ['action', 'reason'],
+    escalate: ['action', 'reason'],
+  }
+  for (const key of Object.keys(value)) {
+    if (!allowedFields[action as ActionKind].includes(key)) errors.push(`${path}.${key} 不是该动作允许的字段`)
+  }
   switch (action) {
     case 'open': {
       const side = value['side']
@@ -188,12 +203,29 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
         errors.push(`${path}.stop 缺失（模型必须说明用哪种止损方法）`)
       } else if (stop['method'] === 'atr') {
         const k = stop['k']
-        if (typeof k !== 'number' || !(k > 0)) errors.push(`${path}.stop.k 必须是正数`)
+        if (typeof k !== 'number' || !Number.isFinite(k) || !(k > 0)) errors.push(`${path}.stop.k 必须是正的有限数`)
       } else if (stop['method'] === 'structure') {
         const level = stop['level']
         if (typeof level !== 'number' || !Number.isFinite(level)) errors.push(`${path}.stop.level 必须是有限数`)
       } else {
         errors.push(`${path}.stop.method 必须是 atr|structure`)
+      }
+      if (Object.prototype.hasOwnProperty.call(value, 'riskPct')) {
+        errors.push(`${path}.riskPct 已禁用；只能提交 riskFraction ∈ (0,1]`)
+      }
+      if (value['riskFraction'] !== undefined &&
+          (typeof value['riskFraction'] !== 'number' || !Number.isFinite(value['riskFraction']) ||
+           value['riskFraction'] <= 0 || value['riskFraction'] > 1)) {
+        errors.push(`${path}.riskFraction 必须在 (0,1] 内`)
+      }
+      if (value['limitOffsetBps'] !== undefined &&
+          (typeof value['limitOffsetBps'] !== 'number' || !Number.isFinite(value['limitOffsetBps']) || value['limitOffsetBps'] < 0)) {
+        errors.push(`${path}.limitOffsetBps 必须是非负有限数`)
+      }
+      if (value['target'] !== undefined &&
+          (!isRecord(value['target']) || typeof value['target']['rMultiple'] !== 'number' ||
+           !Number.isFinite(value['target']['rMultiple']) || value['target']['rMultiple'] <= 0)) {
+        errors.push(`${path}.target.rMultiple 必须是正的有限数`)
       }
       break
     }
@@ -201,6 +233,9 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
       const fraction = value['fraction']
       if (typeof fraction !== 'number' || !(fraction > 0) || !(fraction < 1)) {
         errors.push(`${path}.fraction 必须在 (0,1) 内`)
+      }
+      if (value['method'] !== undefined && value['method'] !== 'market' && value['method'] !== 'limit') {
+        errors.push(`${path}.method 必须是 market|limit`)
       }
       break
     }
@@ -214,7 +249,7 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
     }
     case 'set_trailing': {
       const percent = value['percent']
-      if (typeof percent !== 'number' || !(percent > 0)) errors.push(`${path}.percent 必须是正数`)
+      if (typeof percent !== 'number' || !Number.isFinite(percent) || !(percent > 0)) errors.push(`${path}.percent 必须是正的有限数`)
       break
     }
     case 'cancel_all': {
@@ -228,9 +263,22 @@ function validateAction(value: unknown, path: string, errors: string[]): void {
       }
       break
     }
+    case 'halt': {
+      if (value['reason'] !== undefined && typeof value['reason'] !== 'string') {
+        errors.push(`${path}.reason 必须是字符串`)
+      }
+      break
+    }
     default:
       break
   }
+}
+
+export function validatePlanAction(value: unknown): readonly string[] {
+  const errors: string[] = []
+  if (!isRecord(value)) return ['动作必须是对象']
+  validateAction(value, 'action', errors)
+  return errors
 }
 
 const DYNAMIC_PM_PATH = /^pm\.[a-z][a-z0-9_]{0,40}\.(prob|mid|spread|volume24h|change1h|change24h|ageMs)$/
@@ -254,6 +302,11 @@ export function validatePlanCard(value: unknown): PlanValidation {
   if (!isRecord(value)) return { ok: false, errors: ['计划卡必须是对象'] }
 
   const errors: string[] = []
+  const allowedFields = ['planId', 'runId', 'symbol', 'createdAt', 'windowEndsAt', 'thesis', 'confidence',
+    'keyLevels', 'invalidation', 'commitments', 'forbidden', 'noTrade', 'contentHash', 'author', 'authority']
+  for (const key of Object.keys(value)) {
+    if (!allowedFields.includes(key)) errors.push(`计划卡包含未定义字段：${key}`)
+  }
 
   for (const key of ['planId', 'symbol', 'contentHash'] as const) {
     if (typeof value[key] !== 'string' || value[key] === '') errors.push(`${key} 不能为空`)
@@ -262,6 +315,8 @@ export function validatePlanCard(value: unknown): PlanValidation {
     errors.push('runId 若提供必须是非空字符串')
   }
   if (typeof value['thesis'] !== 'string') errors.push('thesis 必须是字符串（可为空串）')
+  if (value['author'] !== 'model' && value['author'] !== 'human') errors.push('author 必须是 model|human')
+  if (!['model', 'store', 'external'].includes(String(value['authority']))) errors.push('authority 非法')
 
   const createdAt = value['createdAt']
   const windowEndsAt = value['windowEndsAt']
@@ -272,7 +327,7 @@ export function validatePlanCard(value: unknown): PlanValidation {
   }
 
   const confidence = value['confidence']
-  if (typeof confidence !== 'number' || confidence < 0 || confidence > 1) {
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
     errors.push('confidence 必须在 [0,1] 内')
   }
 
@@ -281,12 +336,23 @@ export function validatePlanCard(value: unknown): PlanValidation {
   const forbidden = value['forbidden']
   if (!Array.isArray(forbidden)) errors.push('forbidden 必须是数组')
   else {
+    if (new Set(forbidden).size !== forbidden.length) errors.push('forbidden 不得包含重复动作')
     for (const item of forbidden) {
       if (typeof item !== 'string' || !(ACTION_KINDS as readonly string[]).includes(item)) {
         errors.push(`forbidden 含非法动作：${JSON.stringify(item)}`)
       }
     }
   }
+
+  const keyLevels = value['keyLevels']
+  if (!Array.isArray(keyLevels)) errors.push('keyLevels 必须是数组')
+  else keyLevels.forEach((level, index) => {
+    if (!isRecord(level) || Object.keys(level).some((key) => !['kind', 'price'].includes(key)) ||
+        !['support', 'resistance', 'pivot'].includes(String(level['kind'])) ||
+        typeof level['price'] !== 'number' || !Number.isFinite(level['price']) || level['price'] <= 0) {
+      errors.push(`keyLevels[${index}] 必须包含合法 kind 与正数 price`)
+    }
+  })
 
   const seenIds = new Set<string>()
   for (const key of ['invalidation', 'commitments'] as const) {
@@ -303,6 +369,12 @@ export function validatePlanCard(value: unknown): PlanValidation {
       if (!isRecord(entry)) {
         errors.push(`${path} 必须是对象`)
         return
+      }
+      const entryKeys = key === 'commitments'
+        ? ['id', 'seq', 'tf', 'when', 'then', 'maxSlippageBps', 'cooldownMs']
+        : ['id', 'tf', 'when', 'then']
+      for (const field of Object.keys(entry)) {
+        if (!entryKeys.includes(field)) errors.push(`${path}.${field} 未定义`)
       }
       const id = entry['id']
       if (typeof id !== 'string' || id === '') errors.push(`${path}.id 不能为空`)
@@ -325,12 +397,24 @@ export function validatePlanCard(value: unknown): PlanValidation {
           errors.push(`${path}.seq 必须是 >=1 的整数`)
         }
         const cooldown = entry['cooldownMs']
-        if (cooldown !== undefined && (typeof cooldown !== 'number' || cooldown < 0)) {
+        if (cooldown !== undefined && (typeof cooldown !== 'number' || !Number.isFinite(cooldown) || cooldown < 0)) {
           errors.push(`${path}.cooldownMs 必须是非负数`)
+        }
+        const maxSlippage = entry['maxSlippageBps']
+        if (maxSlippage !== undefined && (typeof maxSlippage !== 'number' || !Number.isFinite(maxSlippage) || maxSlippage <= 0)) {
+          errors.push(`${path}.maxSlippageBps 必须是正的有限数`)
         }
       }
       validateAction(entry['then'], `${path}.then`, errors)
+      if (key === 'invalidation' && isRecord(entry['then']) && entry['then']['action'] === 'open') {
+        errors.push(`${path}.then 不得在失效条件下增加敞口`)
+      }
     })
+  }
+
+  if (value['noTrade'] === true && Array.isArray(value['commitments']) &&
+      value['commitments'].some((entry) => isRecord(entry) && isRecord(entry['then']) && entry['then']['action'] === 'open')) {
+    errors.push('noTrade 计划不得包含开仓承诺')
   }
 
   if (errors.length > 0) return { ok: false, errors }

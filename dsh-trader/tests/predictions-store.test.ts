@@ -14,7 +14,6 @@ import {
   evaluatePmRules,
 } from '../src/predictions/rules.js'
 import { PmPoller, type PmPollerClients, type PmPollResult } from '../src/predictions/poller.js'
-import { IMPLEMENTED_TOOL_NAMES, toolByName } from '../src/agents/tools.js'
 import {
   PmStore,
   WatchError,
@@ -631,118 +630,13 @@ describe('PmPoller：注入时钟、降级不上抛（plan §10 专项 ⑥）', 
   })
 })
 
-describe('工具接入：trade_predictions / trade_prediction_watch（T1.9）', () => {
-  function ports(over: Record<string, unknown> = {}) {
-    return {
-      db,
-      bars: {} as never,
-      features: {} as never,
-      plans: {} as never,
-      journal: {} as never,
-      broker: {} as never,
-      clock: new ReplayClock(NOW),
-      limits: null,
-      mode: 'paper' as const,
-      riskPct: 0.002,
-      pm: store,
-      ...over,
-    }
-  }
-
-  it('trade_predictions 与告警 payload 用同一个快照函数（专项 ③）', async () => {
+describe('PmStore readonly snapshot contract', () => {
+  it('exposes one canonical PIT alias snapshot for both queued signals and DecisionContext', () => {
     store.registerWatch(watch(), NOW)
     store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
-    const tool = toolByName('trade_predictions')
-    const result = (await tool?.execute({}, ports() as never)) as {
-      snapshots: readonly { alias: string; probability: unknown }[]
-    }
-    // 与 store.snapshotAt 逐字相等 —— 不是"看起来差不多"
-    expect(result.snapshots).toEqual(store.snapshotAt(NOW))
-    expect(result.snapshots[0]?.probability).toEqual({ ok: true, value: 0.42, estimator: 'mid' })
-  })
-
-  it('未接入 pm 时只读工具返回 available:false，而不是抛错', async () => {
-    const tool = toolByName('trade_predictions')
-    const result = (await tool?.execute({}, ports({ pm: undefined }) as never)) as { available: boolean }
-    expect(result.available).toBe(false)
-  })
-
-  it('trade_prediction_watch 登记关注并可取消', async () => {
-    const tool = toolByName('trade_prediction_watch')
-    const registered = (await tool?.execute(
-      {
-        alias: 'ecb_oct_cut',
-        kind: 'threshold',
-        purpose: 'novelty',
-        tokenIds: ['111'],
-        expr: 'pm.ecb_oct_cut.prob > 0.5',
-        expiresInHours: 24,
-      },
-      ports() as never,
-    )) as { registered: boolean; expiresAt: number }
-    expect(registered.registered).toBe(true)
-    expect(registered.expiresAt).toBe(NOW + 24 * HOUR)
-
-    const again = (await tool?.execute(
-      {
-        alias: 'ecb_oct_cut',
-        kind: 'threshold',
-        purpose: 'novelty',
-        tokenIds: ['111'],
-        expr: 'pm.ecb_oct_cut.prob > 0.5',
-        expiresInHours: 24,
-      },
-      ports() as never,
-    )) as { registered: boolean }
-    expect(again.registered).toBe(false)
-
-    const cancelled = (await tool?.execute({ alias: 'ecb_oct_cut', kind: 'threshold', cancel: true }, ports() as never)) as {
-      cancelled: boolean
-    }
-    expect(cancelled.cancelled).toBe(true)
-  })
-
-  it('commitment 在 A/B 闸门判定前一律拒绝（plan §12 #11 的默认拒绝）', async () => {
-    const tool = toolByName('trade_prediction_watch')
-    await expect(
-      tool?.execute(
-        {
-          alias: 'fed_sep_cut',
-          kind: 'threshold',
-          purpose: 'commitment',
-          tokenIds: ['111'],
-          expr: 'pm.fed_sep_cut.prob < 0.3',
-          expiresInHours: 24,
-        },
-        ports() as never,
-      ),
-    ).rejects.toThrow(/§12 #11/)
-    // 显式放行后才允许
-    const allowed = (await tool?.execute(
-      {
-        alias: 'fed_sep_cut',
-        kind: 'threshold',
-        purpose: 'commitment',
-        tokenIds: ['111'],
-        expr: 'pm.fed_sep_cut.prob < 0.3',
-        expiresInHours: 24,
-      },
-      ports({ allowPmCommitment: true }) as never,
-    )) as { registered: boolean }
-    expect(allowed.registered).toBe(true)
-  })
-
-  it('缺 expiresInHours 一律拒绝 —— 不允许无期限关注', async () => {
-    const tool = toolByName('trade_prediction_watch')
-    await expect(
-      tool?.execute({ alias: 'x1', kind: 'resolution', tokenIds: ['111'] }, ports() as never),
-    ).rejects.toThrow(/expiresInHours/)
-  })
-
-  it('工具集里没有任何 pm 下单工具（红线 1）', () => {
-    const names = IMPLEMENTED_TOOL_NAMES.filter((name) => name.includes('prediction'))
-    expect(names.sort()).toEqual(['trade_prediction_watch', 'trade_predictions'])
-    expect(IMPLEMENTED_TOOL_NAMES.some((name) => /polymarket|pm_order|prediction_order/.test(name))).toBe(false)
+    const snapshots = store.snapshotAt(NOW)
+    expect(snapshots).toHaveLength(1)
+    expect(snapshots[0]?.probability).toEqual({ ok: true, value: 0.42, estimator: 'mid' })
   })
 })
 
@@ -955,6 +849,15 @@ describe('PmSignalRouter：pm 信号走同一套触发治理（T1.10）', () => 
     expect(queue.has('pm:pmw-1:111:1')).toBe(true)
   })
 
+  it('W3 事件只携带 watch 显式绑定的 planId，供 supervisor 核验交易标的', () => {
+    store.registerWatch(watch({ alias: 's1', tokenIds: ['111'], planId: 'pc-explicit-plan' }), NOW)
+    const { queue, router } = buildWiring()
+    expect(router.route([signal()], NOW)[0]?.wake).toBe('W3')
+    expect(queue.get('pm:pmw-1:111:1')?.payload).toMatchObject({
+      detail: { alias: 's1', planId: 'pc-explicit-plan' },
+    })
+  })
+
   it('info 只落库通知、**不**唤醒（结算/成交额/点差）', () => {
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
     const { router } = buildWiring()
@@ -1011,7 +914,7 @@ describe('PmSignalRouter：pm 信号走同一套触发治理（T1.10）', () => 
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
     const { queue, router } = buildWiring()
     router.route([signal()], NOW)
-    const stored = queue.claim(10).find((row) => row.dedupKey === 'pm:pmw-1:111:1')
+    const stored = queue.claim(NOW).find((row) => row.dedupKey === 'pm:pmw-1:111:1')
     // 治理层把 payload 包成信封：detail 放业务字段，外层放 severity/expression/timeframe
     expect(stored?.payload).toMatchObject({
       detail: { estimator: 'mid', prob: 0.7, alias: 's1', tokenId: '111', cooldownMs: 900_000 },

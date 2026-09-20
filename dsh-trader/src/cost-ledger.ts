@@ -4,7 +4,7 @@
  * 三条要点：
  *   1. **价目表是我们自己维护的、版本化的**（`effective_from` 选行）——运行时没有外部价格源；
  *   2. **缺价目绝不静默计 0**：那次调用记 `cost_known = 0`，预算退化为 token 上限并**告警**；
- *   3. 超预算**只停 W2/W3**，W1（审议窗）照常 —— 停掉 W1 等于让已有仓位无人看管。
+ *   3. 超预算停止所有新增模型判断；已存在的持仓仍由 P0 机械保护和 reduce-only 执行管理。
  */
 
 import type Database from 'better-sqlite3'
@@ -154,7 +154,12 @@ export interface LedgerCall {
   /** 至少包含 `global`；通常再带一个 `symbol:*`。 */
   readonly scopes: readonly BudgetScope[]
   readonly model: string
-  readonly usage: TokenUsage
+  /** 请求失败或 usage 未返回时为 null；不能把未知成本写成一次免费调用。 */
+  readonly usage: TokenUsage | null
+  /** usage 未知时按请求前的有界估算计入 token cap。 */
+  readonly estimatedTokens?: number
+  /** 预留的最大成本估值；只记金额估计，cost_known 仍为 false。 */
+  readonly reservedUsd?: number | null
 }
 
 export interface LedgerEntry {
@@ -172,6 +177,13 @@ export interface LedgerResult {
   readonly estUsd: number
   readonly warnings: readonly string[]
   readonly entries: readonly LedgerEntry[]
+}
+
+export interface BudgetPreflightResult {
+  readonly decision: BudgetDecision
+  readonly estimateUsd: number | null
+  readonly estimatedTokens: number
+  readonly reason?: string
 }
 
 export interface DashboardRow {
@@ -200,12 +212,19 @@ export class BudgetLedger {
    */
   record(call: LedgerCall, prices: readonly ModelPrice[]): LedgerResult {
     const day = dayKey(call.at)
-    const estimate = estimateCost(call.usage, prices, call.model, call.at)
+    const usage = call.usage ?? {
+      tokensIn: Math.max(0, call.estimatedTokens ?? 0),
+      tokensOut: 0,
+      tokensCached: 0,
+    }
+    const estimate = call.usage === null
+      ? { known: false as const, reason: '模型未返回可核验 usage' }
+      : estimateCost(usage, prices, call.model, call.at)
     const warnings: string[] = []
     if (!estimate.known) {
-      warnings.push(`成本未知：${estimate.reason} —— 已记 cost_known=0，预算退化为 token 上限`)
+      warnings.push(`成本未知：${estimate.reason} —— cost_known=0，需 token cap 才能继续调用`)
     }
-    const estUsd = estimate.known ? estimate.usd : 0
+    const estUsd = estimate.known ? estimate.usd : Math.max(0, call.reservedUsd ?? 0)
 
     const insert = this.db.transaction(() => {
       const entries: LedgerEntry[] = []
@@ -224,18 +243,18 @@ export class BudgetLedger {
           .run({
             day,
             scope,
-            tokensIn: Math.max(call.usage.tokensIn, 0),
-            tokensOut: Math.max(call.usage.tokensOut, 0),
-            tokensCached: Math.max(call.usage.tokensCached, 0),
+            tokensIn: Math.max(usage.tokensIn, 0),
+            tokensOut: Math.max(usage.tokensOut, 0),
+            tokensCached: Math.max(usage.tokensCached, 0),
             estUsd,
             costKnown: estimate.known ? 1 : 0,
           })
         entries.push({
           day,
           scope,
-          tokensIn: call.usage.tokensIn,
-          tokensOut: call.usage.tokensOut,
-          tokensCached: call.usage.tokensCached,
+          tokensIn: usage.tokensIn,
+          tokensOut: usage.tokensOut,
+          tokensCached: usage.tokensCached,
           estUsd,
           costKnown: estimate.known,
         })
@@ -244,6 +263,41 @@ export class BudgetLedger {
     })
 
     return { costKnown: estimate.known, estUsd, warnings, entries: insert() }
+  }
+
+  /** 调用前用有界最大输入/输出估算做准入；W1 也不能绕过预算。 */
+  preflight(options: {
+    readonly at: number
+    readonly model: string
+    readonly estimatedUsage: TokenUsage
+    readonly dailyBudgetUsd: number
+    readonly tokenCap?: number | null
+    readonly scope?: BudgetScope
+    readonly wake: 'W1' | 'W2' | 'W3'
+  }): BudgetPreflightResult {
+    if (!Number.isFinite(options.dailyBudgetUsd) || options.dailyBudgetUsd <= 0) {
+      return { decision: { allow: false, reason: '未配置正数日预算，停止模型调用' }, estimateUsd: null, estimatedTokens: 0 }
+    }
+    const estimatedTokens = Math.max(0, options.estimatedUsage.tokensIn) + Math.max(0, options.estimatedUsage.tokensOut)
+    const stale = this.#prices.isStale(options.at)
+    const estimate = stale
+      ? { known: false as const, reason: '模型价目表缺失或过期' }
+      : estimateCost(options.estimatedUsage, this.#prices.all(), options.model, options.at)
+    const tokenCap = options.tokenCap ?? null
+    const state = this.state(dayKey(options.at), options.scope ?? GLOBAL_SCOPE, tokenCap)
+    const projected: BudgetState = {
+      ...state,
+      tokens: state.tokens + estimatedTokens,
+      estimatedUsd: estimate.known ? estimate.usd : 0,
+      unknownCostCalls: state.unknownCostCalls + (estimate.known ? 0 : 1),
+    }
+    const decision = budgetAllows(projected, options.dailyBudgetUsd, { wake: options.wake })
+    return {
+      decision,
+      estimateUsd: estimate.known ? estimate.usd : null,
+      estimatedTokens,
+      ...(!estimate.known ? { reason: estimate.reason } : {}),
+    }
   }
 
   /** 某日某 scope 的聚合状态。 */
@@ -269,7 +323,7 @@ export class BudgetLedger {
     }
   }
 
-  /** 预算闸门：超预算停 W2/W3，W1 照常（plan §8）。 */
+  /** 模型调用预算闸门：超预算停止 W1/W2/W3 的新增判断；机械减险不经此闸。 */
   gate(options: {
     readonly at: number
     readonly wake: 'W1' | 'W2' | 'W3'

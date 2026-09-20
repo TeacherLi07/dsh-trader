@@ -27,6 +27,7 @@ import { createMarketRuntime, type MarketRuntime } from '../market/runtime.js'
 import type { Candle } from '../market/types.js'
 import { createLiveEngine, type LiveEngine } from '../exec/live-engine.js'
 import { getTriggerRuntime } from '../trigger/runtime.js'
+import { TriggerQueue } from '../trigger/queue.js'
 import { getExecPorts } from './exec.js'
 import { DecisionJournal } from '../exec/journal.js'
 
@@ -153,6 +154,7 @@ export function apply(ctx: Context, config: MarketConfig): void {
             mode: ports.mode,
             limits: ports.limits,
             riskPct: ports.riskPct,
+            queue: new TriggerQueue(ports.db),
             ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols }),
             ...(ports.freezeSymbol === undefined ? {} : { freezeSymbol: ports.freezeSymbol }),
             ...(ports.halt === undefined ? {} : { halt: ports.halt }),

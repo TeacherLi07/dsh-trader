@@ -224,7 +224,7 @@ describe('standInJudge（确定性替身，非 LLM）', () => {
     planId: 'pc-1',
     conditionId: 'c-open',
     expression: 'rsi14 < 45',
-    action: { action: 'open' as const, side: 'long' as const, method: 'market' as const, stop: { method: 'atr' as const, k: 2 }, riskPct: 0.002 },
+    action: { action: 'open' as const, side: 'long' as const, method: 'market' as const, stop: { method: 'atr' as const, k: 2 }, riskFraction: 1 },
     referencePrice: 70_000,
     atr: 700,
     equityQuote: 10_000,
@@ -265,7 +265,7 @@ describe('standInJudge：止损距离用真实的 k×ATR（审计修复）', () 
     planId: 'pc-1',
     conditionId: 'c-open',
     expression: 'rsi14 < 45',
-    action: { action: 'open' as const, side: 'long' as const, method: 'market' as const, stop: { method: 'atr' as const, k: 2 }, riskPct: 0.002 },
+    action: { action: 'open' as const, side: 'long' as const, method: 'market' as const, stop: { method: 'atr' as const, k: 2 }, riskFraction: 1 },
     referencePrice: 70_000,
     atr: 700,
     equityQuote: 10_000,
@@ -282,14 +282,14 @@ describe('standInJudge：止损距离用真实的 k×ATR（审计修复）', () 
     const narrow = await standInJudge()(
       base({
         atr: 1,
-        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_950 }, riskPct: 0.002 },
+        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_950 }, riskFraction: 1 },
       }) as never,
     )
     expect(narrow.approve).toBe(false)
     const wide = await standInJudge()(
       base({
         atr: 1,
-        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_000 }, riskPct: 0.002 },
+        action: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 69_000 }, riskFraction: 1 },
       }) as never,
     )
     expect(wide.approve).toBe(true)

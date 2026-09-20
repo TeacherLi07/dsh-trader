@@ -14,10 +14,10 @@
 /**
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
  * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
- * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档。旧 context snapshot/token
- * 只在迁移入口中一次性清理，不再作为判断或执行的兼容路径。
+ * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
+ * 有界重试、退避和重启恢复。旧 context snapshot/token 只在迁移入口清理。
  */
-export const SCHEMA_VERSION = 6
+export const SCHEMA_VERSION = 7
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -263,9 +263,13 @@ CREATE TABLE IF NOT EXISTS triggers (
   payload_json TEXT NOT NULL,
   -- 最终去向：只有 novelty/judgment 消耗唤醒预算（被冷却/限流压掉的不算，但仍落库可审计）
   disposition TEXT NOT NULL CHECK (disposition IN ('info', 'novelty', 'judgment', 'cooldown', 'rate_limited', 'executed')),
-  state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'done', 'expired')),
+  state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'done', 'expired', 'failed')),
   created_at INTEGER NOT NULL,
-  expires_at INTEGER
+  expires_at INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  claimed_at INTEGER,
+  last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -435,6 +439,7 @@ export function migrate(db: SqliteLike): void {
   // 手工恢复了半旧表形状，启动时仍应 fail-closed 修复而不是等热路径报 no such column。
   if (fromVersion < 4 || needsV4Repair(db)) migrateToV4(db)
   if (fromVersion < 5 || needsV5Repair(db)) migrateToV5(db)
+  if (fromVersion < 7 || needsV7Repair(db)) migrateToV7(db)
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
 
@@ -572,6 +577,71 @@ function needsV4Repair(db: SqliteLike): boolean {
 
 function needsV5Repair(db: SqliteLike): boolean {
   return !hasColumn(db, 'decisions', 'run_id') || !hasColumn(db, 'plan_cards', 'run_id') || hasTable(db, 'workflow_contexts') || hasTable(db, 'context_snapshots')
+}
+
+/** v7 为持久触发队列补上有限重试；旧 claimed 行只能安全地回到 queued。 */
+function migrateToV7(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+  const needsRebuild = needsV7Repair(db)
+  if (needsRebuild) {
+    const hasDisposition = hasColumn(db, 'triggers', 'disposition')
+    const hasAttempts = hasColumn(db, 'triggers', 'attempts')
+    const hasNextAttemptAt = hasColumn(db, 'triggers', 'next_attempt_at')
+    const hasClaimedAt = hasColumn(db, 'triggers', 'claimed_at')
+    const hasLastError = hasColumn(db, 'triggers', 'last_error')
+    const disposition = hasDisposition
+      ? 'disposition'
+      : `CASE WHEN purpose = 'novelty' THEN 'novelty'
+             WHEN purpose IN ('commitment', 'invalidation') THEN 'judgment'
+             ELSE 'info' END`
+    const attempts = hasAttempts ? 'attempts' : '0'
+    const nextAttemptAt = hasNextAttemptAt ? 'next_attempt_at' : 'created_at'
+    const claimedAt = hasClaimedAt ? 'claimed_at' : 'NULL'
+    const lastError = hasLastError ? 'last_error' : 'NULL'
+
+    withMigrationTransaction(db, () => {
+      db.exec(`
+        CREATE TABLE triggers_v7 (
+          trigger_id TEXT PRIMARY KEY,
+          dedup_key TEXT NOT NULL UNIQUE,
+          symbol TEXT,
+          rule_id TEXT,
+          purpose TEXT NOT NULL CHECK (purpose IN ('invalidation', 'commitment', 'novelty', 'info')),
+          bar_ts INTEGER,
+          payload_json TEXT NOT NULL,
+          disposition TEXT NOT NULL CHECK (disposition IN ('info', 'novelty', 'judgment', 'cooldown', 'rate_limited', 'executed')),
+          state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'done', 'expired', 'failed')),
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+          next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          claimed_at INTEGER,
+          last_error TEXT
+        );
+        INSERT INTO triggers_v7
+          (trigger_id, dedup_key, symbol, rule_id, purpose, bar_ts, payload_json,
+           disposition, state, created_at, expires_at, attempts, next_attempt_at, claimed_at, last_error)
+        SELECT trigger_id, dedup_key, symbol, rule_id, purpose, bar_ts, payload_json,
+          ${disposition},
+          CASE WHEN state = 'claimed' THEN 'queued' ELSE state END,
+          created_at, expires_at, ${attempts}, ${nextAttemptAt}, NULL, ${lastError}
+        FROM triggers;
+        DROP TABLE triggers;
+        ALTER TABLE triggers_v7 RENAME TO triggers;
+      `)
+    })
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS triggers_claimable
+    ON triggers (state, next_attempt_at, created_at, trigger_id);`)
+}
+
+function needsV7Repair(db: SqliteLike): boolean {
+  const columns = ['attempts', 'next_attempt_at', 'claimed_at', 'last_error']
+  if (columns.some((column) => !hasColumn(db, 'triggers', column))) return true
+  const row = db.prepare?.("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'triggers'").all()[0] as
+    | { sql?: unknown }
+    | undefined
+  return typeof row?.sql !== 'string' || !row.sql.includes("'failed'")
 }
 
 function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknown; dflt_value?: unknown }[] {

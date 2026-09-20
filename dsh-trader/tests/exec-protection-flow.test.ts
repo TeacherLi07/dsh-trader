@@ -120,7 +120,7 @@ describe('executeAction partial-fill safety', () => {
         journal, broker, clock, plan, conditionId: 'open-once',
         action: {
           action: 'open', side: 'long', method: 'market',
-          stop: { method: 'structure', level: 90 }, riskPct: 0.001,
+          stop: { method: 'structure', level: 90 }, riskFraction: 1,
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
@@ -153,7 +153,7 @@ describe('executeAction partial-fill safety', () => {
         conditionId: 'open-with-stale-position',
         action: {
           action: 'open', side: 'long', method: 'market',
-          stop: { method: 'structure', level: 90 }, riskPct: 0.001,
+          stop: { method: 'structure', level: 90 }, riskFraction: 1,
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
@@ -189,7 +189,7 @@ describe('executeAction partial-fill safety', () => {
         conditionId: 'open-with-short-snapshot',
         action: {
           action: 'open', side: 'long', method: 'market',
-          stop: { method: 'structure', level: 90 }, riskPct: 0.001,
+          stop: { method: 'structure', level: 90 }, riskFraction: 1,
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,

@@ -92,7 +92,7 @@ function card() {
         seq: 1,
         tf: TF,
         when: 'position.qty == 0 and bar.close > ema20',
-        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskPct: RISK_PCT },
+        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskFraction: 1 },
       },
       {
         id: 'c-reduce',

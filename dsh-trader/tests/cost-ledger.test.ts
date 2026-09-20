@@ -179,14 +179,15 @@ describe('budgetAllows', () => {
     tokenCap: null,
   }
 
-  it('超预算停 W2/W3，但 W1 照常（否则已有仓位无人看管）', () => {
-    expect(budgetAllows(state, 10, { wake: 'W1' })).toEqual({ allow: true })
+  it('超预算停止所有新增模型判断；机械减险不经过本闸', () => {
+    expect(budgetAllows(state, 10, { wake: 'W1' }).allow).toBe(false)
     expect(budgetAllows(state, 10, { wake: 'W2' }).allow).toBe(false)
     expect(budgetAllows(state, 10, { wake: 'W3' }).allow).toBe(false)
   })
 
   it('预算内放行', () => {
     expect(budgetAllows({ ...state, spentUsd: 1, estimatedUsd: 1 }, 10, { wake: 'W2' }).allow).toBe(true)
+    expect(budgetAllows({ ...state, spentUsd: 1, estimatedUsd: 1 }, 10, { wake: 'W1' }).allow).toBe(true)
   })
 
   it('成本未知时退化为 token 上限；连上限都没有就拒', () => {
@@ -248,17 +249,53 @@ describe('BudgetLedger', () => {
     expect(ledger.dashboard({ day: dayKey(MON_PEAK) })[0]?.costKnown).toBe(false)
   })
 
-  it('gate：超预算停 W2/W3，W1 放行；且用注入时间判日键', () => {
+  it('gate：所有唤醒超预算都拒绝；且用注入时间判日键', () => {
     ledger.record(call(MON_PEAK, 4_000_000), prices.all())
     const at = MON_PEAK
     const gate = (wake: 'W1' | 'W2' | 'W3') =>
       ledger.gate({ at, wake, dailyBudgetUsd: 1, scope: 'global' })
-    expect(gate('W1').allow).toBe(true)
+    expect(gate('W1').allow).toBe(false)
     // 4M tokens × $0.30/M = $1.20 > $1
     expect(gate('W2').allow).toBe(false)
     expect(gate('W3').allow).toBe(false)
     // 换一天（谷时）就又有预算
     expect(ledger.gate({ at: MON_PEAK + 24 * HOUR, wake: 'W2', dailyBudgetUsd: 1 }).allow).toBe(true)
+  })
+
+  it('usage 缺失时将有界预估写成 unknown 成本，不伪装为免费调用', () => {
+    const result = ledger.record({
+      at: MON_PEAK,
+      scopes: ['global'],
+      model: 'deepseek-flash',
+      usage: null,
+      estimatedTokens: 1_000,
+      reservedUsd: 0.001,
+    }, DEEPSEEK_PRICE_SEED)
+    expect(result.costKnown).toBe(false)
+    expect(result.estUsd).toBe(0.001)
+    const state = ledger.state(dayKey(MON_PEAK), 'global', 10_000)
+    expect(state.tokens).toBe(1_000)
+    expect(state.unknownCostCalls).toBe(1)
+    expect(ledger.dashboard({ day: dayKey(MON_PEAK) })[0]).toMatchObject({ costKnown: false, estUsd: 0.001 })
+  })
+
+  it('preflight 使用最大输入/输出估算做预算和 token-cap 双闸', () => {
+    prices.seed(DEEPSEEK_PRICE_SEED)
+    const estimatedUsage = { tokensIn: 10_000, tokensOut: 1_000, tokensCached: 0 }
+    expect(ledger.preflight({
+      at: MON_PEAK, model: 'deepseek-flash', estimatedUsage,
+      dailyBudgetUsd: 10, wake: 'W1',
+    }).decision.allow).toBe(true)
+    const noPrice = ledger.preflight({
+      at: MON_PEAK, model: 'unknown-model', estimatedUsage,
+      dailyBudgetUsd: 10, wake: 'W1',
+    })
+    expect(noPrice.decision).toMatchObject({ allow: false })
+    expect(noPrice.reason).toContain('price_table')
+    expect(ledger.preflight({
+      at: MON_PEAK, model: 'unknown-model', estimatedUsage,
+      dailyBudgetUsd: 10, tokenCap: 5_000, wake: 'W1',
+    }).decision).toMatchObject({ allow: false, reason: expect.stringContaining('token 上限') })
   })
 
   it('token 上限兜底可见', () => {

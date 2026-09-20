@@ -86,7 +86,7 @@ function card() {
         seq: 1,
         tf: TF,
         when: 'position.qty == 0 and rsi14 < 45',
-        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskPct: 0.01 },
+        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskFraction: 1 },
       },
       {
         id: 'c-take',
@@ -310,7 +310,7 @@ describe('回放审计修复', () => {
     return { db, clock, bars, queue, broker, deps }
   }
 
-  it('★ set_stop 不再撞外键崩掉整个回放，并且保护单也进审计链', async () => {
+  it('★ set_stop 不以非原子方式替换已有保护单；回放 fail-closed 并保留原保护', async () => {
     const h = scenario(
       [raw(T, 100), raw(T + H, 100)],
       {
@@ -321,7 +321,7 @@ describe('回放审计修复', () => {
             seq: 1,
             tf: TF,
             when: 'position.qty == 0',
-            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskFraction: 1 },
           },
           {
             id: 'c-stop',
@@ -334,11 +334,17 @@ describe('回放审计修复', () => {
       },
     )
     const result = await replay(h.deps, { symbol: S, timeframe: TF, since: T, until: T + 2 * H })
-    expect(result.counters.executed).toBe(2)
-    // 自动保护单 + set_stop 都应有 order_intents 行
+    expect(result.counters.executed).toBe(1)
+    expect(result.counters.denied).toBe(1)
+    // 开仓的自动保护单仍在；不能再附加一张无法原子替换的旧止损。
     const ids = result.intentIds
     expect(ids.some((id) => id.startsWith('pi-open:'))).toBe(true)
-    expect(ids.some((id) => id.startsWith('pi:'))).toBe(true)
+    expect(ids.some((id) => id.startsWith('pi:'))).toBe(false)
+    const stopped = h.db.prepare("SELECT executed, rationale FROM decisions WHERE action = 'set_stop'").get() as {
+      executed: number; rationale: string
+    }
+    expect(stopped.executed).toBe(0)
+    expect(stopped.rationale).toContain('不支持原子替换')
   })
 
   it('★ 做空限价单挂在市价之上（偏移方向与做多相反）', async () => {
@@ -358,7 +364,7 @@ describe('回放审计修复', () => {
               method: 'limit',
               limitOffsetBps: 50,
               stop: { method: 'structure', level: 100_000 },
-              riskPct: 0.01,
+              riskFraction: 1,
             },
           },
         ],
@@ -384,7 +390,7 @@ describe('回放审计修复', () => {
             seq: 1,
             tf: TF,
             when: 'position.qty == 0',
-            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+            then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskFraction: 1 },
           },
           { id: 'c-close', seq: 2, tf: TF, when: 'position.qty > 0 and bar.close < 99', then: { action: 'close' } },
         ],
@@ -408,7 +414,7 @@ describe('回放审计修复', () => {
           seq: 1,
           tf: TF,
           when: 'position.qty == 0 and bar.close > 99',
-          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 95 }, riskPct: 0.01 },
+          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 95 }, riskFraction: 1 },
         },
       ],
     })
@@ -443,7 +449,7 @@ describe('回放审计修复', () => {
           seq: 1,
           tf: TF,
           when: 'position.qty == 0',
-          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskPct: 0.01 },
+          then: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 }, riskFraction: 1 },
         },
       ],
     })

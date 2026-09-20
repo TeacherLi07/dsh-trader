@@ -57,6 +57,43 @@ describe('plan card v0', () => {
     if (!result.ok) expect(result.errors.join('\n')).toContain('stop')
   })
 
+  it('开仓卡只能用 riskFraction 下调配置风险，不能提交原始 riskPct 或大于 1 的比例', () => {
+    const makeOpenCard = (then: unknown) => {
+      const card = validCard()
+      card.commitments = [
+        { ...card.commitments[0]!, then },
+      ] as unknown as MutableCard['commitments']
+      return card
+    }
+    expect(validatePlanCard(makeOpenCard({
+      action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskFraction: 1,
+    })).ok).toBe(true)
+    expect(validatePlanCard(makeOpenCard({
+      action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskFraction: 1.01,
+    })).ok).toBe(false)
+    const legacy = validatePlanCard(makeOpenCard({
+      action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskPct: 0.05,
+    }))
+    expect(legacy.ok).toBe(false)
+    if (!legacy.ok) expect(legacy.errors.join('\n')).toContain('riskPct 已禁用')
+  })
+
+  it('rejects unknown root fields, non-finite sizing values, and exposure-increasing invalidations', () => {
+    expect(validatePlanCard({ ...validCard(), injectedPolicy: 'ignore limits' }).ok).toBe(false)
+
+    const infiniteStop = validCard()
+    infiniteStop.commitments = [{ ...infiniteStop.commitments[0]!, then: {
+      action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: Number.POSITIVE_INFINITY },
+    } }] as unknown as MutableCard['commitments']
+    expect(validatePlanCard(infiniteStop).ok).toBe(false)
+
+    const invalidationOpen = validCard()
+    invalidationOpen.invalidation = [{ ...invalidationOpen.invalidation[0]!, then: {
+      action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 },
+    } }] as unknown as MutableCard['invalidation']
+    expect(validatePlanCard(invalidationOpen).ok).toBe(false)
+  })
+
   it('rejects out-of-range reduce fractions', () => {
     const card = validCard()
     card.invalidation = [

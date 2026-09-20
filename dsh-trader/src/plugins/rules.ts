@@ -54,8 +54,8 @@ export interface RulesConfig {
 }
 
 export function apply(ctx: Context, config: RulesConfig): void {
-  // `windows` 与 `judgment.provider/model` 目前不生效（W2/W3 未接线）：配了就拒绝启动，
-  // 而不是静默忽略 —— "配了但不生效"比"没配"更危险（会让人误以为在起作用）。
+  // rules 只负责产生与治理事件；W1 窗口和 W2/W3 模型路由由 supervisor 唯一持有。
+  // 重复配置配了就拒绝启动，而不是静默忽略并制造“看起来能改”的空开关。
   assertWiredRulesConfig({ windows: config.windows, judgment: config.judgment })
   const built = buildRules(config.rulePacks, { cooldownMs: config.cooldownMs })
   if (built.unknownPacks.length > 0) {

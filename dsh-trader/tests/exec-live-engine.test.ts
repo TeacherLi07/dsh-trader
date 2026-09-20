@@ -136,7 +136,7 @@ function harness(cardOver: Parameters<typeof makeCard>[0] = {}, now = START + HO
             side: 'long',
             method: 'market',
             stop: { method: 'structure', level: 90 },
-            riskPct: 0.01,
+            riskFraction: 1,
           },
         },
       ],
@@ -191,7 +191,8 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
   it('硬闸拒绝要有审计、没有 order intent，并返回 denied', async () => {
     const h = harness()
     h.broker.spreadBps = LIMITS.maxSpreadBps + 1
-    const result = await createLiveEngine(h.deps).onClosedBar({
+    const engine = createLiveEngine(h.deps)
+    const result = await engine.onClosedBar({
       symbol: SYMBOL,
       timeframe: TF,
       barTs: START,
@@ -220,7 +221,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
       journal: h.journal, broker: h.broker, clock: h.clock, plan, conditionId,
       action: {
         action: 'open', side: 'long', method: 'market',
-        stop: { method: 'structure', level: 90 }, riskPct: 0.03,
+        stop: { method: 'structure', level: 90 }, riskFraction: 1,
       },
       symbol: SYMBOL, timeframe: TF, barTs, referencePrice: 100, atr: null,
       account: staleAccount, position: undefined,
@@ -262,7 +263,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
       journal: h.journal, broker: h.broker, clock: h.clock, plan, conditionId: 'halt-race',
       action: {
         action: 'open', side: 'long', method: 'market',
-        stop: { method: 'structure', level: 90 }, riskPct: 0.01,
+        stop: { method: 'structure', level: 90 }, riskFraction: 1,
       },
       symbol: SYMBOL, timeframe: TF, barTs: START + 2, referencePrice: 100, atr: null,
       account: staleAccount, position: undefined,
@@ -346,7 +347,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
               side: 'long',
               method: 'market',
               stop: { method: 'structure', level: 80 },
-              riskPct: 0.01,
+              riskFraction: 1,
             },
           },
         ],
@@ -414,7 +415,8 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
         },
       ],
     })
-    const result = await createLiveEngine(h.deps).onClosedBar({
+    const engine = createLiveEngine(h.deps)
+    const result = await engine.onClosedBar({
       symbol: SYMBOL,
       timeframe: TF,
       barTs: START,
@@ -423,11 +425,60 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     expect(result.kind).toBe('uncovered')
     expect(result.reason).toContain('funding.rate')
     expect(h.broker.orderCalls).toBe(0)
+    await engine.onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+    expect(h.queue.countFiredSince(['commitment'], 0)).toBe(1)
     const uncovered = h.db
       .prepare("SELECT payload_json FROM audit_events WHERE kind = 'plan.uncovered'")
       .all() as { payload_json: string }[]
     expect(uncovered.length).toBeGreaterThan(0)
     expect(uncovered[0]?.payload_json).toContain('UNCOVERED')
+    const wake = h.queue.claim(h.clock.now())[0]
+    expect(wake).toMatchObject({ purpose: 'commitment', disposition: 'judgment', state: 'claimed' })
+    expect(wake?.payload).toMatchObject({
+      timeframe: TF,
+      detail: { wake: 'W2', conditionId: 'c-funding' },
+    })
+    h.db.close()
+  })
+
+  it('失效条件无法求值时立即冻结标的，不排队等待模型', async () => {
+    const h = harness({
+      invalidation: [{ id: 'inv-funding', tf: TF, when: 'funding.rate > 0.0001', then: { action: 'close' } }],
+    })
+    const frozen: string[] = []
+    const result = await createLiveEngine({ ...h.deps, freezeSymbol: (symbol) => frozen.push(symbol) }).onClosedBar({
+      symbol: SYMBOL, timeframe: TF, barTs: START,
+    })
+
+    expect(result.kind).toBe('uncovered')
+    expect(frozen).toEqual([SYMBOL])
+    expect(h.queue.queuedCount()).toBe(0)
+    const report = h.db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'plan.uncovered'").get() as { payload_json: string }
+    expect(report.payload_json).toContain('P0_FREEZE')
+    expect(h.broker.orderCalls).toBe(0)
+    h.db.close()
+  })
+
+  it('不会执行升级后 schema 不兼容或 contentHash 被改写的 active plan', async () => {
+    const h = harness()
+    const card = h.plans.active(SYMBOL)!
+    const legacy = JSON.parse(JSON.stringify(card)) as {
+      planId: string
+      commitments: { id: string; seq: number; tf: string; when: string; then: Record<string, unknown> }[]
+    }
+    const commitment = legacy.commitments[0]!
+    legacy.commitments[0] = { ...commitment, then: { ...commitment.then, riskPct: 0.5 } }
+    h.db.prepare('UPDATE plan_cards SET card_json = ? WHERE plan_id = ?').run(JSON.stringify(legacy), card.planId)
+    const frozen: string[] = []
+
+    const result = await createLiveEngine({ ...h.deps, freezeSymbol: (symbol) => frozen.push(symbol) }).onClosedBar({
+      symbol: SYMBOL, timeframe: TF, barTs: START,
+    })
+
+    expect(result.kind).toBe('uncovered')
+    expect(frozen).toEqual([SYMBOL])
+    expect(h.broker.orderCalls).toBe(0)
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'plan.active_invalid'").get()).toMatchObject({ n: 1 })
     h.db.close()
   })
 
@@ -473,7 +524,7 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
               side: 'long',
               method: 'market',
               stop: { method: 'structure', level: 90 },
-              riskPct: 0.01,
+              riskFraction: 1,
             },
           },
         ],

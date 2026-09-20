@@ -11,8 +11,9 @@ import type { FeatureSnapshot } from '../market/features.js'
 import { timeframeMs } from '../market/normalize.js'
 import type { Candle } from '../market/types.js'
 import { matchPlan, planDedupKey, type MatchOutcome } from '../plan/match.js'
-import type { PlanCard } from '../plan/schema.js'
+import { computeContentHash, validatePlanCard, type PlanCard } from '../plan/schema.js'
 import type { TriggerQueue } from '../trigger/queue.js'
+import { TriggerGovernor } from '../trigger/engine.js'
 import type { Clock } from '../clock.js'
 import { checkLimitsConsistency, type RiskLimits, type RunMode } from '../config.js'
 import type { Broker } from './broker.js'
@@ -47,6 +48,9 @@ export interface LiveEngineDeps {
   readonly reflectionHorizonMs?: number
   /** 可选持久触发队列；未注入时由 engine 内存集合承担同一进程内去重。 */
   readonly queue?: TriggerQueue
+  /** W2 缺口触发的 TTL；过期事件不能再拿旧行情执行动作。 */
+  readonly triggerTtlMs?: number
+  readonly triggerCooldownMs?: number
   /** 冻结标的（对账/恢复未决，plan §4.2/§6.3）；透传给硬闸，禁止增加敞口。 */
   readonly frozenSymbols?: () => ReadonlySet<string>
   readonly freezeSymbol?: (symbol: string) => void
@@ -116,11 +120,48 @@ export class LiveEngine {
     }
 
     const snapshot = this.#snapshotFor(bar)
-    const plan = this.deps.plans.active(input.symbol)
+    let plan: PlanCard | undefined
+    try {
+      plan = this.deps.plans.active(input.symbol)
+    } catch (error) {
+      let freezeAttempted = false
+      try {
+        this.deps.freezeSymbol?.(input.symbol)
+        freezeAttempted = this.deps.freezeSymbol !== undefined
+      } catch { /* 失败原因由同一审计事件保留为错误类型，不让异常吞掉 UNCOVERED。 */ }
+      this.deps.journal.appendAudit({
+        actor: 'system', kind: 'plan.active_read_failed',
+        payload: {
+          symbol: input.symbol, timeframe: input.timeframe, barTs: input.barTs,
+          errorType: error instanceof Error ? error.name : 'UnknownError', freezeAttempted,
+        },
+        ts: now,
+      })
+      return result('uncovered', { reason: 'active plan 无法读取；已冻结或必须人工冻结该标的' })
+    }
     if (plan === undefined) return result('noop', { reason: '无 active 计划卡' })
     if (now > plan.windowEndsAt) {
       this.deps.plans.expire(now)
       return result('expired', { planId: plan.planId, reason: '计划卡已到期' })
+    }
+    const planValidation = validatePlanCard(plan)
+    const contentHashMatches = plan.contentHash === computeContentHash(plan)
+    if (!planValidation.ok || !contentHashMatches) {
+      let freezeAttempted = false
+      try {
+        this.deps.freezeSymbol?.(input.symbol)
+        freezeAttempted = this.deps.freezeSymbol !== undefined
+      } catch { /* 保留审计并 fail-closed；不因 freeze 异常继续执行脏计划。 */ }
+      this.deps.journal.appendAudit({
+        actor: 'system', kind: 'plan.active_invalid',
+        payload: {
+          planId: plan.planId, symbol: input.symbol, timeframe: input.timeframe, barTs: input.barTs,
+          validationErrorCount: planValidation.ok ? 0 : planValidation.errors.length,
+          contentHashMatches, freezeAttempted,
+        },
+        ts: now,
+      })
+      return result('uncovered', { planId: plan.planId, reason: 'active plan schema/contentHash 无效；已冻结或必须人工冻结该标的' })
     }
 
     // 只有 active 且未过期的计划需要账户/持仓；这里每次 onClosedBar 都从 broker 重取。
@@ -294,6 +335,52 @@ export class LiveEngine {
   }
 
   #recordUncovered(plan: PlanCard, outcome: Extract<MatchOutcome, { kind: 'uncovered' }>, input: ClosedBarInput, now: number): void {
+    const invalidation = plan.invalidation.some((condition) => condition.id === outcome.id)
+    let triggerQueued = false
+    let triggerDisposition: string = invalidation ? 'p0-freeze' : 'not-queued'
+    let freezeAttempted = false
+    let freezeError: string | undefined
+    if (invalidation) {
+      // 失效条件无法求值时不能等模型猜测；先冻结该标的，再由人工/后续判断恢复。
+      if (this.deps.freezeSymbol !== undefined) {
+        try {
+          this.deps.freezeSymbol(input.symbol)
+          freezeAttempted = true
+        } catch (error) {
+          freezeError = String(error)
+        }
+      }
+    } else if (this.deps.queue !== undefined) {
+      const ttlMs = this.deps.triggerTtlMs ?? 60 * 60_000
+      const cooldownMs = this.deps.triggerCooldownMs ?? 15 * 60_000
+      if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0 || !Number.isFinite(now + ttlMs)) {
+        throw new Error(`triggerTtlMs 必须是正的安全整数：${String(ttlMs)}`)
+      }
+      if (!Number.isSafeInteger(cooldownMs) || cooldownMs < 0) throw new Error('triggerCooldownMs 必须是非负安全整数')
+      const condition = plan.commitments.find((item) => item.id === outcome.id)
+      const decision = new TriggerGovernor(this.deps.queue, this.deps.clock).submit({
+        ruleId: `${plan.planId}:${outcome.id}`,
+        purpose: 'commitment',
+        symbol: input.symbol,
+        timeframe: input.timeframe,
+        barTs: input.barTs,
+        severity: 'P1',
+        expression: condition?.when ?? `uncovered:${outcome.id}`,
+        dedupKey: outcome.dedupKey,
+      }, {
+        cooldownMs,
+        ttlMs,
+        payload: {
+          wake: 'W2',
+          planId: plan.planId,
+          conditionId: outcome.id,
+          reason: outcome.reason,
+        },
+      })
+      triggerDisposition = decision.disposition.kind
+      triggerQueued = decision.disposition.kind === 'judgment' && decision.persisted
+    }
+
     // 没有 queue 也不能把求值失败变成静默 no-op；审计里保留 UNCOVERED 和原因。
     this.deps.journal.appendAudit({
       actor: 'system',
@@ -306,6 +393,11 @@ export class LiveEngine {
         timeframe: input.timeframe,
         barTs: input.barTs,
         reason: outcome.reason,
+        wake: invalidation ? (freezeAttempted ? 'P0_FREEZE' : 'P0_FREEZE_REQUIRED') : 'W2',
+        triggerQueued,
+        triggerDisposition,
+        freezeAttempted,
+        freezeError: freezeError ?? null,
       },
       ts: now,
     })

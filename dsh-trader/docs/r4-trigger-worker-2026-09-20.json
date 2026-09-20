@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 7,
+  "externalModelCalls": 0,
+  "stubDecisionCallbacks": 2,
+  "triggerRows": 3,
+  "states": {
+    "done": 1,
+    "failed": 1,
+    "expired": 1,
+    "queued": 0,
+    "claimed": 0
+  },
+  "retriedSameTrigger": true,
+  "budgetDeniedBeforeCallback": true,
+  "restartRecoveryPreserved": true,
+  "auditEvents": 5
+}

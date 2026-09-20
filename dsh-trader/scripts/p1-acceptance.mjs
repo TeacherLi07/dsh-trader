@@ -86,7 +86,7 @@ function card() {
         seq: 1,
         tf: TF,
         when: 'position.qty == 0 and rsi14 < 45',
-        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskPct: RISK_PCT },
+        then: { action: 'open', side: 'long', method: 'market', stop: { method: 'atr', k: 2 }, riskFraction: 1 },
       },
       { id: 'c-take', seq: 2, tf: TF, when: 'position.qty > 0 and rsi14 > 60', then: { action: 'reduce', fraction: 0.5 } },
     ],

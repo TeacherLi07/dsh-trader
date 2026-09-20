@@ -1,20 +1,37 @@
 /**
  * 执行组合根的端口。
  *
- * `ToolPorts` 是工具层已经稳定使用的契约；这里直接继承它，避免插件各自
- * 组装出略有差异的 broker/journal 引用，导致硬闸和审计走不同实例。
+ * 单一生产执行边界：判断、机械计划与恢复都使用同一组 broker/journal 引用。
  */
 
 import type Database from 'better-sqlite3'
 import type { Clock } from '../clock.js'
 import type { RiskLimits, RunMode } from '../config.js'
-import type { ToolPorts } from '../agents/tools.js'
 import type { DecisionContextConfig } from '../agents/context-config.js'
-import type { Venue } from './broker.js'
+import type { Broker, Venue } from './broker.js'
 import type { CcxtProExchangeLike } from './ccxt-broker.js'
+import type { BarArchive } from '../market/archive.js'
+import type { FeatureArchive } from '../market/feature-archive.js'
+import type { PlanStore } from '../plan/store.js'
+import type { PmStore } from '../predictions/store.js'
+import type { DecisionJournal } from './journal.js'
 
-export interface TradePorts extends ToolPorts {
-  /** 运行时配置的交易范围；工具本身仍会校验模型传入的标的/时间框。 */
+export interface TradePorts {
+  readonly db: Database.Database
+  readonly bars: BarArchive
+  readonly features: FeatureArchive
+  readonly plans: PlanStore
+  readonly journal: DecisionJournal
+  readonly broker: Broker
+  readonly clock: Clock
+  readonly limits: RiskLimits | null
+  readonly mode: RunMode
+  readonly riskPct: number
+  readonly reflectionHorizonMs?: number
+  readonly pm?: PmStore
+  readonly frozenSymbols?: () => ReadonlySet<string>
+  readonly freezeSymbol?: (symbol: string) => void
+  readonly halt?: () => void
   readonly symbols: readonly string[]
   readonly timeframes: readonly string[]
   readonly benchmark: string
@@ -71,9 +88,7 @@ export interface ExecRuntimeConfig {
   readonly priceOf?: (symbol: string) => number | undefined
 
   readonly reflectionHorizonMs?: number
-  readonly contextHash?: string
-  readonly pm?: ToolPorts['pm']
-  readonly allowPmCommitment?: boolean
+  readonly pm?: PmStore
 }
 
 export interface ExecRuntimeDeps {

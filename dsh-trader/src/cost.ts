@@ -120,17 +120,21 @@ export type BudgetDecision =
   | { readonly allow: true }
   | { readonly allow: false; readonly reason: string }
 
-/**
- * 预算闸门：超预算停 W2/W3（W1 审议窗照常），并产生审计事件 + 告警。
- * 成本未知时按 token 上限兜底，而不是当作免费。
- */
+/** 超预算停止所有新增模型判断；成本未知只能在显式 token cap 下运行。 */
 export function budgetAllows(
   state: BudgetState,
   dailyBudgetUsd: number,
   options: { readonly wake: 'W1' | 'W2' | 'W3' },
 ): BudgetDecision {
-  if (options.wake === 'W1') return { allow: true }
-
+  if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd < 0) {
+    return { allow: false, reason: 'dailyBudgetUsd 必须是有限非负数' }
+  }
+  if (![state.spentUsd, state.estimatedUsd, state.unknownCostCalls, state.tokens].every((value) => Number.isFinite(value) && value >= 0)) {
+    return { allow: false, reason: '预算状态包含非有限或负值' }
+  }
+  if (state.tokenCap !== null && (!Number.isFinite(state.tokenCap) || state.tokenCap <= 0)) {
+    return { allow: false, reason: 'tokenCap 必须是正数或 null' }
+  }
   if (state.tokenCap !== null && state.tokens >= state.tokenCap) {
     return { allow: false, reason: `token 上限已达（${state.tokens}/${state.tokenCap}）` }
   }

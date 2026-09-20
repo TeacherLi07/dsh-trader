@@ -73,7 +73,7 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
   })
 
-  it('把 v5 库升级到 v6 时补齐双时间 observation 表与 append-only 触发器', () => {
+  it('从旧版本升级时补齐双时间 observation 表与 append-only 触发器', () => {
     db.exec(`DROP TRIGGER market_observations_no_update;
       DROP TRIGGER market_observations_no_delete;
       DROP TABLE market_observations;
@@ -85,6 +85,43 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(names('table')).toContain('market_observations')
     expect(names('trigger')).toContain('market_observations_no_update')
     expect(names('trigger')).toContain('market_observations_no_delete')
+  })
+
+  it('把 v6 触发器迁移为有界重试队列并恢复 claimed 行', () => {
+    db.exec(`
+      DROP INDEX IF EXISTS triggers_claimable;
+      DROP TABLE triggers;
+      CREATE TABLE triggers (
+        trigger_id TEXT PRIMARY KEY,
+        dedup_key TEXT NOT NULL UNIQUE,
+        symbol TEXT,
+        rule_id TEXT,
+        purpose TEXT NOT NULL CHECK (purpose IN ('invalidation', 'commitment', 'novelty', 'info')),
+        bar_ts INTEGER,
+        payload_json TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK (disposition IN ('info', 'novelty', 'judgment', 'cooldown', 'rate_limited', 'executed')),
+        state TEXT NOT NULL CHECK (state IN ('queued', 'claimed', 'done', 'expired')),
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER
+      );
+      INSERT INTO triggers VALUES
+        ('q1', 'q1', 'BTC/USDT:USDT', 'rule', 'novelty', 100, '{}', 'novelty', 'queued', 100, 1000),
+        ('q2', 'q2', 'BTC/USDT:USDT', 'rule', 'commitment', 200, '{}', 'judgment', 'claimed', 200, 2000);
+      PRAGMA user_version = 6;
+    `)
+
+    migrate(db)
+    expect(db.pragma('user_version', { simple: true })).toBe(7)
+    const columns = (db.prepare('PRAGMA table_info(triggers)').all() as { name: string }[]).map((row) => row.name)
+    expect(columns).toEqual(expect.arrayContaining(['attempts', 'next_attempt_at', 'claimed_at', 'last_error']))
+    expect(db.prepare('SELECT state, attempts, next_attempt_at FROM triggers WHERE trigger_id = ?').get('q1')).toMatchObject({
+      state: 'queued', attempts: 0, next_attempt_at: 100,
+    })
+    expect(db.prepare('SELECT state, attempts, claimed_at, last_error FROM triggers WHERE trigger_id = ?').get('q2')).toMatchObject({
+      state: 'queued', attempts: 0, claimed_at: null, last_error: null,
+    })
+    expect(names('index')).toContain('triggers_claimable')
+    expect(() => db.prepare(`UPDATE triggers SET state = 'failed' WHERE trigger_id = 'q1'`).run()).not.toThrow()
   })
 
   it('给已有库补 decisions.timeframe（增量迁移），且可重复执行', () => {

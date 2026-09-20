@@ -10,6 +10,7 @@ import type { AccountSnapshot, OrderAck, PositionSnapshot } from '../exec/broker
 import type { TradePorts } from '../exec/ports.js'
 import { MarketObservationStore } from '../market/observations.js'
 import type { MarketSpecification } from '../market/specification.js'
+import type { PmAliasSnapshot } from '../predictions/store.js'
 import { canonicalJson, fingerprint } from '../util/canonical.js'
 import { benchmarkSlice, CONTEXT_TIMEFRAMES, derivativesSlice, marketSlice } from './context-market.js'
 import { decisionContextConfig, type DecisionContextConfig } from './context-config.js'
@@ -60,6 +61,63 @@ interface UnresolvedIntentSnapshot {
 
 export interface DecisionContextBuildOptions {
   readonly config?: Partial<DecisionContextConfig>
+  /** W3 预测市场触发只注入显式映射的一个 alias；不扫描或扩展整个 watch 池。 */
+  readonly predictionAlias?: string
+}
+
+function safePrediction(snapshot: PmAliasSnapshot): Readonly<Record<string, unknown>> {
+  return {
+    alias: snapshot.alias,
+    tokenId: snapshot.tokenId,
+    observedAt: snapshot.quoteObservedAt,
+    probability: snapshot.probability.ok
+      ? { value: snapshot.probability.value, estimator: snapshot.probability.estimator, status: 'ok' }
+      : { value: null, estimator: null, status: 'missing', reason: snapshot.probability.reason },
+    liquidity: snapshot.liquidity.pass ? { pass: true } : { pass: false, reason: snapshot.liquidity.reason },
+    mid: snapshot.mid,
+    spread: snapshot.spread,
+    volume24h: snapshot.volume24h,
+    liquidityQuote: snapshot.liquidityQuote,
+    ageMs: snapshot.ageMs,
+    change1h: snapshot.change1h,
+    change24h: snapshot.change24h,
+    absChangeMean: snapshot.absChangeMean,
+    quoteObservedAt: snapshot.quoteObservedAt,
+    resolved: snapshot.resolved,
+    winningOutcome: snapshot.winningOutcome,
+    negRiskDeviation: snapshot.negRiskDeviation,
+    negRiskDiscounted: snapshot.negRiskDiscounted,
+    confidenceMultiplier: snapshot.confidenceMultiplier,
+    question: snapshot.untrustedText === null ? null : { text: snapshot.untrustedText, untrustedText: true },
+  }
+}
+
+function predictionSection(
+  ports: TradePorts,
+  alias: string | undefined,
+  asOf: number,
+): { readonly asOf: number | null; readonly source: string; readonly missing: readonly string[]; readonly value: unknown } {
+  if (alias === undefined) {
+    return { asOf: null, source: 'predictions.disabled-or-not-qualified', missing: [], value: { state: 'disabled', items: [], untrustedText: true } }
+  }
+  if (ports.pm === undefined) {
+    return { asOf: null, source: 'pm-store', missing: ['prediction.store:unavailable'], value: { state: 'unavailable', alias, items: [] } }
+  }
+  const snapshots = ports.pm.snapshotAt(asOf).filter((snapshot) => snapshot.alias === alias).slice(0, 20)
+  if (snapshots.length === 0) {
+    return { asOf: null, source: 'pm-store', missing: [`prediction.${alias}:not-visible-at-asOf`], value: { state: 'unavailable', alias, items: [] } }
+  }
+  const predictionAsOf = latestTimestamp(snapshots.map((snapshot) => snapshot.quoteObservedAt))
+  const missing = snapshots.flatMap((snapshot) => [
+    ...(snapshot.probability.ok ? [] : [`prediction.${alias}.${snapshot.tokenId}.probability:missing`]),
+    ...(snapshot.liquidity.pass ? [] : [`prediction.${alias}.${snapshot.tokenId}.liquidity:unqualified`]),
+  ])
+  return {
+    asOf: predictionAsOf,
+    source: 'pm-store.point-in-time',
+    missing,
+    value: { state: 'available', alias, items: snapshots.map(safePrediction) },
+  }
 }
 
 function safeErrorType(error: unknown): string {
@@ -296,6 +354,7 @@ export async function buildDecisionContext(
 
   const derivatives = derivativesSlice(observations, symbol, asOf, config)
   const derivativesMissing = factIssues(derivatives, 'derivatives')
+  const predictions = predictionSection(ports, options.predictionAlias, asOf)
 
   const accountAgeMs = account === undefined ? null : asOf - account.observedAt
   const staleAccount = accountAgeMs !== null && accountAgeMs > config.accountMaxAgeMs
@@ -515,12 +574,7 @@ export async function buildDecisionContext(
         missing: [],
         value: { state: 'disabled', items: [], reason: 'R5 ablation has not enabled lesson injection' },
       },
-      predictions: {
-        asOf: null,
-        source: 'predictions.disabled-or-not-qualified',
-        missing: [],
-        value: { state: 'disabled', items: [], untrustedText: true },
-      },
+      predictions,
     },
   })
   // 确认全文是可序列化 JSON；renderer 再按最终 request 的真实长度执行 maxChars 闸门。

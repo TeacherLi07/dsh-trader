@@ -10,7 +10,7 @@ import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 
 export type TriggerPurpose = 'invalidation' | 'commitment' | 'novelty' | 'info'
-export type TriggerState = 'queued' | 'claimed' | 'done' | 'expired'
+export type TriggerState = 'queued' | 'claimed' | 'done' | 'expired' | 'failed'
 /** 触发最终的去向。**只有 `novelty` / `judgment` 消耗唤醒预算**。 */
 export type TriggerDisposition =
   | 'info'
@@ -23,6 +23,7 @@ export type TriggerDisposition =
 
 /** 消耗唤醒预算的去向 —— 冷却/限流压掉的不算（否则被压掉的重试会自我放大预算占用）。 */
 export const BUDGET_DISPOSITIONS: readonly TriggerDisposition[] = ['novelty', 'judgment']
+export const DEFAULT_TRIGGER_MAX_ATTEMPTS = 5
 
 export interface NewTrigger {
   readonly triggerId: string
@@ -49,6 +50,10 @@ export interface StoredTrigger {
   readonly disposition: TriggerDisposition
   readonly createdAt: number
   readonly expiresAt?: number
+  readonly attempts: number
+  readonly nextAttemptAt: number
+  readonly claimedAt: number | null
+  readonly lastError: string | null
   readonly payload: unknown
 }
 
@@ -64,6 +69,10 @@ interface TriggerRow {
   state: TriggerState
   created_at: number
   expires_at: number | null
+  attempts: number
+  next_attempt_at: number
+  claimed_at: number | null
+  last_error: string | null
 }
 
 function toTrigger(row: TriggerRow): StoredTrigger {
@@ -78,8 +87,34 @@ function toTrigger(row: TriggerRow): StoredTrigger {
     disposition: row.disposition,
     createdAt: row.created_at,
     ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at,
+    claimedAt: row.claimed_at,
+    lastError: row.last_error,
     payload: JSON.parse(row.payload_json) as unknown,
   }
+}
+
+export interface TriggerRetryPolicy {
+  readonly maxAttempts?: number
+  readonly baseDelayMs?: number
+  readonly maxDelayMs?: number
+}
+
+export const DEFAULT_TRIGGER_RETRY_POLICY: Required<TriggerRetryPolicy> = {
+  maxAttempts: DEFAULT_TRIGGER_MAX_ATTEMPTS,
+  baseDelayMs: 1_000,
+  maxDelayMs: 60_000,
+}
+
+function safeErrorText(error: unknown): string {
+  const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  return raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)
+}
+
+function appendError(previous: string | null, reason: string, attempt?: number): string {
+  const entry = attempt === undefined ? reason : `[attempt ${attempt}] ${reason}`
+  return [previous, entry].filter((value): value is string => value !== null).join('\n').slice(-5_000)
 }
 
 export class TriggerQueue {
@@ -98,9 +133,11 @@ export class TriggerQueue {
   enqueue(trigger: NewTrigger): boolean {
     const result = this.#statements.get(
         `INSERT INTO triggers
-           (trigger_id, dedup_key, symbol, rule_id, purpose, bar_ts, payload_json, disposition, state, created_at, expires_at)
+           (trigger_id, dedup_key, symbol, rule_id, purpose, bar_ts, payload_json, disposition, state,
+            created_at, expires_at, attempts, next_attempt_at, claimed_at, last_error)
          VALUES
-           (@triggerId, @dedupKey, @symbol, @ruleId, @purpose, @barTs, @payloadJson, @disposition, @state, @createdAt, @expiresAt)
+           (@triggerId, @dedupKey, @symbol, @ruleId, @purpose, @barTs, @payloadJson, @disposition, @state,
+            @createdAt, @expiresAt, 0, @createdAt, NULL, NULL)
          ON CONFLICT (dedup_key) DO NOTHING`,
       )
       .run({
@@ -150,14 +187,15 @@ export class TriggerQueue {
    * **消耗唤醒预算**的触发数：只统计 `disposition ∈ {novelty, judgment}` 的行。
    * 被冷却/限流压掉的尝试不算预算 —— 否则它们自己会把窗口占满，形成自我放大的死锁。
    */
-  countFiredSince(purposes: readonly TriggerPurpose[], since: number): number {
-    return this.#count(purposes, since, BUDGET_DISPOSITIONS)
+  countFiredSince(purposes: readonly TriggerPurpose[], since: number, excludingTriggerId?: string): number {
+    return this.#count(purposes, since, BUDGET_DISPOSITIONS, excludingTriggerId)
   }
 
   #count(
     purposes: readonly TriggerPurpose[],
     since: number,
     dispositions: readonly TriggerDisposition[] | undefined,
+    excludingTriggerId?: string,
   ): number {
     if (purposes.length === 0) return 0
     const purposeSlots = purposes.map(() => '?').join(', ')
@@ -170,38 +208,175 @@ export class TriggerQueue {
       sql += ` AND disposition IN (${dispositionSlots})`
       params.push(...dispositions)
     }
+    if (excludingTriggerId !== undefined) {
+      sql += ' AND trigger_id <> ?'
+      params.push(excludingTriggerId)
+    }
     const row = this.#statements.get(sql).get(...params) as { n: number }
     return row.n
   }
 
-  /** 原子领取：`queued → claimed`。返回本轮领取到的触发。 */
-  claim(limit = 10): readonly StoredTrigger[] {
+  /** 原子领取到期时间以内可处理的触发；所有时间都由调用方的 Clock 提供。 */
+  claim(now: number, limit = 1, maxAttempts = DEFAULT_TRIGGER_RETRY_POLICY.maxAttempts): readonly StoredTrigger[] {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`claim now 非法：${String(now)}`)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error(`claim limit 必须是 1..100 的整数：${String(limit)}`)
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('claim maxAttempts 必须是正整数')
     const select = this.#statements.get(
-      `SELECT * FROM triggers WHERE state = 'queued' ORDER BY created_at ASC, trigger_id ASC LIMIT ?`,
+      `SELECT * FROM triggers
+       WHERE state = 'queued' AND attempts < ? AND next_attempt_at <= ? AND (expires_at IS NULL OR expires_at > ?)
+       ORDER BY next_attempt_at ASC, created_at ASC, trigger_id ASC LIMIT ?`,
     )
-    const update = this.#statements.get(`UPDATE triggers SET state = 'claimed' WHERE trigger_id = ?`)
+    const update = this.#statements.get(`UPDATE triggers
+      SET state = 'claimed', attempts = attempts + 1, claimed_at = ?
+      WHERE trigger_id = ? AND state = 'queued'`)
 
-    const claimAll = this.db.transaction((n: number) => {
-      const rows = select.all(n) as TriggerRow[]
-      for (const row of rows) update.run(row.trigger_id)
-      return rows.map(toTrigger)
+    const claimAll = this.db.transaction(() => {
+      const rows = select.all(maxAttempts, now, now, limit) as TriggerRow[]
+      return rows.flatMap((row) => {
+        const result = update.run(now, row.trigger_id)
+        if (Number(result.changes) !== 1) return []
+        return [{ ...toTrigger(row), state: 'claimed' as const, attempts: row.attempts + 1, claimedAt: now }]
+      })
     })
 
-    return claimAll(limit)
+    return claimAll()
   }
 
   markDone(triggerId: string): void {
-    this.#statements.get(`UPDATE triggers SET state = 'done' WHERE trigger_id = ?`).run(triggerId)
+    const result = this.#statements.get(
+      `UPDATE triggers SET state = 'done', claimed_at = NULL
+       WHERE trigger_id = ? AND state = 'claimed'`,
+    ).run(triggerId)
+    if (Number(result.changes) !== 1) throw new Error(`只能完成 claimed 触发：${triggerId}`)
   }
 
-  /** 过期的 queued/claimed 转为 expired；返回条数。 */
-  expire(now: number): number {
-    const result = this.#statements.get(
-        `UPDATE triggers SET state = 'expired'
-         WHERE state IN ('queued', 'claimed') AND expires_at IS NOT NULL AND expires_at < ?`,
-      )
-      .run(now)
-    return Number(result.changes)
+  /** 过期的 queued 触发逐条返回，调用方必须为每条写审计；claimed 由执行者检查截止时间。 */
+  expire(now: number): readonly StoredTrigger[] {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`expire now 非法：${String(now)}`)
+    const select = this.#statements.get(`SELECT * FROM triggers
+      WHERE state = 'queued' AND expires_at IS NOT NULL AND expires_at <= ?
+      ORDER BY expires_at ASC, trigger_id ASC`)
+    const update = this.#statements.get(`UPDATE triggers
+      SET state = 'expired', claimed_at = NULL,
+          last_error = CASE WHEN last_error IS NULL THEN '触发器在处理前过期'
+                            ELSE last_error || char(10) || '触发器在处理前过期' END
+      WHERE trigger_id = ? AND state = 'queued'`)
+    return this.db.transaction(() => {
+      const rows = select.all(now) as TriggerRow[]
+      const expired: StoredTrigger[] = []
+      for (const row of rows) {
+        const result = update.run(row.trigger_id)
+        if (Number(result.changes) === 1) expired.push({
+          ...toTrigger(row), state: 'expired', claimedAt: null,
+          lastError: appendError(row.last_error, '触发器在处理前过期'),
+        })
+      }
+      return expired
+    })()
+  }
+
+  /** 执行期间到期的 claimed 项由 worker 显式终结，避免扫描器误杀仍在运行的回合。 */
+  markExpired(triggerId: string, now: number, reason: string): StoredTrigger {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`markExpired now 非法：${String(now)}`)
+    const row = this.#statements.get(`SELECT * FROM triggers WHERE trigger_id = ?`).get(triggerId) as TriggerRow | undefined
+    if (row === undefined) throw new Error(`触发器不存在：${triggerId}`)
+    if (row.state !== 'queued' && row.state !== 'claimed') throw new Error(`只能过期 queued/claimed 触发：${triggerId}`)
+    const lastError = appendError(row.last_error, safeErrorText(reason))
+    const result = this.#statements.get(`UPDATE triggers
+      SET state = 'expired', claimed_at = NULL, last_error = ?
+      WHERE trigger_id = ? AND state IN ('queued', 'claimed')`).run(lastError, triggerId)
+    if (Number(result.changes) !== 1) throw new Error(`触发器过期状态竞争：${triggerId}`)
+    const updated = this.get(triggerId)
+    if (updated === undefined) throw new Error(`触发器过期后消失：${triggerId}`)
+    return updated
+  }
+
+  /** queued 行若已耗尽次数则不可再领取；调用方逐条审计这些终态。 */
+  failExhausted(now: number, maxAttempts = DEFAULT_TRIGGER_RETRY_POLICY.maxAttempts): readonly StoredTrigger[] {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`failExhausted now 非法：${String(now)}`)
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('maxAttempts 必须是正整数')
+    const select = this.#statements.get(`SELECT * FROM triggers
+      WHERE state = 'queued' AND attempts >= ? ORDER BY created_at ASC, trigger_id ASC`)
+    const update = this.#statements.get(`UPDATE triggers
+      SET state = 'failed', claimed_at = NULL,
+          last_error = CASE WHEN last_error IS NULL THEN '已达到最大触发尝试次数'
+                            ELSE last_error || char(10) || '已达到最大触发尝试次数' END
+      WHERE trigger_id = ? AND state = 'queued'`)
+    return this.db.transaction(() => {
+      const rows = select.all(maxAttempts) as TriggerRow[]
+      const failed: StoredTrigger[] = []
+      for (const row of rows) {
+        const result = update.run(row.trigger_id)
+        if (Number(result.changes) === 1) failed.push({
+          ...toTrigger(row), state: 'failed', claimedAt: null,
+          lastError: appendError(row.last_error, '已达到最大触发尝试次数'),
+        })
+      }
+      return failed
+    })()
+  }
+
+  /** 模型/依赖瞬时失败后退避重试；重试次数与错误原文均持久化，达到上限后转 failed。 */
+  fail(triggerId: string, now: number, error: unknown, policy: TriggerRetryPolicy = {}): StoredTrigger {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`fail now 非法：${String(now)}`)
+    const maxAttempts = policy.maxAttempts ?? DEFAULT_TRIGGER_RETRY_POLICY.maxAttempts
+    const baseDelayMs = policy.baseDelayMs ?? DEFAULT_TRIGGER_RETRY_POLICY.baseDelayMs
+    const maxDelayMs = policy.maxDelayMs ?? DEFAULT_TRIGGER_RETRY_POLICY.maxDelayMs
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('maxAttempts 必须是正整数')
+    if (!Number.isSafeInteger(baseDelayMs) || baseDelayMs < 0 || !Number.isSafeInteger(maxDelayMs) || maxDelayMs < baseDelayMs) {
+      throw new Error('retry delay 配置非法')
+    }
+    const row = this.#statements.get(`SELECT * FROM triggers WHERE trigger_id = ? AND state = 'claimed'`).get(triggerId) as
+      | TriggerRow
+      | undefined
+    if (row === undefined) throw new Error(`只能重试 claimed 触发：${triggerId}`)
+    const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, row.attempts - 1))
+    const nextAttemptAt = now + delay
+    const expired = row.expires_at !== null && (row.expires_at <= now || row.expires_at <= nextAttemptAt)
+    const exhausted = row.attempts >= maxAttempts
+    const state: TriggerState = expired ? 'expired' : exhausted ? 'failed' : 'queued'
+    const failureReason = safeErrorText(error)
+    const reason = expired
+      ? `${failureReason}；重试退避超出事件 TTL，触发器终止`
+      : failureReason
+    const lastError = appendError(row.last_error, reason, row.attempts)
+    const result = this.#statements.get(`UPDATE triggers SET state = @state, next_attempt_at = @nextAttemptAt,
+      claimed_at = NULL, last_error = @lastError WHERE trigger_id = @triggerId AND state = 'claimed'`)
+      .run({ state, nextAttemptAt, lastError, triggerId })
+    if (Number(result.changes) !== 1) throw new Error(`触发器失败状态竞争：${triggerId}`)
+    const updated = this.get(triggerId)
+    if (updated === undefined) throw new Error(`触发器更新后消失：${triggerId}`)
+    return updated
+  }
+
+  /** 启动恢复：进程上次持有的 claimed 行重新排队；过期项在同一操作中终结。 */
+  recoverClaims(now: number, maxAttempts = DEFAULT_TRIGGER_RETRY_POLICY.maxAttempts): readonly StoredTrigger[] {
+    if (!Number.isFinite(now) || now < 0) throw new Error(`recover now 非法：${String(now)}`)
+    if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new Error('maxAttempts 必须是正整数')
+    const select = this.#statements.get(`SELECT * FROM triggers WHERE state = 'claimed' ORDER BY claimed_at ASC, trigger_id ASC`)
+    return this.db.transaction(() => {
+      const rows = select.all() as TriggerRow[]
+      const recovered: StoredTrigger[] = []
+      for (const row of rows) {
+        const expired = row.expires_at !== null && row.expires_at <= now
+        const exhausted = row.attempts >= maxAttempts
+        const state: TriggerState = expired ? 'expired' : exhausted ? 'failed' : 'queued'
+        const reason = expired
+          ? '进程恢复时触发器已过期'
+          : exhausted
+            ? '进程恢复时触发器已达到最大尝试次数'
+            : '进程在触发处理期间退出，恢复重试'
+        const lastError = appendError(row.last_error, reason, row.attempts)
+        const result = this.#statements.get(`UPDATE triggers
+          SET state = @state, next_attempt_at = @nextAttemptAt, claimed_at = NULL, last_error = @lastError
+          WHERE trigger_id = @triggerId AND state = 'claimed'`)
+          .run({ state, nextAttemptAt: now, lastError, triggerId: row.trigger_id })
+        if (Number(result.changes) === 1) recovered.push({
+          ...toTrigger(row), state, nextAttemptAt: now, claimedAt: null, lastError,
+        })
+      }
+      return recovered
+    })()
   }
 
   get(triggerId: string): StoredTrigger | undefined {

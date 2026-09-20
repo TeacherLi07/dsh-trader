@@ -101,7 +101,12 @@ export class PmSignalRouter {
           dedupKey: signal.dedupKey,
         },
         {
-          payload: { ...signal.payload, alias: signal.alias, tokenId: signal.tokenId },
+          payload: {
+            ...signal.payload,
+            alias: signal.alias,
+            tokenId: signal.tokenId,
+            ...(watch?.planId === undefined ? {} : { planId: watch.planId }),
+          },
           ...(this.options.ttlMs === undefined ? {} : { ttlMs: this.options.ttlMs }),
           cooldownMs: cooldownOf(signal),
         },

@@ -34,8 +34,7 @@
         cooldownMs: 900000
         # W1 审议窗由 trade-supervisor 调度，rules 里不再重复配置（审计 S7：空读字段会误导）。
         escape: { maxPerHour: 2, maxPerDay: 6 }
-        # judgment 只消费数值上限；provider/model 属于 W2/W3 唤醒路由，目前未接线 ——
-        # 配了会被 config-guard **拒绝启动**，而不是静默忽略（审计 S7）。
+        # 规则触发阈值；W2/W3 的实际预算与模型调用由 supervisor 持久队列消费。
         judgment: { maxPerHour: 3, maxPerDay: 8 }
 
     - id: trade-exec
@@ -108,11 +107,16 @@
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor
       config:
-        deskSessionId: trade-desk
         l3: { provider: deepseek-official, model: deepseek-flash }
-        # ★ W2/W3 判断通道当前**未接线**（P1.5 判定：关闭；decideWake 与 TriggerQueue.claim
-        #   在生产路径没有调用方）。因此这里不配置 l2 / l3MinIntervalMs / dailyBudgetUsd ——
-        #   配了会被 config-guard 拒绝启动（审计 S7），避免"配了却不生效"的假象。
+        decisionStrategy: single
+        maxOutputTokens: 1024
+        wakeLimits:
+          judgmentPerHour: 3
+          judgmentPerDay: 8
+          noveltyPerHour: 2
+          noveltyPerDay: 6
+        planWindowMs: 14400000
+        # dailyBudgetUsd 有意保持未配置；缺失时 W1/W2/W3 fail-closed，不发模型请求。
         # W1 审议窗（plan §2）：固定 UTC 每 4 小时一次，共 6 次/日；不叠加旧 session 窗口。
         windows:
           - { id: w1-00, at: '00:00Z' }
@@ -123,7 +127,6 @@
           - { id: w1-20, at: '20:00Z' }
         windowScanMs: 60000
         wakeTimeoutMs: 300000
-        deskCwd: /workspace
         heartbeatMs: 15000
 
     # 预测市场事件源（plan §4.4）：**只读、永不交易**；默认关闭，打开才会打网络
@@ -142,15 +145,6 @@
         probJumpCooldownMs: 900000      # 官方下限 15min，配置自检会强制
         volumeSpikeMultiple: 5
         signalTtlMs: 3600000
-
-    - id: trade-tools-desk
-      name: dsh-trader/plugins/tools-desk
-
-    - id: trade-tools-research
-      name: dsh-trader/plugins/tools-research
-
-    - id: trade-tools-risk
-      name: dsh-trader/plugins/tools-risk
 
     - id: trade-commands
       name: dsh-trader/plugins/commands

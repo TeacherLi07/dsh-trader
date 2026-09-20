@@ -1840,3 +1840,25 @@ agent 工具、机械执行、撤单与迟到成交保护共享按 `DecisionJour
 
 验证只覆盖本地确定性与合成 HTX adapter，不等于真实 HTX 账户验收；系统仍为 `paper`。进入 R6 前仍必须完成真实
 “非空持仓 + 算法保护单” merged 对账和 R5 真实模型经济验收。
+
+## 20. 2026-09-20：R3/R4 收敛与二次安全审查
+
+旧 JudgmentPack、多分析师、desk session 和工具编排链已从运行包删除。生产判断只从冻结的 R2
+DecisionContext 进入 single/critique DecisionEnvelope；身份、context hash、runId、计划身份和风险比例由代码绑定。
+开仓只使用 `configuredRiskPct × riskFraction`，`riskPct` 不再是模型可写字段。运行时在模型调用前作预算准入，记录阶段 usage/成本；
+stub 验收只证明接口、记账和幂等，不证明真实模型质量。
+
+R4 将规则/DSL uncovered 与 PM novelty 接入同一持久队列。触发尝试数、退避时间、租用时刻、错误、TTL 均落库；
+进程恢复时重新排队但不会超过最大尝试次数。队列处理再次检查 W2/W3 额度与日预算，事件过期会在模型调用、计划保存和
+即时动作边界阻止旧触发执行。无法求值的 plan invalidation 先冻结标的；旧 invalidation queue 行也只走 P0 freeze，不退回模型。
+
+Luna Max 复核指出，“存在一条 market 路径”不足以证明 PM 信号不是开仓唯一理由：路径只能证明事实被引用，不能证明语义支持。
+因此目前所有 PM-triggered run 均被资格闸降为 `decision_only`，允许复核/减险但不允许新增敞口；R5 如要放开，必须先定义并实测
+可复算的独立场内 entry gate，而不是以 claim 数量或自由文本说明替代。
+
+另一个执行边界是保护编辑的可证明性：`set_stop` 只可在实时价格有效且当前无远端 stop 时添加初始保护，不能走非原子路径替换已有算法单；
+`set_target`、`set_trailing`、`cancel_all` 在 `decision_only` 返回 REVIEW，除非各自动作的保护状态校验有证据。对账/持仓状态未知时不因动作名推断“减险”。
+
+生产 `dailyBudgetUsd` 仍有意未配置，所以 W1/W2/W3 不发真实模型请求。R3/R4 工程 stub 输出分别见
+[R3](../dsh-trader/docs/r3-decision-envelope-2026-09-20.md) 与 [R4](../dsh-trader/docs/r4-trigger-worker-2026-09-20.md)；
+它们不替代 R5 真实模型回放、forward-paper 和经济验收。

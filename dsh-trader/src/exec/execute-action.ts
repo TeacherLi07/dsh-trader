@@ -34,7 +34,7 @@ export interface ExecuteActionArgs {
   readonly journal: DecisionJournal
   readonly broker: Broker
   readonly clock: Clock
-  readonly plan: PlanCard
+  readonly plan: Pick<PlanCard, 'planId' | 'runId'>
   readonly conditionId: string
   readonly action: PlanAction
   readonly symbol: string
@@ -42,10 +42,12 @@ export interface ExecuteActionArgs {
   readonly timeframe?: string
   /** 计划卡匹配所对应 bar 的 openTime；它是幂等根的一部分。 */
   readonly barTs: number
-  readonly referencePrice: number
+  readonly referencePrice?: number
+  /** W2/W3 事件过期时间；锁内与私有快照读取后都复核，禁止旧触发执行新订单。 */
+  readonly actionDeadlineAt?: number
   readonly atr: number | null
-  readonly account: AccountSnapshot
-  readonly position: PositionSnapshot | undefined
+  readonly account?: AccountSnapshot
+  readonly position?: PositionSnapshot
   readonly riskPct: number
   readonly mode: RunMode
   readonly limits: RiskLimits | null
@@ -86,7 +88,7 @@ export function protectiveClientOrderId(planId: string, conditionId: string, bar
   return numericClientOrderId(`pco:${planId}:${conditionId}:${barTs}`)
 }
 
-function actionClientOrderId(plan: PlanCard, conditionId: string, barTs: number, action: PlanAction): string | undefined {
+function actionClientOrderId(plan: Pick<PlanCard, 'planId'>, conditionId: string, barTs: number, action: PlanAction): string | undefined {
   if (action.action === 'open' || action.action === 'reduce' || action.action === 'close') {
     return primaryClientOrderId(plan.planId, conditionId, barTs)
   }
@@ -152,6 +154,9 @@ export function executeAction(args: ExecuteActionArgs): Promise<ExecuteActionRes
 
 async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteActionResult> {
   const now = args.clock.now()
+  if (args.actionDeadlineAt !== undefined && (!Number.isFinite(args.actionDeadlineAt) || args.actionDeadlineAt < 0)) {
+    throw new Error(`actionDeadlineAt 非法：${String(args.actionDeadlineAt)}`)
+  }
   const decisionId = `dec:${args.plan.planId}:${args.conditionId}:${args.symbol}:${args.barTs}`
   const clientOrderId = primaryClientOrderId(args.plan.planId, args.conditionId, args.barTs)
   const contextHash =
@@ -197,6 +202,16 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
     })
   }
 
+  const denyExpired = (): ExecuteActionResult => {
+    const reason = '触发器已过期，拒绝执行其即时动作'
+    record(false, { rationale: reason })
+    auditDenied(args, decisionId, reason, now)
+    return { executed: false, denied: true, reason, decisionId }
+  }
+  const actionExpired = (): boolean => args.actionDeadlineAt !== undefined && args.clock.now() >= args.actionDeadlineAt
+
+  if (actionExpired()) return denyExpired()
+
   // 意图唯一键是跨进程的第二道保险；先短路才能让重试不触发 fake/真实 broker。
   const knownClientOrderId = actionClientOrderId(args.plan, args.conditionId, args.barTs, action)
   if (knownClientOrderId !== undefined && args.alreadyIntended(knownClientOrderId)) {
@@ -206,16 +221,21 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
   // 机械执行也会与 agent 工具争用同一账户；不能在锁内继续使用调用方进锁前读到的旧快照。
   let currentAccount = args.account
   let currentPosition = args.position
-  if (action.action === 'open') {
+  const needsPosition = ['open', 'reduce', 'close', 'set_stop', 'set_target', 'set_trailing'].includes(action.action)
+  const needsAccount = ['open', 'reduce', 'close'].includes(action.action)
+  if (needsPosition || needsAccount) {
     try {
-      currentAccount = await args.broker.getAccount()
-      currentPosition = (await args.broker.getPositions()).find((position) => position.symbol === args.symbol)
+      if (needsAccount) currentAccount = await args.broker.getAccount()
+      if (needsPosition) currentPosition = (await args.broker.getPositions()).find((position) => position.symbol === args.symbol)
     } catch (error) {
-      const reason = `开仓前无法重取账户/持仓：${String(error)}`
+      const reason = `动作前无法重取账户/持仓：${String(error)}`
       record(false, { rationale: reason })
       auditDenied(args, decisionId, reason, now)
       return { executed: false, denied: true, reason, decisionId }
     }
+  }
+  if (actionExpired()) return denyExpired()
+  if (action.action === 'open') {
     const requestedSide = (action as OpenAction).side === 'long' ? 1 : -1
     if (currentPosition !== undefined && currentPosition.qty !== 0 && Math.sign(currentPosition.qty) !== requestedSide) {
       const reason = '已有反向持仓；open 不允许隐式反手，请先 reduce/close'
@@ -240,6 +260,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
     return { executed: true, denied: false, decisionId }
   }
   if (action.action === 'cancel_all') {
+    if (actionExpired()) return denyExpired()
     const scope = action.scope === 'all' ? undefined : args.symbol
     // 第一遍只撤普通单；保护单只有在交易所确认目标范围为空仓后才允许撤。
     try {
@@ -269,6 +290,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       position.qty !== 0 && (scope === undefined || position.symbol === scope),
     )
     if (protectedPositions.length === 0) {
+      if (actionExpired()) return denyExpired()
       try {
         await args.broker.cancelAll(scope, { includeProtection: true })
       } catch (error) {
@@ -288,9 +310,30 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
     return { executed: true, denied: false, decisionId }
   }
   if (action.action === 'set_stop' || action.action === 'set_target' || action.action === 'set_trailing') {
-    if (args.position === undefined || args.position.qty === 0) {
+    if (actionExpired()) return denyExpired()
+    if (currentPosition === undefined || !Number.isFinite(currentPosition.qty) || currentPosition.qty === 0) {
       record(false, { rationale: '无持仓，无法挂保护单' })
       return { executed: false, denied: true, reason: '无持仓', decisionId }
+    }
+    if (action.action === 'set_stop') {
+      const proposed = (action as LevelAction).price
+      const reference = args.referencePrice
+      const currentStop = currentPosition.protectedStopPrice
+      if (currentStop !== undefined) {
+        const reason = '当前已有远端止损；此执行路径不支持原子替换，拒绝重复挂保护单'
+        record(false, { rationale: reason })
+        auditDenied(args, decisionId, reason, now)
+        return { executed: false, denied: true, reason, decisionId }
+      }
+      const safeInitialStop = Number.isFinite(proposed) && proposed > 0 &&
+        reference !== undefined && Number.isFinite(reference) && reference > 0 &&
+        (currentPosition.qty > 0 ? proposed < reference : proposed > reference)
+      if (!safeInitialStop) {
+        const reason = 'set_stop 只能在无远端止损时基于新鲜价格添加初始保护；无法证明减险时拒绝'
+        record(false, { rationale: reason })
+        auditDenied(args, decisionId, reason, now)
+        return { executed: false, denied: true, reason, decisionId }
+      }
     }
     const protective =
       action.action === 'set_stop'
@@ -322,8 +365,8 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       symbol: args.symbol,
       state: 'created',
       type: 'protective',
-      side: args.position.qty > 0 ? 'sell' : 'buy',
-      qty: Math.abs(args.position.qty),
+      side: currentPosition.qty > 0 ? 'sell' : 'buy',
+      qty: Math.abs(currentPosition.qty),
       reduceOnly: true,
       createdAt: now,
         stopPrice: action.action === 'set_stop' ? (action as LevelAction).price : undefined,
@@ -343,8 +386,8 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       {
         clientOrderId: protectiveClientId,
         symbol: args.symbol,
-        qty: Math.abs(args.position.qty),
-        side: args.position.qty > 0 ? 'sell' : 'buy',
+        qty: Math.abs(currentPosition.qty),
+        side: currentPosition.qty > 0 ? 'sell' : 'buy',
       },
       ack,
       now,
@@ -363,19 +406,37 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
 
   if (action.action === 'open') {
     const open = action as OpenAction
+    const riskFraction = open.riskFraction ?? 1
+    if (!Number.isFinite(riskFraction) || riskFraction <= 0 || riskFraction > 1) {
+      const reason = 'riskFraction 必须在 (0,1] 内；不允许超过配置风险'
+      record(false, { rationale: reason })
+      auditDenied(args, decisionId, reason, now)
+      return { executed: false, denied: true, reason, decisionId }
+    }
     if (open.method === 'limit' && args.mode !== 'paper') {
       record(false, { rationale: '增加敞口的限价单在成交监控接入前禁止提交' })
       return { executed: false, denied: true, reason: '增加敞口的限价单在成交监控接入前禁止提交', decisionId }
     }
     const entry = args.referencePrice
+    if (entry === undefined || !Number.isFinite(entry) || entry <= 0) {
+      const reason = '开仓缺少新鲜的正数执行价格'
+      record(false, { rationale: reason })
+      return { executed: false, denied: true, reason, decisionId }
+    }
     const derivedStop = stopPriceFor(entry, open.side, open.stop, args.atr)
     if (derivedStop === undefined) {
       record(false, { rationale: '无法推导止损价（ATR 暖机中或方法缺失）' })
       return { executed: false, denied: true, reason: '无法推导止损价', decisionId }
     }
+    if (currentAccount === undefined) {
+      const reason = '开仓缺少可核验账户快照'
+      record(false, { rationale: reason })
+      auditDenied(args, decisionId, reason, now)
+      return { executed: false, denied: true, reason, decisionId }
+    }
     const sizing = computeSize({
       equityQuote: currentAccount.equityQuote,
-      riskPct: open.riskPct ?? args.riskPct,
+      riskPct: args.riskPct * riskFraction,
       entryPrice: entry,
       stopPrice: derivedStop,
       ...(args.limits === null ? {} : { maxNotionalUsd: args.limits.perOrderCapUsd }),
@@ -410,13 +471,19 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
     }
   } else if (action.action === 'reduce' || action.action === 'close') {
-    const position = args.position
+    const position = currentPosition
     if (position === undefined || position.qty === 0) {
       record(false, { rationale: '无持仓可减/可平' })
       return { executed: false, denied: true, reason: '无持仓', decisionId }
     }
     const fraction = action.action === 'close' ? 1 : (action as ReduceAction).fraction
     const qty = Math.abs(position.qty) * fraction
+    const referencePrice = args.referencePrice ?? position.avgPrice
+    if (!Number.isFinite(referencePrice) || referencePrice <= 0) {
+      const reason = '减仓缺少可核验的正数估值价格'
+      record(false, { rationale: reason })
+      return { executed: false, denied: true, reason, decisionId }
+    }
     sizeQty = qty
     intent = {
       intentId: clientOrderId,
@@ -426,7 +493,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       type: action.action === 'reduce' ? ((action as ReduceAction).method ?? 'market') : 'market',
       side: position.qty > 0 ? 'sell' : 'buy',
       qty,
-      notionalUsd: qty * args.referencePrice,
+      notionalUsd: qty * referencePrice,
       reduceOnly: true,
     }
   }
@@ -434,6 +501,15 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
   if (intent === undefined) {
     record(false, { rationale: `未实现的动作：${action.action}` })
     return { executed: false, denied: true, reason: `未实现的动作：${action.action}`, decisionId }
+  }
+
+  if (actionExpired()) return denyExpired()
+
+  if (currentAccount === undefined) {
+    const reason = '订单动作缺少可核验账户快照'
+    record(false, { sizeQty, rationale: reason })
+    auditDenied(args, decisionId, reason, now)
+    return { executed: false, denied: true, reason, decisionId }
   }
 
   // 不传 `tradingWindowOpen`：宏观时间窗**不是硬闸**（plan §12.1 #22），由 news 分析师提示词软判断。
@@ -558,7 +634,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       const expectedDirection = (action as OpenAction).side === 'long' ? 1 : -1
       const deltaConfirmed = expectedDirection * delta > 1e-12
       const inferred = inferPositionAfterFill(
-        args.symbol, currentPosition, intent.side, finalAck.filledQty, finalAck.avgPrice, args.referencePrice,
+        args.symbol, currentPosition, intent.side, finalAck.filledQty, finalAck.avgPrice, args.referencePrice ?? currentPosition?.avgPrice ?? 0,
       )
       const reportedFill = finalAck.filledQty !== undefined && Number.isFinite(finalAck.filledQty) && finalAck.filledQty > 0
       openConfirmed = deltaConfirmed || reportedFill
@@ -599,7 +675,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       }
     } catch {
       const inferred = inferPositionAfterFill(
-        args.symbol, currentPosition, intent.side, finalAck.filledQty, finalAck.avgPrice, args.referencePrice,
+        args.symbol, currentPosition, intent.side, finalAck.filledQty, finalAck.avgPrice, args.referencePrice ?? currentPosition?.avgPrice ?? 0,
       )
       if (finalAck.filledQty !== undefined && Number.isFinite(finalAck.filledQty) && finalAck.filledQty > 0) {
         openConfirmed = true
@@ -652,7 +728,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       position: openPosition,
       stopPrice,
       ...(takeProfit === undefined ? {} : { takeProfitPrice: takeProfit }),
-      referencePrice: args.referencePrice,
+      referencePrice: args.referencePrice ?? openPosition.avgPrice,
       reflectionHorizonMs: args.reflectionHorizonMs,
       freezeSymbol: args.freezeSymbol,
       reason: 'open_fill',

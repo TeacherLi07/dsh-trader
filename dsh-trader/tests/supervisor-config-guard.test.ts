@@ -1,20 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { assertWiredRulesConfig, assertWiredSupervisorConfig } from '../src/supervisor/config-guard.js'
+import { assertWiredRulesConfig } from '../src/supervisor/config-guard.js'
 
 /**
- * 审计 S7 的回归：W2/W3 判断通道未接线时，相关配置必须**启动即拒绝**，
- * 而不是"配了却不生效"（那会让人误以为限流与预算在起作用）。
+ * 回归：rules 不承载第二套窗口或模型路由；数值上限仍由触发治理消费。
  */
-describe('未接线配置守卫（审计 S7）', () => {
+describe('rules 防重复配置守卫', () => {
   it('空 object/array 是 schema 缺省值，不应伪装成已配置', () => {
-    expect(() => assertWiredSupervisorConfig({ l2: {}, l3MinIntervalMs: undefined, dailyBudgetUsd: undefined })).not.toThrow()
     expect(() => assertWiredRulesConfig({ windows: [], judgment: {} })).not.toThrow()
-  })
-
-  it('supervisor：配了 l2 / l3MinIntervalMs / dailyBudgetUsd ⇒ 拒绝启动并点名', () => {
-    expect(() => assertWiredSupervisorConfig({ l2: { provider: 'p', model: 'm' } })).toThrow(/l2/)
-    expect(() => assertWiredSupervisorConfig({ l3MinIntervalMs: 14_400_000 })).toThrow(/l3MinIntervalMs/)
-    expect(() => assertWiredSupervisorConfig({ dailyBudgetUsd: 5 })).toThrow(/dailyBudgetUsd/)
   })
 
   it('rules：windows 与 judgment.provider/model 拒绝；纯数值上限通过', () => {
