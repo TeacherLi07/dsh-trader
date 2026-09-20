@@ -1846,6 +1846,7 @@ agent 工具、机械执行、撤单与迟到成交保护共享按 `DecisionJour
 旧 JudgmentPack、多分析师、desk session 和工具编排链已从运行包删除。生产判断只从冻结的 R2
 DecisionContext 进入 single/critique DecisionEnvelope；身份、context hash、runId、计划身份和风险比例由代码绑定。
 开仓只使用 `configuredRiskPct × riskFraction`，`riskPct` 不再是模型可写字段。运行时在模型调用前作预算准入，记录阶段 usage/成本；
+每次成功/失败调用把渲染请求、可见输出片段、usage、成本与时长写入只追加审计链；序列化前敏感键和值脱敏。
 stub 验收只证明接口、记账和幂等，不证明真实模型质量。
 
 R4 将规则/DSL uncovered 与 PM novelty 接入同一持久队列。触发尝试数、退避时间、租用时刻、错误、TTL 均落库；

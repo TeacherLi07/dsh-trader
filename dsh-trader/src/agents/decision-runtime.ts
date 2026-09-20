@@ -70,6 +70,40 @@ function safeReason(error: unknown): string {
   return raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)
 }
 
+const SENSITIVE_TRACE_KEYS = new Set(['apikey', 'apisecret', 'secret', 'secretkey', 'token', 'accesstoken', 'refreshtoken', 'authorization', 'privatekey'])
+
+/** 原始调用工件保留在 append-only 审计中，但敏感字段在持久化前递归脱敏。 */
+function sanitizeModelTrace(value: unknown, depth = 0): unknown {
+  if (depth > 32) return '[DEPTH_LIMIT]'
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    if (typeof value !== 'string') return value
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try {
+        return JSON.stringify(sanitizeModelTrace(JSON.parse(trimmed) as unknown, depth + 1))
+      } catch { /* 原文可能是部分流片段，继续按 key/value 形式脱敏。 */ }
+    }
+    const jsonFieldsRedacted = value.replace(
+      /((?:["']?)(?:api[_-]?key|api[_-]?secret|secret[_-]?key|secret|token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key)(?:["']?)\s*:\s*)"[^"\\]*(?:\\.[^"\\]*)*"/gi,
+      '$1"[REDACTED]"',
+    )
+    return jsonFieldsRedacted
+      .replace(/((?:api[_-]?key|api[_-]?secret|secret[_-]?key|secret|token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key)\s*[:=]\s*)[^\s,;}\]]+/gi, '$1[REDACTED]')
+      .slice(0, 200_000)
+  }
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (Array.isArray(value)) return value.map((item) => sanitizeModelTrace(item, depth + 1))
+  if (isRecord(value)) {
+    const safe: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      const normalized = key.toLowerCase().replaceAll('-', '').replaceAll('_', '')
+      safe[key] = SENSITIVE_TRACE_KEYS.has(normalized) ? '[REDACTED]' : sanitizeModelTrace(item, depth + 1)
+    }
+    return safe
+  }
+  return String(value).slice(0, 1_000)
+}
+
 function decisionRunId(input: {
   readonly trigger: DecisionTriggerIdentity
   readonly symbol: string
@@ -208,13 +242,17 @@ export async function runDecisionRuntime(input: {
   const ledger = new BudgetLedger(ports.db)
   const prices = new PriceTableStore(ports.db)
   const reservations = new Map<string, { readonly tokens: number; readonly usd: number | null }>()
+  const callStartedAt = new Map<string, number>()
   const runStartedAt = ports.clock.now()
   const priorDurationMs = prior?.durationMs ?? 0
   let cumulativeCostKnown = prior?.costKnown === false ? false : true
 
-  const addLedgerEntry = (call: DecisionModelCall | null, requestHash: string, stage: string, requestChars: number, error?: string): void => {
-    const reserve = reservations.get(requestHash) ?? { tokens: requestChars + config.route.maxTokens, usd: null }
-    const usage = call === null ? null : toLedgerUsage(call.usage)
+  const addLedgerEntry = (call: DecisionModelCall): void => {
+    const reserve = reservations.get(call.requestHash) ?? { tokens: call.requestChars + config.route.maxTokens, usd: null }
+    const startedAt = callStartedAt.get(call.requestHash)
+    callStartedAt.delete(call.requestHash)
+    const callDurationMs = startedAt === undefined ? null : Math.max(0, ports.clock.now() - startedAt)
+    const usage = call.failure === undefined ? toLedgerUsage(call.usage) : null
     const ledgerResult = ledger.record({
       at: ports.clock.now(),
       scopes: [GLOBAL_SCOPE, symbolScope(symbol)],
@@ -239,11 +277,19 @@ export async function runDecisionRuntime(input: {
       }, ports.clock.now())
     }
     journal.appendAudit({
-      actor: 'system', kind: call === null ? 'model_call_failed' : 'model_call_accounted',
+      actor: 'system', kind: call.failure === undefined ? 'model_call_accounted' : 'model_call_failed',
       payload: {
-        runId, trigger: trigger.id, stage, requestHash, requestChars,
+        runId, trigger: trigger.id, stage: call.stage, promptVersion: call.promptVersion,
+        requestHash: call.requestHash, requestChars: call.requestChars,
+        durationMs: callDurationMs,
+        request: sanitizeModelTrace(call.request),
+        responseHash: fingerprint(call.response),
+        response: sanitizeModelTrace({
+          response: call.response,
+          ...(call.output === undefined ? {} : { structuredOutput: call.output }),
+        }),
         tokens: actualTokens, estUsd: ledgerResult.estUsd, costKnown: ledgerResult.costKnown,
-        ...(error === undefined ? {} : { error }),
+        ...(call.failure === undefined ? {} : { error: sanitizeModelTrace(call.failure) }),
         warnings: ledgerResult.warnings,
       },
       ts: ports.clock.now(),
@@ -275,6 +321,7 @@ export async function runDecisionRuntime(input: {
       throw new DecisionBudgetDenied(`模型预算准入拒绝：${result.decision.reason}`)
     }
     reservations.set(request.requestHash, { tokens: result.estimatedTokens, usd: result.estimateUsd })
+    callStartedAt.set(request.requestHash, ports.clock.now())
   }
 
   const stages = await runDecisionWorkflowStages({
@@ -285,8 +332,8 @@ export async function runDecisionRuntime(input: {
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     resume: resumeStages(prior as DecisionRunRecord),
     beforeCall: (request, stage) => beforeCall(request, stage),
-    onModelCall: async (call) => addLedgerEntry(call, call.requestHash, call.stage, call.requestChars),
-    onModelFailure: async (request, stage, error) => addLedgerEntry(null, request.requestHash, stage, request.requestChars, safeReason(error)),
+    onModelCall: async (call) => addLedgerEntry(call),
+    onModelFailure: async (call) => addLedgerEntry(call),
     onStage: async (stage, artifact) => {
       const current = runStore.get(runId)
       if (current?.status !== 'running') throw new Error(`decision run 在 stage 写入前已终结：${runId}`)

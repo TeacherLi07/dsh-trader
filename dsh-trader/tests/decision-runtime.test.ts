@@ -39,6 +39,22 @@ class FakeDecisionModel implements DecisionModel {
   }
 }
 
+class SequencedDecisionModel implements DecisionModel {
+  calls = 0
+  constructor(private readonly outputs: readonly unknown[]) {}
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const output = this.outputs[this.calls]
+    this.calls += 1
+    const tool = options.tools?.[0]
+    yield { type: 'usage', usage: { inputTokens: 200, outputTokens: 60, totalTokens: 260 } } as StreamChunk
+    yield {
+      type: 'block-end', index: 0,
+      block: { type: 'tool-call', id: `sequence-${this.calls}`, name: String(tool?.name), arguments: JSON.stringify(output) },
+    } as unknown as StreamChunk
+    yield { type: 'finish', reason: { kind: 'tool-calls' } } as StreamChunk
+  }
+}
+
 function makeRuntime(db: Database.Database, brokerOverride?: Broker, clockOverride?: ReplayClock) {
   const clock = clockOverride ?? new ReplayClock(AS_OF)
   const journal = new DecisionJournal(db)
@@ -123,6 +139,8 @@ describe('R3 decision runtime', () => {
     const db = new Database(':memory:')
     migrate(db)
     new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    db.prepare('INSERT INTO config_versions (ts, author, params_json) VALUES (?, ?, ?)')
+      .run(AS_OF - 1, 'test', JSON.stringify({ apiSecret: 'MODEL-TRACE-MUST-REDACT' }))
     const runtime = makeRuntime(db)
     const model = new FakeDecisionModel(noTrade)
     try {
@@ -135,6 +153,17 @@ describe('R3 decision runtime', () => {
       expect(new DecisionRunStore(db).get(first.runId)).toMatchObject({
         status: 'completed', costKnown: true, tokensIn: 300, tokensOut: 80,
       })
+      const traceRows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_accounted'").all() as { payload_json: string }[]
+      expect(traceRows).toHaveLength(1)
+      const trace = JSON.parse(traceRows[0]!.payload_json) as {
+        runId: string; durationMs: number | null; request: { requestHash: string; messages: readonly unknown[] }; responseHash: string
+      }
+      expect(trace.runId).toBe(first.runId)
+      expect(trace.request.requestHash).toMatch(/^sha256:/)
+      expect(trace.request.messages.length).toBeGreaterThan(0)
+      expect(trace.responseHash).toMatch(/^sha256:/)
+      expect(trace.durationMs).not.toBeNull()
+      expect(traceRows[0]?.payload_json).not.toContain('MODEL-TRACE-MUST-REDACT')
       expect(runtime.journal.recentDecisions().map((item) => item.action)).toContain('no_trade')
       expect(new BudgetLedger(db).dashboard({ day: '2026-09-20' }).some((row) => row.costKnown && row.estUsd > 0)).toBe(true)
 
@@ -167,6 +196,72 @@ describe('R3 decision runtime', () => {
       expect(result.reason).toContain('未配置正数日预算')
       expect(model.calls).toBe(0)
       expect(new DecisionRunStore(db).get(result.runId)?.status).toBe('review')
+    } finally {
+      db.close()
+    }
+  })
+
+  it('persists sanitized request/partial response traces and unknown cost on provider failure', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const rawSecret = 'MODEL-TRACE-SECRET-DO-NOT-PERSIST'
+    const model: DecisionModel & { calls: number } = {
+      calls: 0,
+      async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+        this.calls += 1
+        yield { type: 'text-delta', index: 0, text: JSON.stringify({ apiSecret: rawSecret }) } as StreamChunk
+        throw new Error(`upstream apiKey=${rawSecret}`)
+      },
+    }
+    try {
+      const result = await runDecisionRuntime({
+        ...runtime, model, config,
+        trigger: { ...trigger, id: 'w1-provider-failure' },
+        symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(result).toMatchObject({ status: 'review', retryable: true })
+      expect(model.calls).toBe(1)
+      expect(new DecisionRunStore(db).get(result.runId)).toMatchObject({ status: 'running', costKnown: false })
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_failed'").all() as { payload_json: string }[]
+      expect(rows).toHaveLength(1)
+      const trace = JSON.parse(rows[0]!.payload_json) as { request?: unknown; response?: unknown; error?: string; durationMs?: number }
+      expect(trace.request).toBeDefined()
+      expect(trace.response).toBeDefined()
+      expect(trace.error).toContain('apiKey=[REDACTED]')
+      expect(trace.durationMs).toBeGreaterThanOrEqual(0)
+      expect(rows[0]?.payload_json).not.toContain(rawSecret)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('retains each repair request/response and cost trace while redacting model-emitted secret-shaped fields', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const secret = 'MODEL-OUTPUT-SECRET-DO-NOT-STORE'
+    const model = new SequencedDecisionModel([{ ...noTrade, apiSecret: secret }, noTrade])
+    try {
+      const result = await runDecisionRuntime({
+        ...runtime, model, config,
+        trigger: { ...trigger, id: 'w1-repair-audit' },
+        symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(result.status).toBe('completed')
+      expect(model.calls).toBe(2)
+      expect(new DecisionRunStore(db).get(result.runId)?.final).toMatchObject({ workflow: { repairCalls: 1 } })
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_accounted' ORDER BY seq").all() as { payload_json: string }[]
+      expect(rows).toHaveLength(2)
+      const traces = rows.map((row) => JSON.parse(row.payload_json) as {
+        requestHash: string; responseHash: string; durationMs: number | null; costKnown: boolean; response: unknown
+      })
+      expect(traces.every((trace) => trace.requestHash.startsWith('sha256:') && trace.responseHash.startsWith('sha256:'))).toBe(true)
+      expect(traces.every((trace) => trace.durationMs !== null && trace.costKnown)).toBe(true)
+      expect(rows.map((row) => row.payload_json).join('\n')).not.toContain(secret)
+      expect(rows[0]?.payload_json).toContain('[REDACTED]')
     } finally {
       db.close()
     }

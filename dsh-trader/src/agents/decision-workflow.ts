@@ -36,8 +36,13 @@ export interface DecisionModelCall {
   readonly promptVersion: string
   readonly requestHash: string
   readonly requestChars: number
+  /** 不含 AbortSignal 的精确 provider 请求材料；用于复核 render/hash 与模型路由。 */
+  readonly request: Readonly<Record<string, unknown>>
+  /** 可见文本/tool-call 的原始流片段与 finish/usage；不保存隐藏 reasoning。 */
+  readonly response: Readonly<Record<string, unknown>>
   readonly output: unknown
   readonly usage: TokenUsage | null
+  readonly failure?: string
 }
 
 export interface DecisionWorkflowStages {
@@ -123,7 +128,7 @@ export class DecisionBudgetDenied extends Error {
 }
 
 class DecisionModelCallFailure extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly call?: DecisionModelCall) {
     super(message)
     this.name = 'DecisionModelCallFailure'
   }
@@ -165,7 +170,7 @@ async function callStructuredTool(input: {
   readonly materials?: readonly unknown[]
   readonly signal?: AbortSignal
   readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
-  readonly onFailure?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage'], error: unknown) => Promise<void>
+  readonly onFailure?: (call: DecisionModelCall) => Promise<void>
 }): Promise<DecisionModelCall> {
   const promptVersion = `${R3_PROMPT_VERSION}:${input.stage}:${input.tool.name}`
   const request = renderDecisionRequest(input.context, {
@@ -188,15 +193,48 @@ async function callStructuredTool(input: {
     temperature: 0,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
+  const providerRequestTrace: Readonly<Record<string, unknown>> = {
+    provider: options.provider,
+    model: options.model,
+    maxTokens: options.maxTokens,
+    temperature: options.temperature,
+    promptVersion,
+    requestHash: request.requestHash,
+    requestChars: request.requestChars,
+    messages: request.messages,
+    tools: options.tools,
+    outputSchema: input.tool,
+  }
   await input.beforeCall?.(request, input.stage)
   let output: unknown
   let usage: TokenUsage | null = null
   let toolCallCount = 0
+  const responseParts: unknown[] = []
+  let finishReason: string | null = null
+  const responseTrace = (): Readonly<Record<string, unknown>> => ({
+    parts: responseParts,
+    finishReason,
+    reportedUsage: usage,
+  })
   try {
     for await (const chunk of input.model.stream(options)) {
-      if (chunk.type === 'usage') usage = chunk.usage
+      if (chunk.type === 'usage') {
+        usage = chunk.usage
+        continue
+      }
+      if (chunk.type === 'text-delta') {
+        responseParts.push({ type: 'text', text: chunk.text })
+        continue
+      }
+      if (chunk.type === 'tool-call-delta') {
+        responseParts.push({ type: 'tool-call-delta', id: chunk.id, name: chunk.name ?? null, argumentsDelta: chunk.argumentsDelta })
+        continue
+      }
       if (chunk.type === 'block-end' && chunk.block.type === 'tool-call') {
         toolCallCount += 1
+        responseParts.push({
+          type: 'tool-call', id: chunk.block.id, name: chunk.block.name, arguments: chunk.block.arguments,
+        })
         if (chunk.block.name !== input.tool.name) {
           output = undefined
           continue
@@ -207,6 +245,7 @@ async function callStructuredTool(input: {
           output = undefined
         }
       }
+      if (chunk.type === 'finish') finishReason = chunk.reason.kind
       if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
         throw new DecisionModelCallFailure(`模型阶段失败：${chunk.reason.kind}`)
       }
@@ -217,12 +256,26 @@ async function callStructuredTool(input: {
       promptVersion,
       requestHash: request.requestHash,
       requestChars: request.requestChars,
+      request: providerRequestTrace,
+      response: responseTrace(),
       output,
       usage,
     }
   } catch (error) {
-    await input.onFailure?.(request, input.stage, error)
-    throw error instanceof DecisionModelCallFailure ? error : new DecisionModelCallFailure(safeModelError(error))
+    const failure = safeModelError(error)
+    const call: DecisionModelCall = {
+      stage: input.stage,
+      promptVersion,
+      requestHash: request.requestHash,
+      requestChars: request.requestChars,
+      request: providerRequestTrace,
+      response: responseTrace(),
+      output,
+      usage: null,
+      failure,
+    }
+    await input.onFailure?.(call)
+    throw new DecisionModelCallFailure(failure, call)
   }
 }
 
@@ -293,7 +346,7 @@ export async function runDecisionWorkflowStages(input: {
   readonly signal?: AbortSignal
   readonly resume?: DecisionWorkflowResume
   readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
-  readonly onModelFailure?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage'], error: unknown) => Promise<void>
+  readonly onModelFailure?: (call: DecisionModelCall) => Promise<void>
   readonly onModelCall?: (call: DecisionModelCall) => Promise<void>
   readonly onStage?: (stage: DecisionWorkflowStageName, artifact: unknown) => Promise<void>
 }): Promise<DecisionWorkflowStages> {
@@ -328,18 +381,24 @@ export async function runDecisionWorkflowStages(input: {
     let materials = stage.materials ?? []
     let instructions = stage.instructions
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const call = await callStructuredTool({
-        model: input.model,
-        route: input.route,
-        context: input.context,
-        stage: stage.modelStage,
-        tool: stage.tool,
-        instructions,
-        materials,
-        ...(input.beforeCall === undefined ? {} : { beforeCall: input.beforeCall }),
-        ...(input.onModelFailure === undefined ? {} : { onFailure: input.onModelFailure }),
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      })
+      let call: DecisionModelCall
+      try {
+        call = await callStructuredTool({
+          model: input.model,
+          route: input.route,
+          context: input.context,
+          stage: stage.modelStage,
+          tool: stage.tool,
+          instructions,
+          materials,
+          ...(input.beforeCall === undefined ? {} : { beforeCall: input.beforeCall }),
+          ...(input.onModelFailure === undefined ? {} : { onFailure: input.onModelFailure }),
+          ...(input.signal === undefined ? {} : { signal: input.signal }),
+        })
+      } catch (error) {
+        if (error instanceof DecisionModelCallFailure && error.call !== undefined) calls.push(error.call)
+        throw error
+      }
       calls.push(call)
       await input.onModelCall?.(call)
       const result = stage.validate(call.output)
