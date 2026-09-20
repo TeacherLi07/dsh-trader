@@ -218,7 +218,7 @@ export class LiveEngine {
       reflectionHorizonMs:
         this.deps.reflectionHorizonMs ?? horizonMsForTimeframe(input.timeframe),
       alreadyIntended: (clientOrderId) => this.deps.journal.hasClientOrderId(clientOrderId),
-      ...(this.deps.frozenSymbols === undefined ? {} : { frozenSymbols: this.deps.frozenSymbols() }),
+      ...(this.deps.frozenSymbols === undefined ? {} : { frozenSymbols: this.deps.frozenSymbols }),
       ...(this.deps.freezeSymbol === undefined ? {} : { freezeSymbol: this.deps.freezeSymbol }),
       ...(this.deps.halt === undefined ? {} : { halt: this.deps.halt }),
     })

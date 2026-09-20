@@ -426,6 +426,17 @@ describe('CcxtBroker', () => {
     expect(ack.clientOrderId).toBe('protect-1')
   })
 
+  it('拒绝用小于已确认累计成交量的远端仓位挂保护', async () => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, notional: 200 }]
+    const broker = makeBroker(exchange)
+
+    await expect(broker.placeProtective({
+      symbol: SYMBOL, clientOrderId: 'undersized-protection', expectedPositionQty: 3, stopLossPrice: 95,
+    })).rejects.toThrow(/小于已确认成交暴露/)
+    expect(exchange.createCalls).toEqual([])
+  })
+
   it('cancels every open order after fetching them', async () => {
     const exchange = new FakeExchange()
     exchange.openOrders = [

@@ -53,7 +53,8 @@ export interface ExecuteActionArgs {
   /** 查询已落库意图；实现必须以 clientOrderId 为唯一键。 */
   readonly alreadyIntended: (clientOrderId: string) => boolean
   /** 冻结标的（plan §4.2/§6.3）；由调用方从组合根取，透传给硬闸。 */
-  readonly frozenSymbols?: ReadonlySet<string>
+  /** 冻结/停机状态用 supplier，在持有执行锁时读取最新值。 */
+  readonly frozenSymbols?: () => ReadonlySet<string>
   /** unknown ack 必须立即冻结标的，不能等下一次进程重启才收敛。 */
   readonly freezeSymbol?: (symbol: string) => void
   /** 计划卡 halt 与人工 halt 共用同一持久化熔断。 */
@@ -441,7 +442,7 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
     limits: args.limits,
     duplicateDecision: args.alreadyIntended(intent.clientOrderId),
     paperVenue: 'paper',
-    ...(args.frozenSymbols === undefined ? {} : { frozenSymbols: args.frozenSymbols }),
+    ...(args.frozenSymbols === undefined ? {} : { frozenSymbols: args.frozenSymbols() }),
   }
   const verdict = validateIntent(intent, currentAccount, policy)
   if (verdict.kind === 'deny') {
@@ -561,10 +562,20 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
       )
       const reportedFill = finalAck.filledQty !== undefined && Number.isFinite(finalAck.filledQty) && finalAck.filledQty > 0
       openConfirmed = deltaConfirmed || reportedFill
-      if (deltaConfirmed && current !== undefined) openPosition = current
-      else if (inferred !== undefined) openPosition = inferred
-      if (reportedFill && !deltaConfirmed) {
-        positionSnapshotMismatch = true
+      if (reportedFill) {
+        const snapshotCoversFill = current !== undefined && inferred !== undefined &&
+          Math.sign(current.qty) === Math.sign(inferred.qty) &&
+          Math.abs(current.qty) + 1e-12 >= Math.abs(inferred.qty)
+        if (snapshotCoversFill) {
+          openPosition = current
+          positionSnapshotMismatch = Math.abs(current.qty - inferred.qty) > 1e-12
+        } else {
+          // 快照可能只反映部分累计成交；delta>0 也不证明它覆盖了整笔成交。
+          openPosition = inferred
+          positionSnapshotMismatch = true
+        }
+      } else if (deltaConfirmed && current !== undefined) openPosition = current
+      if (positionSnapshotMismatch) {
         args.freezeSymbol?.(args.symbol)
         args.journal.appendAudit({
           actor: 'system', kind: 'open_fill_position_snapshot_mismatch',

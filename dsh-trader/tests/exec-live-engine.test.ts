@@ -239,6 +239,51 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     }
   })
 
+  it('排队开仓在等待锁期间进入 halt 后，锁内读到新冻结状态并拒绝下单', async () => {
+    const h = harness()
+    const staleAccount = await h.broker.getAccount()
+    const realGetAccount = h.broker.getAccount.bind(h.broker)
+    const plan = makeCard({
+      planId: 'halt-race-plan', symbol: SYMBOL, createdAt: START,
+      windowEndsAt: START + 10 * HOUR,
+    })
+    let markEntered!: () => void
+    let releaseRead!: () => void
+    const entered = new Promise<void>((resolve) => { markEntered = resolve })
+    const heldRead = new Promise<void>((resolve) => { releaseRead = resolve })
+    h.broker.getAccount = async () => {
+      markEntered()
+      await heldRead
+      return realGetAccount()
+    }
+    let halted = false
+
+    const pending = executeAction({
+      journal: h.journal, broker: h.broker, clock: h.clock, plan, conditionId: 'halt-race',
+      action: {
+        action: 'open', side: 'long', method: 'market',
+        stop: { method: 'structure', level: 90 }, riskPct: 0.01,
+      },
+      symbol: SYMBOL, timeframe: TF, barTs: START + 2, referencePrice: 100, atr: null,
+      account: staleAccount, position: undefined,
+      riskPct: 0.01, mode: 'paper', limits: LIMITS, reflectionHorizonMs: 4 * HOUR,
+      alreadyIntended: (clientOrderId) => h.journal.hasClientOrderId(clientOrderId),
+      frozenSymbols: () => halted ? new Set([SYMBOL]) : new Set(),
+    })
+    try {
+      await entered
+      halted = true
+      releaseRead()
+      const result = await pending
+      expect(result.denied).toBe(true)
+      expect(result.reason).toContain('已被冻结')
+      expect(h.broker.orderCalls).toBe(0)
+    } finally {
+      releaseRead()
+      h.db.close()
+    }
+  })
+
   it('市价单回填超时（acked）时重取持仓并挂保护单，但终态前不登记结算', async () => {
     const h = harness()
     const realPlace = h.broker.placeOrder.bind(h.broker)

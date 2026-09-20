@@ -130,7 +130,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
 | `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
 | HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |
-| HTX 市价单部分/延迟成交 | `filledQty` 是累计张数，`acked/partial` 可能已产生真实仓位；只看终态会漏量/漏保护 | `CcxtBroker` 把张数换回基础币；缺量/均价保持 unknown；开仓余量有界撤销，按远端仓位挂保护，失败则 reduce-only 平仓 |
+| HTX 市价单部分/延迟成交 | `filledQty` 是累计张数，`acked/partial` 可能已产生真实仓位；只看终态会漏量/漏保护；持仓快照也可能暂时少于累计成交 | `CcxtBroker` 把张数换回基础币；快照不足时按真实累计 fill 推导保护覆盖量、冻结标的，保护失败则 reduce-only 平仓；缺量/均价保持 unknown |
 | HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 实测 `client_order_id` 由交易所生成=订单号，**不采用我们传的 id** | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()`；默认 `cancelAll` 保留保护单，只有远端确认空仓后才可显式撤；本地 stop intent 不证明远端仍有保护 |
 | 未成交开仓单也是敞口 | HTX 的 `totalExposureUsd` 只覆盖当前持仓；部分成交市价单的 `price/average` 不是剩余量的滑点上界 | 只用明确限价估值；市价余量或字段不全令 `pendingExposureUsd=null`，新增敞口 fail-closed |
 | 并发开仓共用旧账户快照 | 不同 client id 的两条路径可同时通过总敞口闸门 | agent、机械执行、撤单和迟到保护共用 journal 实例锁；开仓在锁内重读状态、落意图并执行 |

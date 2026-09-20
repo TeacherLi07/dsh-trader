@@ -721,15 +721,30 @@ async function executeTradeOrder(
         )
         const reportedFill = ack.filledQty !== undefined && Number.isFinite(ack.filledQty) && ack.filledQty > 0
         executed = deltaConfirmed || applied.filled || reportedFill
-        if (!deltaConfirmed && reportedFill) {
-          ports.freezeSymbol?.(symbol)
-          ports.journal.appendAudit({
-            actor: 'system', kind: 'open_fill_position_snapshot_mismatch',
-            payload: { decisionId: effectiveDecisionId, symbol, reportedFilledQty: ack.filledQty, observedQty: positionAfter?.qty ?? null, inferredQty: inferred?.qty ?? null },
-            ts: ports.clock.now(),
-          })
+        if (reportedFill) {
+          const observed = positionAfter
+          const snapshotCoversFill = observed !== undefined && inferred !== undefined &&
+            Math.sign(observed.qty) === Math.sign(inferred.qty) &&
+            Math.abs(observed.qty) + 1e-12 >= Math.abs(inferred.qty)
+          if (snapshotCoversFill) {
+            positionAfter = observed
+            if (Math.abs(observed.qty - inferred.qty) > 1e-12) ports.freezeSymbol?.(symbol)
+          } else {
+            positionAfter = inferred
+            ports.freezeSymbol?.(symbol)
+          }
+          if (!snapshotCoversFill || (observed !== undefined && inferred !== undefined &&
+              Math.abs(observed.qty - inferred.qty) > 1e-12)) {
+            ports.freezeSymbol?.(symbol)
+            ports.journal.appendAudit({
+              actor: 'system', kind: 'open_fill_position_snapshot_mismatch',
+              payload: { decisionId: effectiveDecisionId, symbol, reportedFilledQty: ack.filledQty, observedQty: observed?.qty ?? null, inferredQty: inferred?.qty ?? null },
+              ts: ports.clock.now(),
+            })
+          }
+        } else if (!deltaConfirmed || positionAfter === undefined) {
+          positionAfter = inferred
         }
-        if (!deltaConfirmed || positionAfter === undefined) positionAfter = inferred
         if (cancelAttempted && ack.state === 'acked') {
           ports.journal.markIntentAcked(intent.clientOrderId, 'unknown', ack.exchangeOrderId, ports.clock.now())
           ports.freezeSymbol?.(symbol)

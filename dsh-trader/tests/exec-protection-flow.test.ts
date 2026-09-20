@@ -24,6 +24,9 @@ class PartialFillBroker implements Broker {
   readonly canceled: string[] = []
   protected = false
   hidePositionSnapshots = false
+  reportedFillQty = 0.25
+  observedPositionQty = 0.25
+  reduceCalls = 0
   protectiveRequests: ProtectiveRequest[] = []
   cancelAllCalls: { readonly includeProtection: boolean }[] = []
   #ack: OrderAck | undefined
@@ -46,19 +49,36 @@ class PartialFillBroker implements Broker {
   }
 
   async placeOrder(request: OrderRequest): Promise<OrderAck> {
+    if (request.reduceOnly === true) {
+      this.reduceCalls += 1
+      const before = this.#position?.qty ?? 0
+      const reduced = Math.min(Math.abs(before), request.qty)
+      const after = before > 0 ? Math.max(0, before - reduced) : Math.min(0, before + reduced)
+      this.#position = { symbol: request.symbol, qty: after, avgPrice: 100, unrealizedPnlUsd: 0, observedAt: NOW }
+      this.#ack = {
+        intentId: request.intentId, clientOrderId: request.clientOrderId,
+        exchangeOrderId: 'protection-close-exchange-id', symbol: request.symbol,
+        state: 'filled', filledQty: reduced, avgPrice: 100, ts: NOW,
+      }
+      return this.#ack
+    }
     this.#position = {
-      symbol: request.symbol, qty: 0.25, avgPrice: 100, unrealizedPnlUsd: 0,
+      symbol: request.symbol, qty: this.observedPositionQty, avgPrice: 100, unrealizedPnlUsd: 0,
       observedAt: NOW,
     }
     this.#ack = {
       intentId: request.intentId, clientOrderId: request.clientOrderId,
       exchangeOrderId: 'entry-exchange-id', symbol: request.symbol,
-      state: 'acked', filledQty: 0.25, avgPrice: 100, ts: NOW,
+      state: 'acked', filledQty: this.reportedFillQty, avgPrice: 100, ts: NOW,
     }
     return this.#ack
   }
 
   async placeProtective(request: ProtectiveRequest): Promise<OrderAck> {
+    if (request.expectedPositionQty !== undefined &&
+        Math.abs(this.#position?.qty ?? 0) + 1e-12 < Math.abs(request.expectedPositionQty)) {
+      throw new Error('实际持仓小于已确认成交暴露')
+    }
     this.protected = true
     this.protectiveRequests.push(request)
     if (this.#position !== undefined) this.#position = { ...this.#position, protectedStopPrice: request.stopLossPrice }
@@ -148,6 +168,41 @@ describe('executeAction partial-fill safety', () => {
       expect(broker.cancelAllCalls.some((call) => call.includeProtection)).toBe(false)
       expect(frozen.has(SYMBOL)).toBe(true)
       expect(journal.fillsForDecision(result.decisionId)).toMatchObject([{ qty: 0.25, price: 100 }])
+    } finally {
+      db.close()
+    }
+  })
+
+  it('成交快照只反映部分累计量时按 ack 全量保护校验，挂单不足则 reduce-only 降级', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    const journal = new DecisionJournal(db)
+    const broker = new PartialFillBroker()
+    broker.reportedFillQty = 1
+    broker.observedPositionQty = 0.4
+    const clock = new ReplayClock(NOW)
+    const frozen = new Set<string>()
+    try {
+      const result = await executeAction({
+        journal, broker, clock,
+        plan: makeCard({ planId: 'short-position-snapshot-plan', symbol: SYMBOL, createdAt: NOW - 1, windowEndsAt: NOW + 1_000_000 }),
+        conditionId: 'open-with-short-snapshot',
+        action: {
+          action: 'open', side: 'long', method: 'market',
+          stop: { method: 'structure', level: 90 }, riskPct: 0.001,
+        },
+        symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
+        referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
+        riskPct: 0.001, mode: 'live_auto', limits: EXAMPLE_LIMITS,
+        reflectionHorizonMs: 14_400_000, alreadyIntended: () => false,
+        freezeSymbol: (symbol) => frozen.add(symbol),
+      })
+
+      expect(result.executed).toBe(true)
+      expect(broker.protected).toBe(false)
+      expect(broker.reduceCalls).toBe(1)
+      expect((await broker.getPositions()).find((item) => item.symbol === SYMBOL)?.qty).toBe(0)
+      expect(frozen.has(SYMBOL)).toBe(true)
     } finally {
       db.close()
     }
