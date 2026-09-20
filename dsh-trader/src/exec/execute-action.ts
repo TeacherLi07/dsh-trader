@@ -229,12 +229,21 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
   const now = args.clock.now()
   const decisionId = `dec:${args.plan.planId}:${args.conditionId}:${args.symbol}:${args.barTs}`
   const clientOrderId = primaryClientOrderId(args.plan.planId, args.conditionId, args.barTs)
-  const contextHash = fingerprint({
-    planId: args.plan.planId,
-    conditionId: args.conditionId,
-    symbol: args.symbol,
-    barTs: args.barTs,
-  })
+  const contextHash =
+    args.plan.runId === undefined
+      ? fingerprint({
+          planId: args.plan.planId,
+          conditionId: args.conditionId,
+          symbol: args.symbol,
+          barTs: args.barTs,
+        })
+      : args.journal.contextHashForRun(args.plan.runId) ??
+        fingerprint({
+          planId: args.plan.planId,
+          conditionId: args.conditionId,
+          symbol: args.symbol,
+          barTs: args.barTs,
+        })
   const action = args.action
 
   // ★ 决策级幂等：同一 (plan, condition, symbol, barTs) 只要已经落过决策（无论执行成功、
@@ -251,6 +260,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
   ): void => {
     args.journal.recordDecision({
       decisionId,
+      ...(args.plan.runId === undefined ? {} : { runId: args.plan.runId }),
       symbol: args.symbol,
       ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
       planId: args.plan.planId,
@@ -305,6 +315,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
     const inserted = args.journal.recordDecisionAndIntent(
       {
         decisionId,
+        ...(args.plan.runId === undefined ? {} : { runId: args.plan.runId }),
         symbol: args.symbol,
         ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
         planId: args.plan.planId,
@@ -469,6 +480,7 @@ export async function executeAction(args: ExecuteActionArgs): Promise<ExecuteAct
   const inserted = args.journal.recordDecisionAndIntent(
     {
       decisionId,
+      ...(args.plan.runId === undefined ? {} : { runId: args.plan.runId }),
       symbol: args.symbol,
       ...(args.timeframe === undefined ? {} : { timeframe: args.timeframe }),
       planId: args.plan.planId,

@@ -39,10 +39,10 @@ describe('Trade Console cycle read model', () => {
         executed: false,
       })
       db.prepare(
-        `INSERT INTO context_snapshots
-           (ctx_hash, created_at, symbol, part_hashes_json, changed_parts_json, char_counts_json, overflow_json)
+        `INSERT INTO decision_contexts
+           (context_id, context_hash, symbol, primary_timeframe, as_of, canonical_json, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run('ctx:cycle-1', NOW - 100, 'BTC/USDT:USDT', '{"C1":"sha256:one"}', '["C2"]', '{"C1":10}', '[]')
+      ).run('ctx-cycle-1', 'ctx:cycle-1', 'BTC/USDT:USDT', '1h', NOW - 100, '{"contextHash":"ctx:cycle-1"}', NOW - 100)
       db.prepare(
         `INSERT INTO plan_cards
            (plan_id, symbol, version, status, window_ends_at, created_at, card_json, content_hash)

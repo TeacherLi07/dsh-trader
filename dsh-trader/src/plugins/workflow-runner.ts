@@ -14,6 +14,7 @@ import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { WORKFLOW_TOOL_NAME } from '../agents/tool-roster.js'
 import { featureValues } from '../market/context.js'
 import type { FeatureSnapshot } from '../market/features.js'
+import { percentileRank, regimeOf, trendBucket, trendRatio } from '../market/regime.js'
 import { recallLessons } from '../memory/recall.js'
 import { freezeContextPack } from '../agents/pack.js'
 import {
@@ -24,9 +25,12 @@ import {
 } from '../agents/workflow.js'
 import { PROMPT_VERSION } from '../agents/prompts.js'
 import type { JudgmentPack, JudgmentResult } from '../agents/types.js'
+import { freezeDecisionContext, type DecisionContext } from '../agents/decision-context.js'
+import { DecisionContextStore } from '../agents/decision-context-store.js'
+import { DecisionRunStore } from '../agents/decision-run-store.js'
 import type { TradePorts } from '../exec/ports.js'
+import type { AccountSnapshot, OrderAck, PositionSnapshot } from '../exec/broker.js'
 import { canonicalJson, sha256Hex } from '../util/canonical.js'
-import { WorkflowContextStore } from '../supervisor/workflow-context.js'
 
 const WORKFLOW_OUTPUT_SCHEMA = {
   type: 'object',
@@ -174,6 +178,97 @@ export async function buildJudgmentPack(
   })
 }
 
+/**
+ * 当前旧脚本仍返回 JudgmentResult，但持久化根已经统一为 DecisionContext。
+ * 这里把脚本所用的完整 pack 原样放进 context 分区；R3 替换脚本时只替换生产者，
+ * 不再恢复“每个角色各自拼一份上下文”的入口。
+ */
+export function decisionContextFromPack(
+  ports: TradePorts,
+  pack: JudgmentPack,
+): DecisionContext {
+  return freezeDecisionContext({
+    symbol: pack.symbol,
+    primaryTimeframe: '1h',
+    asOf: pack.asOf,
+    sections: {
+      mandate: {
+        asOf: pack.asOf,
+        source: 'trade-config',
+        missing: [],
+        value: {
+          mode: ports.mode,
+          riskPct: ports.riskPct,
+          symbols: ports.symbols,
+          timeframes: ports.timeframes,
+          benchmark: ports.benchmark,
+          limits: ports.limits,
+        },
+      },
+      market: {
+        asOf: pack.asOf,
+        source: 'feature-archive',
+        missing: Object.entries(pack.features)
+          .filter(([, value]) => value === null)
+          .map(([path]) => path),
+        value: {
+          requestedTimeframe: pack.timeframe,
+          features: pack.features,
+          featureFingerprint: pack.featureFingerprint ?? null,
+        },
+      },
+      derivatives: {
+        asOf: pack.asOf,
+        source: 'feature-archive.derivatives',
+        missing: ['funding.rate', 'oi.changePct', 'liq.notional', 'basis.bps']
+          .filter((path) => pack.features[path] === null),
+        value: {
+          fundingRate: pack.features['funding.rate'],
+          oiChangePct: pack.features['oi.changePct'],
+          liqNotional: pack.features['liq.notional'],
+          basisBps: pack.features['basis.bps'],
+        },
+      },
+      benchmark: {
+        asOf: pack.asOf,
+        source: 'trade-config',
+        missing: ports.benchmark.trim() === '' ? ['benchmark'] : [],
+        value: { symbol: ports.benchmark },
+      },
+      portfolio: {
+        asOf: pack.asOf,
+        source: 'broker.snapshot',
+        missing: [],
+        value: pack.deskState,
+      },
+      activePlan: {
+        asOf: pack.asOf,
+        source: 'plan-store',
+        missing: pack.plan === undefined ? ['activePlan'] : [],
+        value: pack.plan ?? null,
+      },
+      history: {
+        asOf: pack.asOf,
+        source: 'decision-journal',
+        missing: [],
+        value: { lessonIds: pack.lessons.map((lesson) => lesson.lessonId) },
+      },
+      lessons: {
+        asOf: pack.asOf,
+        source: 'decision-journal',
+        missing: [],
+        value: pack.lessons,
+      },
+      predictions: {
+        asOf: null,
+        source: 'predictions.disabled',
+        missing: ['predictions.disabled'],
+        value: null,
+      },
+    },
+  })
+}
+
 function assertJudgmentResult(value: unknown, pack: JudgmentPack): asserts value is JudgmentResult {
   if (!isRecord(value)) throw new Error('workflow 返回值不是对象')
   if (value.packId !== pack.packId || value.contextHash !== pack.contextHash) {
@@ -198,9 +293,8 @@ export interface WorkflowRunnerDeps {
 }
 
 export type JudgmentWorkflowArtifact = JudgmentResult & {
-  /** 明文只回给当前 desk；SQLite 只保存 contextTokenHash。 */
-  readonly contextToken?: string
-  readonly contextTokenHash?: string
+  /** 所有后续决策/计划卡都通过这个持久 run 根归因。 */
+  readonly runId?: string
 }
 
 /** 运行固定 workflow；单测可以注入 fake subagents，不需要启动完整 DSH。 */
@@ -211,62 +305,92 @@ export async function runJudgmentWorkflow(
   deps: WorkflowRunnerDeps,
 ): Promise<JudgmentWorkflowArtifact> {
   const pack = await buildJudgmentPack(ports, symbol, timeframe)
+  const dbLike = ports.db as unknown as { prepare?: unknown }
+  const context = decisionContextFromPack(ports, pack)
+  const runId = `run-${pack.packId}`
+  const contextStore = typeof dbLike.prepare === 'function' ? new DecisionContextStore(ports.db) : undefined
+  const runStore = typeof dbLike.prepare === 'function' ? new DecisionRunStore(ports.db) : undefined
+  contextStore?.record(context, { createdAt: pack.asOf })
+  runStore?.start({
+    runId,
+    contextId: context.contextId,
+    contextHash: context.contextHash,
+    symbol: context.symbol,
+    primaryTimeframe: context.primaryTimeframe,
+    triggerSource: 'workflow',
+    modelVersion: 'subagent-route',
+    promptVersion: PROMPT_VERSION,
+    createdAt: context.asOf,
+  })
   const script = buildJudgmentWorkflowScript()
   let childCount = 0
-  const result = await executeWorkflowScript(script, buildWorkflowArgs(pack), {
-    agent: async (prompt, options) => {
-      childCount += 1
-      let run: SubagentRun | undefined
-      try {
-        run = await deps.subagents.start('spawn', {
-          label: options?.label,
-          prompt: [{ type: 'text', text: prompt }],
-          parent: deps.parent,
-          signal: deps.signal,
-          outputSchema: options?.schema as ObjectJsonSchema,
-          maxDepth: 1,
-          // DSH 明确说明 child 不继承 parent restriction；在这里重新建立零工具面。
-          toolFilter: { allow: [] },
-        })
-        const settled = await run.result
-        return settled.stopReason === 'completed' ? settled.structured ?? null : null
-      } finally {
-        // start 成功后所有权已转给调用方，即使模型失败也必须收敛 child。
-        if (run !== undefined) await run.dispose()
-      }
-    },
-  })
+  let result: unknown
+  try {
+    result = await executeWorkflowScript(script, buildWorkflowArgs(pack), {
+      agent: async (prompt, options) => {
+        childCount += 1
+        let run: SubagentRun | undefined
+        try {
+          run = await deps.subagents.start('spawn', {
+            label: options?.label,
+            prompt: [{ type: 'text', text: prompt }],
+            parent: deps.parent,
+            signal: deps.signal,
+            outputSchema: options?.schema as ObjectJsonSchema,
+            maxDepth: 1,
+            // DSH 明确说明 child 不继承 parent restriction；在这里重新建立零工具面。
+            toolFilter: { allow: [] },
+          })
+          const settled = await run.result
+          return settled.stopReason === 'completed' ? settled.structured ?? null : null
+        } finally {
+          // start 成功后所有权已转给调用方，即使模型失败也必须收敛 child。
+          if (run !== undefined) await run.dispose()
+        }
+      },
+    })
+  } catch (error) {
+    runStore?.update(
+      runId,
+      { status: 'failed', final: { error: String(error) }, finishedAt: ports.clock.now() },
+      ports.clock.now(),
+    )
+    throw error
+  }
 
-  assertJudgmentResult(result, pack)
-  const resultHash = `sha256:${sha256Hex(canonicalJson(result))}`
-  // workflow-runner 的 fake ports 在纯单测中可能没有真实 DB；生产 TradePorts 一定有
-  // better-sqlite3 connection。只有校验成功后才签发 token，失败路径不会留下可用上下文。
-  const dbLike = ports.db as unknown as { prepare?: unknown }
-  const issued = typeof dbLike.prepare === 'function'
-    ? new WorkflowContextStore(ports.db).issue({
-        packId: pack.packId,
-        contextHash: pack.contextHash,
-        resultHash,
-        symbol: pack.symbol,
-        timeframe: pack.timeframe,
-        scriptVersion: WORKFLOW_SCRIPT_VERSION,
-        promptVersion: PROMPT_VERSION,
-        createdAt: pack.asOf,
-      })
-    : undefined
+  try {
+    assertJudgmentResult(result, pack)
+  } catch (error) {
+    runStore?.update(
+      runId,
+      { status: 'failed', final: { error: String(error) }, finishedAt: ports.clock.now() },
+      ports.clock.now(),
+    )
+    throw error
+  }
+  const judged = result as JudgmentResult
+  const resultHash = `sha256:${sha256Hex(canonicalJson(judged))}`
+  runStore?.update(runId, {
+    status: 'completed',
+    draft: { packId: pack.packId, reports: judged.reports },
+    critique: { risk: judged.risk, evidenceIssues: judged.evidenceIssues },
+    final: judged,
+    eligibility: { state: 'pending-r3', resultHash },
+    finishedAt: ports.clock.now(),
+  }, ports.clock.now())
   ports.journal.appendAudit({
     actor: 'system',
     kind: 'judgment_workflow_result',
     payload: {
       packId: pack.packId,
       contextHash: pack.contextHash,
+      runId,
       resultHash,
-      contextTokenHash: issued?.record.tokenHash ?? null,
       scriptVersion: WORKFLOW_SCRIPT_VERSION,
       promptVersion: PROMPT_VERSION,
       agentsCount: childCount,
-      evidenceIssueCount: result.evidenceIssues.length,
-      result,
+      evidenceIssueCount: judged.evidenceIssues.length,
+      result: judged,
       pack: {
         symbol: pack.symbol,
         timeframe: pack.timeframe,
@@ -278,9 +402,7 @@ export async function runJudgmentWorkflow(
     },
     ts: pack.asOf,
   })
-  return issued === undefined
-    ? result
-    : { ...result, contextToken: issued.token, contextTokenHash: issued.record.tokenHash }
+  return typeof dbLike.prepare === 'function' ? { ...judged, runId } : judged
 }
 
 export function createWorkflowTool(

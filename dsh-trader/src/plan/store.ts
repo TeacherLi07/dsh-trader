@@ -88,8 +88,8 @@ export class PlanStore {
 
     const insert = this.#statements.get(
       `INSERT INTO plan_cards
-         (plan_id, symbol, version, status, window_ends_at, created_at, card_json, content_hash)
-       VALUES (@planId, @symbol, @version, 'active', @windowEndsAt, @createdAt, @json, @contentHash)`,
+         (plan_id, run_id, symbol, version, status, window_ends_at, created_at, card_json, content_hash)
+       VALUES (@planId, @runId, @symbol, @version, 'active', @windowEndsAt, @createdAt, @json, @contentHash)`,
     )
     const retire = this.#statements.get('UPDATE plan_cards SET status = ? WHERE plan_id = ?')
 
@@ -97,6 +97,7 @@ export class PlanStore {
       if (replaced !== undefined) retire.run(nextStatus, replaced)
       insert.run({
         planId: card.planId,
+        runId: card.runId ?? null,
         symbol: card.symbol,
         version,
         windowEndsAt: card.windowEndsAt,

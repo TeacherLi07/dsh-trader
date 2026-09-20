@@ -41,11 +41,11 @@ describe('schema (plan §4.1 invariants)', () => {
       'bars',
       'bar_processing',
       'features',
-      'bar_processing',
+      'decision_contexts',
+      'decision_runs',
       'plan_cards',
       'decisions',
       'outcomes',
-      'context_snapshots',
       'order_intents',
       'orders',
       'fills',
@@ -58,7 +58,6 @@ describe('schema (plan §4.1 invariants)', () => {
       'heartbeat',
       'supervisor_window_cursors',
       'supervisor_windows',
-      'workflow_contexts',
       'pm_markets',
       'pm_series',
       'pm_quotes',
@@ -182,6 +181,39 @@ describe('schema (plan §4.1 invariants)', () => {
     // 同一时刻的"桶观测"与"精确 tick"可以并存（resolution_seconds=0 表示精确 tick）
     insert(1_700_000_000_000, 3600)
     expect(() => insert(1_700_000_000_000, 0)).toThrow()
+  })
+
+  it('v5 binds decisions to a decision run when a run is supplied', () => {
+    db.prepare(
+      `INSERT INTO decision_contexts
+         (context_id, context_hash, symbol, primary_timeframe, as_of, canonical_json, created_at)
+       VALUES ('ctx-1', 'sha256:ctx-1', 'BTC/USDT:USDT', '1h', 1, '{}', 1)`,
+    ).run()
+    db.prepare(
+      `INSERT INTO decision_runs
+         (run_id, context_id, context_hash, symbol, primary_timeframe, trigger_source, status, created_at, updated_at)
+       VALUES ('run-1', 'ctx-1', 'sha256:ctx-1', 'BTC/USDT:USDT', '1h', 'W1', 'running', 1, 1)`,
+    ).run()
+    db.prepare(
+      `INSERT INTO decisions (decision_id, content_hash, run_id, symbol, decided_at, context_hash, action)
+       VALUES ('d-run', 'h-run', 'run-1', 'BTC/USDT:USDT', 1, 'sha256:ctx-1', 'no_trade')`,
+    ).run()
+    expect(() => db.prepare(
+      `INSERT INTO decisions (decision_id, content_hash, run_id, symbol, decided_at, context_hash, action)
+       VALUES ('d-bad-run', 'h-bad-run', 'missing-run', 'BTC/USDT:USDT', 1, 'sha256:ctx-1', 'no_trade')`,
+    ).run()).toThrow()
+  })
+
+  it('removes obsolete context snapshot/token tables during v5 migration', () => {
+    db.exec(`
+      CREATE TABLE context_snapshots (ctx_hash TEXT PRIMARY KEY);
+      CREATE TABLE workflow_contexts (token_hash TEXT PRIMARY KEY);
+      PRAGMA user_version = 4;
+    `)
+    migrate(db)
+    expect(names('table')).not.toContain('context_snapshots')
+    expect(names('table')).not.toContain('workflow_contexts')
+    expect(names('table')).toEqual(expect.arrayContaining(['decision_contexts', 'decision_runs']))
   })
 
   it('constrains pm_watches: unique alias, idempotent content hash, mandatory expiry, closed enums', () => {

@@ -13,10 +13,11 @@
 
 /**
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
- * migration 链，才能继续被 runtime 使用。v4 把历史上漏迁的触发/价目/预算表以及
- * W1/workflow 的持久状态正式纳入版本边界。
+ * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
+ * 正式纳入版本边界；旧 context snapshot/token 只在迁移入口中一次性清理，不再作为判断
+ * 或执行的兼容路径。
  */
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -61,8 +62,55 @@ CREATE TABLE IF NOT EXISTS bar_processing (
 CREATE INDEX IF NOT EXISTS bar_processing_lookup
   ON bar_processing (symbol, timeframe, open_time);
 
+-- 一次判断的事实根：canonical_json 保存模型实际可见的完整上下文；大对象只有在不可变
+-- 外部存储已登记时才允许用 content_ref，二者必须恰有一个，避免只存一个无法复算的 hash。
+CREATE TABLE IF NOT EXISTS decision_contexts (
+  context_id TEXT PRIMARY KEY,
+  context_hash TEXT NOT NULL UNIQUE,
+  symbol TEXT NOT NULL,
+  primary_timeframe TEXT NOT NULL CHECK (primary_timeframe = '1h'),
+  as_of INTEGER NOT NULL,
+  canonical_json TEXT,
+  content_ref TEXT,
+  created_at INTEGER NOT NULL,
+  CHECK ((canonical_json IS NULL) <> (content_ref IS NULL)),
+  UNIQUE (context_id, context_hash)
+);
+
+-- 一轮固定的 Strategist→RiskCritic→Strategist 判断根。中间工件与成本都挂在这里，
+-- 不再用一次性 token 把“曾经跑过”与“实际跑了什么”混成两个无法对拍的状态。
+CREATE TABLE IF NOT EXISTS decision_runs (
+  run_id TEXT PRIMARY KEY,
+  context_id TEXT NOT NULL,
+  context_hash TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  primary_timeframe TEXT NOT NULL CHECK (primary_timeframe = '1h'),
+  trigger_source TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'review', 'failed')),
+  draft_json TEXT,
+  critique_json TEXT,
+  final_json TEXT,
+  eligibility_json TEXT,
+  model_version TEXT,
+  prompt_version TEXT,
+  tokens_in INTEGER,
+  tokens_out INTEGER,
+  tokens_cached INTEGER,
+  cost_usd REAL,
+  cost_known INTEGER CHECK (cost_known IN (0, 1) OR cost_known IS NULL),
+  duration_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER,
+  FOREIGN KEY (context_id, context_hash)
+    REFERENCES decision_contexts (context_id, context_hash)
+);
+CREATE INDEX IF NOT EXISTS decision_runs_context_lookup
+  ON decision_runs (context_hash, symbol, status, created_at);
+
 CREATE TABLE IF NOT EXISTS plan_cards (
   plan_id TEXT PRIMARY KEY,
+  run_id TEXT REFERENCES decision_runs (run_id),
   symbol TEXT NOT NULL,
   version INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('active', 'expired', 'superseded')),
@@ -80,6 +128,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS plan_one_active_per_symbol
 CREATE TABLE IF NOT EXISTS decisions (
   decision_id TEXT PRIMARY KEY,
   content_hash TEXT NOT NULL UNIQUE,
+  run_id TEXT REFERENCES decision_runs (run_id),
   symbol TEXT NOT NULL,
   -- 决策所属时间框：结算要按它取 bar 窗口。没有它就无法在多 tf 下正确结算
   --（旧实现只有一个全局 tf，会把 1h 决策用 4h 的窗口结算）。
@@ -125,18 +174,6 @@ CREATE TABLE IF NOT EXISTS outcomes (
   stop_hit INTEGER NOT NULL DEFAULT 0 CHECK (stop_hit IN (0, 1)),
   fees_quote REAL NOT NULL DEFAULT 0,
   evidence_refs_json TEXT NOT NULL
-);
-
--- 上下文组装快照（plan §5.1 / T1.5）：让 ctxHash 可复现、changedParts 可审计
-CREATE TABLE IF NOT EXISTS context_snapshots (
-  ctx_hash TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  symbol TEXT,
-  -- {C1: "sha256:..", C2: ...}；C6 永不入 context，因此不出现
-  part_hashes_json TEXT NOT NULL,
-  changed_parts_json TEXT NOT NULL,
-  char_counts_json TEXT NOT NULL,
-  overflow_json TEXT NOT NULL DEFAULT '[]'
 );
 
 -- 唯一闸门：只有通过硬闸的意图才会写入这里
@@ -346,23 +383,6 @@ CREATE TABLE IF NOT EXISTS supervisor_windows (
 CREATE INDEX IF NOT EXISTS supervisor_windows_pending
   ON supervisor_windows (state, fire_ts, window_id);
 
--- workflow 成功后才签发的 context token。数据库只存 token hash，不存可复用明文。
-CREATE TABLE IF NOT EXISTS workflow_contexts (
-  token_hash TEXT PRIMARY KEY,
-  pack_id TEXT NOT NULL,
-  context_hash TEXT NOT NULL,
-  result_hash TEXT NOT NULL,
-  symbol TEXT NOT NULL,
-  timeframe TEXT NOT NULL,
-  script_version TEXT NOT NULL,
-  prompt_version TEXT NOT NULL,
-  created_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('active', 'consumed', 'expired'))
-);
-CREATE INDEX IF NOT EXISTS workflow_contexts_lookup
-  ON workflow_contexts (context_hash, symbol, timeframe, state, expires_at);
-
 CREATE TABLE IF NOT EXISTS heartbeat (
   id INTEGER PRIMARY KEY CHECK (id = 1),
   beat_at INTEGER NOT NULL,
@@ -385,6 +405,7 @@ export function migrate(db: SqliteLike): void {
   // user_version 是主路由，但列探测仍保留：旧测试/运维工具可能在 version 已更新后
   // 手工恢复了半旧表形状，启动时仍应 fail-closed 修复而不是等热路径报 no such column。
   if (fromVersion < 4 || needsV4Repair(db)) migrateToV4(db)
+  if (fromVersion < 5 || needsV5Repair(db)) migrateToV5(db)
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
 
@@ -481,6 +502,26 @@ function migrateToV4(db: SqliteLike): void {
   }
 }
 
+/**
+ * v5 把判断上下文从“只存部件 hash”升级为全文根，并移除一次性 workflow token。
+ * 旧表无法还原完整 context，继续保留它反而会让读取方误以为可回放，因此迁移只清理
+ * 旧表；历史审计若需保留，应在升级前由运维导出，而不是在新 runtime 中继续读旧协议。
+ */
+function migrateToV5(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+
+  if (!hasColumn(db, 'decisions', 'run_id')) {
+    db.exec('ALTER TABLE decisions ADD COLUMN run_id TEXT REFERENCES decision_runs (run_id);')
+  }
+  if (!hasColumn(db, 'plan_cards', 'run_id')) {
+    db.exec('ALTER TABLE plan_cards ADD COLUMN run_id TEXT REFERENCES decision_runs (run_id);')
+  }
+
+  // 这两张表只承载已废弃协议的短暂状态，不能出现在 v5 的可运行 schema 中。
+  db.exec('DROP TABLE IF EXISTS workflow_contexts;')
+  db.exec('DROP TABLE IF EXISTS context_snapshots;')
+}
+
 function needsV4Repair(db: SqliteLike): boolean {
   const decisionColumns = [
     'timeframe',
@@ -500,6 +541,10 @@ function needsV4Repair(db: SqliteLike): boolean {
   )
 }
 
+function needsV5Repair(db: SqliteLike): boolean {
+  return !hasColumn(db, 'decisions', 'run_id') || !hasColumn(db, 'plan_cards', 'run_id') || hasTable(db, 'workflow_contexts') || hasTable(db, 'context_snapshots')
+}
+
 function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknown; dflt_value?: unknown }[] {
   if (db.prepare === undefined) return []
   return db.prepare(`PRAGMA table_info(${table})`).all() as {
@@ -511,6 +556,11 @@ function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknow
 
 function hasColumn(db: SqliteLike, table: string, column: string): boolean {
   return tableInfo(db, table).some((row) => row.name === column)
+}
+
+function hasTable(db: SqliteLike, table: string): boolean {
+  if (db.prepare === undefined) return false
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").all(table).length > 0
 }
 
 function needsPriceTableRebuild(db: SqliteLike): boolean {

@@ -37,7 +37,7 @@ import {
   type WatchKind,
   type WatchPurpose,
 } from '../predictions/store.js'
-import { WorkflowContextStore, type WorkflowContextRecord } from '../supervisor/workflow-context.js'
+import { DecisionRunStore, type DecisionRunRecord } from './decision-run-store.js'
 
 export interface ToolPorts {
   readonly db: Database.Database
@@ -182,19 +182,24 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
 
-function requireWorkflowContext(
+function requireDecisionRun(
   args: Readonly<Record<string, unknown>>,
   ports: ToolPorts,
   symbol: string,
   timeframe: string,
-): { readonly token: string; readonly record: WorkflowContextRecord; readonly store: WorkflowContextStore } {
-  const token = requireString(args, 'contextToken')
-  const store = new WorkflowContextStore(ports.db)
-  const record = store.verify(token, ports.clock.now(), { symbol, timeframe })
-  if (record === undefined) {
-    throw new ToolArgumentError('contextToken 无效、已过期、已消费，或与 symbol/timeframe 不匹配；必须先成功运行 trade_workflow_run')
+): { readonly runId: string; readonly record: DecisionRunRecord } {
+  const runId = requireString(args, 'runId')
+  const store = new DecisionRunStore(ports.db)
+  try {
+    // primaryTimeframe 固定为 1h；触发/条件使用的其它 tf 属于 context.market 的切片，
+    // 不能再用“token 的 timeframe”制造第二份上下文根。
+    const record = store.require(runId, { symbol })
+    if (record.status === 'failed') throw new Error('run 已失败')
+    void timeframe
+    return { runId, record }
+  } catch (error) {
+    throw new ToolArgumentError(`runId 无效或未绑定当前 symbol：${(error as Error).message}；必须先成功运行 trade_workflow_run`)
   }
-  return { token, record, store }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -870,7 +875,7 @@ const tradeRecordDecision: ToolDefinition = {
     decisionId: { type: 'string', required: true },
     symbol: { type: 'string', required: true },
     timeframe: { type: 'string', enum: TIMEFRAMES },
-    contextToken: { type: 'string', required: true, description: 'trade_workflow_run 返回的一次性上下文 token' },
+    runId: { type: 'string', required: true, description: 'trade_workflow_run 返回的持久判断 runId' },
     action: { type: 'string', required: true },
     sizeQty: { type: 'number' },
     stopPrice: { type: 'number' },
@@ -893,8 +898,8 @@ const tradeRecordDecision: ToolDefinition = {
     if (ports.timeframes === undefined || !ports.timeframes.includes(timeframe)) {
       throw new ToolArgumentError(`timeframe 不在配置时间框中：${timeframe}`)
     }
-    const workflow = requireWorkflowContext(args, ports, symbol, timeframe)
-    // context hash 只来自已验证 workflow token，模型入参永远不会进入审计根。
+    const workflow = requireDecisionRun(args, ports, symbol, timeframe)
+    // context hash 只来自已验证 decision run，模型入参永远不会进入审计根。
     const contextHash = workflow.record.contextHash
     const sizeQty = optionalNumber(args, 'sizeQty')
     const stopPrice = optionalNumber(args, 'stopPrice')
@@ -903,6 +908,7 @@ const tradeRecordDecision: ToolDefinition = {
     const inserted = ports.db.transaction(() => {
       const saved = ports.journal.recordDecision({
         decisionId,
+        runId: workflow.runId,
         symbol,
         timeframe,
         decidedAt: ports.clock.now(),
@@ -914,7 +920,6 @@ const tradeRecordDecision: ToolDefinition = {
         ...(takeProfit === undefined ? {} : { takeProfit }),
         ...(rationale === undefined ? {} : { rationale }),
       })
-      if (!workflow.store.consume(workflow.token, ports.clock.now())) throw new ToolArgumentError('contextToken 已被消费')
       return saved
     })()
     return { recorded: inserted, decisionId }
@@ -1061,7 +1066,7 @@ const tradePlanCard: ToolDefinition = {
   parameters: {
     symbol: { type: 'string', required: true },
     timeframe: { type: 'string', required: true, enum: TIMEFRAMES },
-    contextToken: { type: 'string', required: true, description: 'trade_workflow_run 返回的一次性上下文 token' },
+    runId: { type: 'string', required: true, description: 'trade_workflow_run 返回的持久判断 runId' },
     windowEndsInHours: { type: 'number', required: true, description: '本卡有效期（小时），到期即失效' },
     cardJson: {
       type: 'string',
@@ -1081,7 +1086,7 @@ const tradePlanCard: ToolDefinition = {
     if (ports.timeframes === undefined || !ports.timeframes.includes(timeframe)) {
       throw new ToolArgumentError(`timeframe 不在配置时间框中：${timeframe}`)
     }
-    const workflow = requireWorkflowContext(args, ports, symbol, timeframe)
+    const workflow = requireDecisionRun(args, ports, symbol, timeframe)
     const windowEndsInHours = requireNumber(args, 'windowEndsInHours')
     if (!(windowEndsInHours > 0) || windowEndsInHours > 24 * 14) {
       throw new ToolArgumentError(`windowEndsInHours 必须在 (0, 336] 内，收到 ${windowEndsInHours}`)
@@ -1099,6 +1104,7 @@ const tradePlanCard: ToolDefinition = {
     // 模型只提供判断内容；身份/时间/哈希一律由代码补齐，避免模型自造幂等根。
     const base = {
       ...parsed,
+      runId: workflow.runId,
       symbol,
       createdAt,
       windowEndsAt,
@@ -1125,7 +1131,6 @@ const tradePlanCard: ToolDefinition = {
 
     const saved = ports.db.transaction(() => {
       const result = ports.plans.save(validation.card, createdAt)
-      if (!workflow.store.consume(workflow.token, ports.clock.now())) throw new ToolArgumentError('contextToken 已被消费')
       return result
     })()
     return {

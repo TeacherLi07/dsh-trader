@@ -19,7 +19,9 @@ import {
 } from '../src/agents/tools.js'
 import { SIDE_EFFECT_TOOLS, assertRoleSurface } from '../src/agents/roles.js'
 import { randomSeries } from './helpers/market.js'
-import { WorkflowContextStore } from '../src/supervisor/workflow-context.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
+import { freezeDecisionContext } from '../src/agents/decision-context.js'
+import { DecisionRunStore } from '../src/agents/decision-run-store.js'
 
 const SYMBOL = 'BTC/USDT'
 const TF = '1h'
@@ -48,7 +50,7 @@ function setup(options: { readonly limits?: RiskLimits | null } = {}): void {
   const journal = new DecisionJournal(db)
 
   const candles = normalizeCandles(randomSeries(START, 60), SYMBOL, TF, START + 60 * HOUR).candles
-  bars.upsertClosed(candles, { source: 'test', fetchedAt: START })
+  bars.upsertClosed(candles, { source: 'test', fetchedAt: START + 60 * HOUR })
   const pipeline = new FeaturePipeline(features)
   for (const candle of candles) pipeline.onClosedCandle(candle)
   lastClose = candles[candles.length - 1]!.close
@@ -86,17 +88,38 @@ function call(name: string, args: Record<string, unknown> = {}): Promise<unknown
   return tool.execute(args, ports)
 }
 
-function contextToken(contextHash = 'sha256:workflow'): string {
-  return new WorkflowContextStore(db).issue({
-    packId: `pack:${contextHash}`,
-    contextHash,
-    resultHash: 'sha256:result',
+let runCounter = 0
+
+function runId(): string {
+  runCounter += 1
+  const asOf = START + runCounter
+  const context = freezeDecisionContext({
     symbol: SYMBOL,
-    timeframe: TF,
-    scriptVersion: 'test',
-    promptVersion: 'test',
-    createdAt: START,
-  }).token
+    primaryTimeframe: '1h',
+    asOf,
+    sections: {
+      mandate: { asOf, source: 'test', missing: [], value: { mode: 'paper' } },
+      market: { asOf, source: 'test', missing: [], value: { close: lastClose } },
+      derivatives: { asOf, source: 'test', missing: [], value: {} },
+      benchmark: { asOf, source: 'test', missing: [], value: { symbol: SYMBOL } },
+      portfolio: { asOf, source: 'test', missing: [], value: { equityQuote: 10_000 } },
+      activePlan: { asOf, source: 'test', missing: ['activePlan'], value: null },
+      history: { asOf, source: 'test', missing: [], value: [] },
+      lessons: { asOf, source: 'test', missing: [], value: [] },
+      predictions: { asOf: null, source: 'predictions.disabled', missing: ['predictions.disabled'], value: null },
+    },
+  })
+  new DecisionContextStore(db).record(context)
+  new DecisionRunStore(db).start({
+    runId: `run-test-${runCounter}`,
+    contextId: context.contextId,
+    contextHash: context.contextHash,
+    symbol: SYMBOL,
+    primaryTimeframe: '1h',
+    triggerSource: 'test',
+    createdAt: asOf,
+  })
+  return `run-test-${runCounter}`
 }
 
 describe('tool registry', () => {
@@ -303,24 +326,26 @@ describe('trade_execute_order (double-checked, then executed)', () => {
     expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('sha256:assembled')
 
     // 模型就算自己塞一个 contextHash 入参也不会被采用
+    const testRunId = runId()
+    const expectedContextHash = new DecisionRunStore(db).get(testRunId)?.contextHash
     await call('trade_record_decision', {
       decisionId: 'd-model-claim',
       symbol: SYMBOL,
       timeframe: TF,
       action: 'no_trade',
-      contextToken: contextToken('sha256:assembled'),
+      runId: testRunId,
       contextHash: 'sha256:伪造的',
     })
-    expect(ports.journal.recentDecisions()[0]?.contextHash).toBe('sha256:assembled')
+    expect(ports.journal.recentDecisions().find((decision) => decision.decisionId === 'd-model-claim')?.contextHash).toBe(expectedContextHash)
   })
 
-  it('没有 workflow token 时拒绝记录裁决，不再写未组装占位符', async () => {
+  it('没有 decision run 时拒绝记录裁决，不再写未组装占位符', async () => {
     await expect(call('trade_record_decision', {
       decisionId: 'd-fallback',
       symbol: SYMBOL,
       timeframe: TF,
       action: 'no_trade',
-    })).rejects.toThrow('contextToken')
+    })).rejects.toThrow('runId')
     expect(ports.journal.recentDecisions()).toHaveLength(0)
   })
 
@@ -417,14 +442,14 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
     const tool = toolByName('trade_plan_card')
     expect(tool).toBeDefined()
     const first = (await tool?.execute(
-      { symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: validCard() },
+      { symbol: SYMBOL, timeframe: TF, runId: runId(), windowEndsInHours: 4, cardJson: validCard() },
       ports,
     )) as { saved: boolean; status: string; planId: string; contentHash: string }
     expect(first.saved).toBe(true)
     expect(first.planId.startsWith('pc-')).toBe(true)
 
     const second = (await tool?.execute(
-      { symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: validCard() },
+      { symbol: SYMBOL, timeframe: TF, runId: runId(), windowEndsInHours: 4, cardJson: validCard() },
       ports,
     )) as { status: string }
     expect(second.status).toBe('unchanged')
@@ -439,7 +464,7 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
       invalidation: [],
     })
     await expect(
-      tool?.execute({ symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: bad }, ports),
+      tool?.execute({ symbol: SYMBOL, timeframe: TF, runId: runId(), windowEndsInHours: 4, cardJson: bad }, ports),
     ).rejects.toThrow(ToolArgumentError)
     expect(ports.plans.active(SYMBOL)).toBeUndefined()
   })
@@ -447,7 +472,7 @@ describe('trade_plan_card（无人值守回路的入口：判断 → 可执行�
   it('cardJson 不是 JSON 对象时拒绝（不猜）', async () => {
     const tool = toolByName('trade_plan_card')
     await expect(
-      tool?.execute({ symbol: SYMBOL, timeframe: TF, contextToken: contextToken(), windowEndsInHours: 4, cardJson: '[]' }, ports),
+      tool?.execute({ symbol: SYMBOL, timeframe: TF, runId: runId(), windowEndsInHours: 4, cardJson: '[]' }, ports),
     ).rejects.toThrow(ToolArgumentError)
   })
 })

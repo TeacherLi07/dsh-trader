@@ -5,7 +5,8 @@ import type { TradePorts } from '../src/exec/ports.js'
 import type { JudgmentResult } from '../src/agents/types.js'
 import type { SubagentRun, SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import { buildJudgmentPack, createWorkflowTool, runJudgmentWorkflow, workflowFeatureMap } from '../src/plugins/workflow-runner.js'
-import { WorkflowContextStore } from '../src/supervisor/workflow-context.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
+import { DecisionRunStore } from '../src/agents/decision-run-store.js'
 
 const CLOSE = 100
 const AS_OF = 1_700_000_000_000
@@ -153,7 +154,7 @@ describe('trade_workflow_run production runner', () => {
     expect(AUDITS.some((event) => (event as { kind?: string }).kind === 'judgment_workflow_failed')).toBe(true)
   })
 
-  it('successful workflow persists a context token hash for later plan/decision binding', async () => {
+  it('successful workflow persists full context and a run root for later plan/decision binding', async () => {
     const db = new Database(':memory:')
     migrate(db)
     try {
@@ -186,13 +187,11 @@ describe('trade_workflow_run production runner', () => {
         parent: { id: 'desk' } as never,
         signal: new AbortController().signal,
       })
-      expect(result.contextToken).toMatch(/^[0-9a-f]{64}$/)
-      const verified = new WorkflowContextStore(db).verify(result.contextToken as string, AS_OF, {
-        symbol: 'BTC/USDT',
-        timeframe: '1h',
-        contextHash: result.contextHash,
-      })
-      expect(verified).toMatchObject({ packId: pack.packId, resultHash: expect.stringMatching(/^sha256:/) })
+      expect(result.runId).toBe(`run-${pack.packId}`)
+      const run = new DecisionRunStore(db).get(result.runId as string)
+      expect(run).toMatchObject({ symbol: 'BTC/USDT', status: 'completed', final: { packId: pack.packId } })
+      const context = new DecisionContextStore(db).get(run?.contextId ?? '')
+      expect(context).toMatchObject({ symbol: 'BTC/USDT', canonicalJson: expect.stringContaining('BTC/USDT') })
     } finally {
       db.close()
     }

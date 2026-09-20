@@ -19,6 +19,8 @@ import { canTransitionOrder } from './order-state.js'
 
 export interface DecisionRecord {
   readonly decisionId: string
+  /** 产生该决策的固定判断根；新 workflow 必须提供，机械兼容调用可为空。 */
+  readonly runId?: string
   readonly symbol: string
   /** 决策所属时间框（结算按它取 bar 窗口；缺省说明调用方没提供，结算侧会跳过）。 */
   readonly timeframe?: string
@@ -113,6 +115,7 @@ export interface FillView {
 
 export interface DecisionSummary {
   readonly decisionId: string
+  readonly runId: string | null
   readonly symbol: string
   readonly decidedAt: number
   readonly action: string
@@ -160,6 +163,7 @@ export interface LessonSummary {
 
 interface DecisionRow {
   decision_id: string
+  run_id: string | null
   symbol: string
   decided_at: number
   action: string
@@ -298,6 +302,7 @@ export class DecisionJournal {
   static contentHash(record: DecisionRecord): string {
     return fingerprint({
       decisionId: record.decisionId,
+      runId: record.runId ?? null,
       symbol: record.symbol,
       timeframe: record.timeframe ?? null,
       planId: record.planId ?? null,
@@ -313,10 +318,10 @@ export class DecisionJournal {
   recordDecision(record: DecisionRecord): boolean {
     const result = this.#statements.get(
         `INSERT INTO decisions
-           (decision_id, content_hash, symbol, timeframe, plan_id, decided_at, context_hash, action,
+           (decision_id, content_hash, run_id, symbol, timeframe, plan_id, decided_at, context_hash, action,
             size_qty, stop_price, take_profit, rationale, model_route, executed, reflection_due_at)
          VALUES
-           (@decisionId, @contentHash, @symbol, @timeframe, @planId, @decidedAt, @contextHash, @action,
+           (@decisionId, @contentHash, @runId, @symbol, @timeframe, @planId, @decidedAt, @contextHash, @action,
             @sizeQty, @stopPrice, @takeProfit, @rationale, @modelRoute, @executed, @reflectionDueAt)
          -- 只兜 content_hash：同一 decision_id 改内容 = 事后改写，必须抛（有测试锁）。
          -- 程序化的"重跑同一 bar"在 execute-action 层用 hasDecision 提前短路，不依赖这里。
@@ -325,6 +330,7 @@ export class DecisionJournal {
       .run({
         decisionId: record.decisionId,
         contentHash: DecisionJournal.contentHash(record),
+        runId: record.runId ?? null,
         symbol: record.symbol,
         timeframe: record.timeframe ?? null,
         planId: record.planId ?? null,
@@ -340,6 +346,14 @@ export class DecisionJournal {
         reflectionDueAt: record.reflectionDueAt ?? null,
       })
     return Number(result.changes) > 0
+  }
+
+  /** 计划卡执行时只携带 runId；contextHash 必须从同一 DB 根读取，不能由 bar/condition 现场伪造。 */
+  contextHashForRun(runId: string): string | undefined {
+    const row = this.#statements.get('SELECT context_hash FROM decision_runs WHERE run_id = ?').get(runId) as
+      | { context_hash: string }
+      | undefined
+    return row?.context_hash
   }
 
   // ── 结算（plan §7.9）─────────────────────────────────────────────────────────
@@ -1003,7 +1017,7 @@ export class DecisionJournal {
   ): readonly DecisionSummary[] {
     const limit = options.limit ?? 20
     const sql =
-      'SELECT decision_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, context_hash, outcome_id, tokens_in, tokens_out, tokens_cached, cost_usd, cost_known, duration_ms, trigger_source FROM decisions'
+      'SELECT decision_id, run_id, symbol, decided_at, action, size_qty, stop_price, confidence, rationale, context_hash, outcome_id, tokens_in, tokens_out, tokens_cached, cost_usd, cost_known, duration_ms, trigger_source FROM decisions'
     const rows = (
       options.symbol === undefined
         ? this.#statements.get(`${sql} ORDER BY decided_at DESC LIMIT ?`).all(limit)
@@ -1013,6 +1027,7 @@ export class DecisionJournal {
     ) as DecisionRow[]
     return rows.map((row) => ({
       decisionId: row.decision_id,
+      runId: row.run_id,
       symbol: row.symbol,
       decidedAt: row.decided_at,
       action: row.action,

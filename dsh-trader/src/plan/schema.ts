@@ -138,6 +138,8 @@ export interface Invalidation {
 
 export interface PlanCard {
   readonly planId: string
+  /** 产生本卡的判断 run；旧机械/人工导入可暂时为空，新的 workflow 必须提供。 */
+  readonly runId?: string
   readonly symbol: string
   readonly createdAt: number
   /** 到期即失效；过期后规则命中一律走"未覆盖"（W2）路径。 */
@@ -256,6 +258,9 @@ export function validatePlanCard(value: unknown): PlanValidation {
   for (const key of ['planId', 'symbol', 'contentHash'] as const) {
     if (typeof value[key] !== 'string' || value[key] === '') errors.push(`${key} 不能为空`)
   }
+  if (value['runId'] !== undefined && (typeof value['runId'] !== 'string' || value['runId'] === '')) {
+    errors.push('runId 若提供必须是非空字符串')
+  }
   if (typeof value['thesis'] !== 'string') errors.push('thesis 必须是字符串（可为空串）')
 
   const createdAt = value['createdAt']
@@ -334,7 +339,8 @@ export function validatePlanCard(value: unknown): PlanValidation {
 
 /** 幂等根：对除 `contentHash` 自身以外的全部内容取哈希。 */
 export function computeContentHash(card: Omit<PlanCard, 'contentHash'> & { contentHash?: string }): string {
-  const { contentHash: _ignored, ...rest } = card as Record<string, unknown> & { contentHash?: string }
+  // runId 是审计归因，不是计划内容；同一份判断重放到另一个 run 时仍应命中幂等根。
+  const { contentHash: _ignored, runId: _runId, ...rest } = card as Record<string, unknown> & { contentHash?: string; runId?: string }
   return fingerprint(rest)
 }
 

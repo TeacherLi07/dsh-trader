@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 5,
+  "userVersion": 5,
+  "obsoleteTables": [],
+  "authoritativeTables": [
+    "decision_contexts",
+    "decision_runs",
+    "decisions",
+    "plan_cards"
+  ],
+  "context": {
+    "contextId": "ctx-76917a6806fda0e1",
+    "contextHash": "sha256:76917a6806fda0e1955096c04855db5f650a6dd8df6b109b7d6f3e170f0813f9",
+    "canonicalRoundTrip": true,
+    "idempotentSecondWrite": true
+  },
+  "run": {
+    "runId": "run-r1",
+    "status": "completed",
+    "hasDraft": true,
+    "hasCritique": true,
+    "hasFinal": true,
+    "hasEligibility": true,
+    "costKnown": false
+  },
+  "foreignKeyRejected": true
+}

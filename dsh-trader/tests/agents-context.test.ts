@@ -10,7 +10,8 @@ import {
   makeNotice,
   type ContextInput,
 } from '../src/agents/context.js'
-import { ContextSnapshotStore } from '../src/agents/context-store.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
+import { freezeDecisionContext } from '../src/agents/decision-context.js'
 import { PROMPT_VERSION } from '../src/agents/prompts.js'
 
 const NOW = 1_700_000_000_000
@@ -248,35 +249,64 @@ describe('maskToolResult', () => {
   })
 })
 
-describe('ContextSnapshotStore', () => {
-  it('落库并读回 partHashes/changedParts，重复哈希不产生新行', () => {
-    const store = new ContextSnapshotStore(db)
-    const first = assembleContext(input())
-    expect(store.record(first, { createdAt: NOW, symbol: 'BTC/USDT' })).toBe(true)
-    expect(store.record(first, { createdAt: NOW, symbol: 'BTC/USDT' })).toBe(false)
+function decisionContext() {
+  const value = {
+    symbol: 'BTC/USDT:USDT',
+    primaryTimeframe: '1h' as const,
+    asOf: NOW,
+    sections: {
+      mandate: { asOf: NOW, source: 'test.config', missing: [], value: { riskPct: 0.002 } },
+      market: { asOf: NOW, source: 'test.market', missing: [], value: { close: 70_000 } },
+      derivatives: { asOf: NOW, source: 'test.derivatives', missing: ['oi.changePct'], value: { funding: 0.001 } },
+      benchmark: { asOf: NOW, source: 'test.benchmark', missing: [], value: { symbol: 'BTC/USDT:USDT' } },
+      portfolio: { asOf: NOW, source: 'test.portfolio', missing: [], value: { equityQuote: 10_000, positions: [] } },
+      activePlan: { asOf: NOW, source: 'test.plan', missing: [], value: { planId: 'plan-1', contentHash: 'sha256:plan' } },
+      history: { asOf: NOW, source: 'test.history', missing: [], value: { decisions: [] } },
+      lessons: { asOf: NOW, source: 'test.lessons', missing: [], value: [{ lessonId: 'lesson-1', text: 'x' }] },
+      predictions: { asOf: null, source: 'predictions.disabled', missing: ['predictions.disabled'], value: null },
+    },
+  }
+  return freezeDecisionContext(value)
+}
+
+describe('DecisionContextStore', () => {
+  it('保存完整 canonical context，重复 hash 幂等且可重算', () => {
+    const store = new DecisionContextStore(db)
+    const first = decisionContext()
+    expect(store.record(first, { createdAt: NOW }).inserted).toBe(true)
+    expect(store.record(first, { createdAt: NOW }).inserted).toBe(false)
     expect(store.count()).toBe(1)
 
-    const snapshot = store.get(first.ctxHash)
-    expect(snapshot?.changedParts).toEqual(['C1', 'C2', 'C3', 'C4', 'C5', 'C6'])
-    expect(snapshot?.charCounts.C1).toBeGreaterThan(0)
-    expect(snapshot?.overflow).toEqual([])
+    const loaded = store.getByHash(first.contextHash)
+    expect(loaded?.context).toEqual(first)
+    expect(loaded?.canonicalJson).toContain(first.contextHash)
+    expect(store.latest(first.symbol)?.contextId).toBe(first.contextId)
   })
 
-  it('latestPartHashes 让下一次组装能算出 changedParts', () => {
-    const store = new ContextSnapshotStore(db)
-    const first = assembleContext(input())
-    store.record(first, { createdAt: NOW, symbol: 'BTC/USDT' })
+  it('拒绝篡改分区 hash，并允许显式不可变 contentRef', () => {
+    const first = decisionContext()
+    expect(() => freezeDecisionContext({
+      ...first,
+      sections: { ...first.sections, market: { ...first.sections.market, hash: 'sha256:forged' } },
+    })).toThrow(/hash 与分区内容不一致/)
 
-    const previous = store.latestPartHashes('BTC/USDT')
-    expect(previous).toEqual(first.partHashes)
-
-    const next = assembleContext(
-      input({ state: { equityQuote: 10_000, positions: [{ symbol: 'BTC/USDT', qty: 1 }], openOrders: 1, activePlanId: 'pc-1' } }),
-      previous,
-    )
-    expect(next.changedParts).toEqual(['C3'])
-    store.record(next, { createdAt: NOW + 60_000, symbol: 'BTC/USDT' })
-    expect(store.count()).toBe(2)
-    expect(store.latestPartHashes('BTC/USDT')).toEqual(next.partHashes)
+    const store = new DecisionContextStore(db)
+    const pointer = freezeDecisionContext({
+      ...first,
+      asOf: NOW + 1,
+      sections: {
+        ...first.sections,
+        market: {
+          asOf: NOW + 1,
+          source: first.sections.market.source,
+          missing: first.sections.market.missing,
+          value: first.sections.market.value,
+        },
+      },
+    })
+    const saved = store.record(pointer, { contentRef: 's3://immutable/context-1', createdAt: NOW + 1 })
+    expect(saved.record.canonicalJson).toBeNull()
+    expect(saved.record.contentRef).toBe('s3://immutable/context-1')
+    expect(saved.record.context).toBeNull()
   })
 })

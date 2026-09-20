@@ -19,6 +19,7 @@ export interface CycleSummary {
   readonly action: string
   readonly triggerSource: string | null
   readonly planId: string | null
+  readonly runId: string | null
   readonly contextHash: string
   readonly executed: boolean
   readonly settlement: CycleSettlement
@@ -26,13 +27,15 @@ export interface CycleSummary {
 }
 
 export interface CycleContextSnapshot {
+  readonly contextId: string
   readonly contextHash: string
   readonly createdAt: number
-  readonly symbol: string | null
-  readonly partHashes: unknown
-  readonly changedParts: unknown
-  readonly charCounts: unknown
-  readonly overflow: unknown
+  readonly asOf: number
+  readonly symbol: string
+  readonly primaryTimeframe: string
+  /** 完整 canonical context；外部大对象场景则为空并使用 contentRef。 */
+  readonly canonical: unknown | null
+  readonly contentRef: string | null
 }
 
 export interface CycleOrderIntent {
@@ -123,6 +126,7 @@ export interface CycleDetail extends CycleSummary {
 
 interface DecisionRow {
   decision_id: string
+  run_id: string | null
   symbol: string
   timeframe: string | null
   plan_id: string | null
@@ -142,13 +146,14 @@ interface DecisionRow {
 }
 
 interface ContextRow {
-  ctx_hash: string
+  context_id: string
+  context_hash: string
   created_at: number
-  symbol: string | null
-  part_hashes_json: string
-  changed_parts_json: string
-  char_counts_json: string
-  overflow_json: string
+  as_of: number
+  symbol: string
+  primary_timeframe: string
+  canonical_json: string | null
+  content_ref: string | null
 }
 
 interface IntentRow {
@@ -238,6 +243,7 @@ function rowToSummary(row: DecisionRow): CycleSummary {
     action: row.action,
     triggerSource: row.trigger_source,
     planId: row.plan_id,
+    runId: row.run_id,
     contextHash: row.context_hash,
     executed: row.executed === 1,
     settlement: row.outcome_id === null ? 'awaiting' : 'settled',
@@ -248,7 +254,7 @@ function rowToSummary(row: DecisionRow): CycleSummary {
 function readDecision(statements: Statements, cycleId: string): DecisionRow | undefined {
   return statements
     .get(
-      `SELECT decision_id, symbol, timeframe, plan_id, decided_at, context_hash, action,
+      `SELECT decision_id, run_id, symbol, timeframe, plan_id, decided_at, context_hash, action,
               size_qty, stop_price, take_profit, confidence, rationale, model_route,
               executed, reflection_due_at, outcome_id, trigger_source
        FROM decisions WHERE decision_id = ?`,
@@ -259,20 +265,21 @@ function readDecision(statements: Statements, cycleId: string): DecisionRow | un
 function readContext(statements: Statements, contextHash: string): CycleContextSnapshot | null {
   const row = statements
     .get(
-      `SELECT ctx_hash, created_at, symbol, part_hashes_json, changed_parts_json,
-              char_counts_json, overflow_json
-       FROM context_snapshots WHERE ctx_hash = ?`,
+      `SELECT context_id, context_hash, created_at, as_of, symbol, primary_timeframe,
+              canonical_json, content_ref
+       FROM decision_contexts WHERE context_hash = ?`,
     )
     .get(contextHash) as ContextRow | undefined
   if (row === undefined) return null
   return {
-    contextHash: row.ctx_hash,
+    contextId: row.context_id,
+    contextHash: row.context_hash,
     createdAt: row.created_at,
+    asOf: row.as_of,
     symbol: row.symbol,
-    partHashes: parseJson(row.part_hashes_json),
-    changedParts: parseJson(row.changed_parts_json),
-    charCounts: parseJson(row.char_counts_json),
-    overflow: parseJson(row.overflow_json),
+    primaryTimeframe: row.primary_timeframe,
+    canonical: parseJson(row.canonical_json ?? ''),
+    contentRef: row.content_ref,
   }
 }
 
@@ -429,7 +436,7 @@ export function readCycleList(
   const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 50) : 20
   const rows = statements
     .get(
-      `SELECT decision_id, symbol, timeframe, plan_id, decided_at, context_hash, action,
+      `SELECT decision_id, run_id, symbol, timeframe, plan_id, decided_at, context_hash, action,
               size_qty, stop_price, take_profit, confidence, rationale, model_route,
               executed, reflection_due_at, outcome_id, trigger_source
        FROM decisions ORDER BY decided_at DESC, decision_id DESC LIMIT ?`,
