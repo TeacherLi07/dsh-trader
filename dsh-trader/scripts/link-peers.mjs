@@ -29,6 +29,7 @@ const PACKAGES = [
   'dsh-session',
   'dsh-subagent',
   'dsh-llm',
+  'dsh-llm-deepseek',
   'schemastery',
 ]
 

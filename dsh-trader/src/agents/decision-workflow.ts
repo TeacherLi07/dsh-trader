@@ -36,6 +36,7 @@ export interface DecisionModelCall {
   readonly promptVersion: string
   readonly requestHash: string
   readonly requestChars: number
+  readonly estimatedInputTokens: number
   /** 不含 AbortSignal 的精确 provider 请求材料；用于复核 render/hash 与模型路由。 */
   readonly request: Readonly<Record<string, unknown>>
   /** 可见文本/tool-call 的原始流片段与 finish/usage；不保存隐藏 reasoning。 */
@@ -71,7 +72,7 @@ interface ToolSchema {
   readonly parameters: Record<string, unknown>
 }
 
-const R3_PROMPT_VERSION = 'decision-r3-v1'
+export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v1' as const
 const ENVELOPE_NAME = DECISION_ENVELOPE_TOOL.name
 
 const CRITIQUE_TOOL: ToolSchema = {
@@ -172,7 +173,7 @@ async function callStructuredTool(input: {
   readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
   readonly onFailure?: (call: DecisionModelCall) => Promise<void>
 }): Promise<DecisionModelCall> {
-  const promptVersion = `${R3_PROMPT_VERSION}:${input.stage}:${input.tool.name}`
+  const promptVersion = `${DECISION_WORKFLOW_PROMPT_VERSION}:${input.stage}:${input.tool.name}`
   const request = renderDecisionRequest(input.context, {
     maxChars: input.route.maxChars,
     promptVersion,
@@ -201,6 +202,7 @@ async function callStructuredTool(input: {
     promptVersion,
     requestHash: request.requestHash,
     requestChars: request.requestChars,
+    estimatedInputTokens: request.estimatedInputTokens,
     messages: request.messages,
     tools: options.tools,
     outputSchema: input.tool,
@@ -256,6 +258,7 @@ async function callStructuredTool(input: {
       promptVersion,
       requestHash: request.requestHash,
       requestChars: request.requestChars,
+      estimatedInputTokens: request.estimatedInputTokens,
       request: providerRequestTrace,
       response: responseTrace(),
       output,
@@ -268,6 +271,7 @@ async function callStructuredTool(input: {
       promptVersion,
       requestHash: request.requestHash,
       requestChars: request.requestChars,
+      estimatedInputTokens: request.estimatedInputTokens,
       request: providerRequestTrace,
       response: responseTrace(),
       output,
@@ -532,6 +536,7 @@ export function decisionWorkflowSummary(stages: DecisionWorkflowStages): Readonl
       promptVersion: call.promptVersion,
       requestHash: call.requestHash,
       requestChars: call.requestChars,
+      estimatedInputTokens: call.estimatedInputTokens,
       usage: toLedgerUsage(call.usage),
     })),
     draftHash: stages.draft === undefined ? null : fingerprint(stages.draft),

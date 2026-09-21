@@ -17,6 +17,8 @@ export interface RenderedDecisionRequest {
   readonly requestHash: string
   readonly contextChars: number
   readonly requestChars: number
+  /** UTF-8 byte 上界 + 固定 chat/tool framing 余量，用于预算预留而不是把 JS 字符数当 token。 */
+  readonly estimatedInputTokens: number
   readonly messages: readonly DecisionMessage[]
 }
 
@@ -94,7 +96,12 @@ export function renderDecisionRequest(
   ]
   // 工具 schema 也占模型上下文，必须一起计入预算并进入 requestHash。
   const requestPayload = { promptVersion, messages, outputSchema: options.outputSchema ?? null }
-  const requestChars = canonicalJson(requestPayload).length
+  const serializedRequest = canonicalJson(requestPayload)
+  const requestChars = serializedRequest.length
+  // 对 UTF-8 文本 tokenizer，单 token 至少覆盖一个 byte；再为 role/tool framing 留 4096 token 保守余量。
+  // JS 字符数对 CJK/emoji 比 UTF-8 bytes 小，直接用 requestChars 会低估预算。
+  const estimatedInputTokens = Buffer.byteLength(serializedRequest, 'utf8') + 4_096
+  if (!Number.isSafeInteger(estimatedInputTokens)) throw new Error('estimatedInputTokens 超出安全整数范围')
   if (requestChars > maxChars) throw new DecisionRequestTooLargeError(context.contextHash, requestChars, maxChars)
   const requestHash = fingerprint({ contextHash: context.contextHash, requestPayload })
   return {
@@ -103,6 +110,7 @@ export function renderDecisionRequest(
     requestHash,
     contextChars: contextJson.length,
     requestChars,
+    estimatedInputTokens,
     messages,
   }
 }

@@ -11,6 +11,7 @@ import { DecisionContextStore } from './decision-context-store.js'
 import { DecisionRunStore, type DecisionRunRecord } from './decision-run-store.js'
 import {
   bindDecisionEnvelope,
+  DECISION_ENVELOPE_SCHEMA_VERSION,
   evaluateDecisionEligibility,
   materializeDecisionPlan,
   type DecisionEnvelope,
@@ -18,6 +19,7 @@ import {
 } from './decision-envelope.js'
 import {
   decisionWorkflowSummary,
+  DECISION_WORKFLOW_PROMPT_VERSION,
   DecisionBudgetDenied,
   runDecisionWorkflowStages,
   toLedgerUsage,
@@ -73,7 +75,7 @@ function safeReason(error: unknown): string {
 const SENSITIVE_TRACE_KEYS = new Set(['apikey', 'apisecret', 'secret', 'secretkey', 'token', 'accesstoken', 'refreshtoken', 'authorization', 'privatekey'])
 
 /** 原始调用工件保留在 append-only 审计中，但敏感字段在持久化前递归脱敏。 */
-function sanitizeModelTrace(value: unknown, depth = 0): unknown {
+export function sanitizeModelTrace(value: unknown, depth = 0): unknown {
   if (depth > 32) return '[DEPTH_LIMIT]'
   if (value === null || typeof value === 'boolean' || typeof value === 'string') {
     if (typeof value !== 'string') return value
@@ -104,18 +106,31 @@ function sanitizeModelTrace(value: unknown, depth = 0): unknown {
   return String(value).slice(0, 1_000)
 }
 
-function decisionRunId(input: {
+export function decisionRunId(input: {
   readonly trigger: DecisionTriggerIdentity
   readonly symbol: string
   readonly strategy: DecisionStrategy
   readonly route: DecisionModelRoute
+  readonly promptVersion: string
+  readonly schemaVersion: string
+  readonly planWindowMs: number
 }): string {
   return `run-${fingerprint({
-    trigger: { source: input.trigger.source, id: input.trigger.id, at: input.trigger.at },
+    // attempt 只用于审计，不能进入身份；否则 W2/W3 的持久重试会误成新 run 而无法恢复阶段。
+    trigger: {
+      source: input.trigger.source,
+      id: input.trigger.id,
+      at: input.trigger.at,
+      expiresAt: input.trigger.expiresAt ?? null,
+      predictionAlias: input.trigger.predictionAlias ?? null,
+    },
     symbol: input.symbol,
     strategy: input.strategy,
-    provider: input.route.provider,
-    model: input.route.model,
+    promptVersion: input.promptVersion,
+    schemaVersion: input.schemaVersion,
+    route: { provider: input.route.provider, model: input.route.model },
+    outputBudget: { maxTokens: input.route.maxTokens, maxChars: input.route.maxChars },
+    planWindowMs: input.planWindowMs,
   }).slice(7)}`
 }
 
@@ -203,7 +218,11 @@ export async function runDecisionRuntime(input: {
   const contextStore = new DecisionContextStore(ports.db)
   const runStore = new DecisionRunStore(ports.db)
   const journal = ports.journal
-  const runId = decisionRunId({ trigger, symbol, strategy: config.strategy, route: config.route })
+  const promptVersion = `${DECISION_WORKFLOW_PROMPT_VERSION}:${config.strategy}:schema-${DECISION_ENVELOPE_SCHEMA_VERSION}`
+  const runId = decisionRunId({
+    trigger, symbol, strategy: config.strategy, route: config.route,
+    promptVersion, schemaVersion: DECISION_ENVELOPE_SCHEMA_VERSION, planWindowMs: config.planWindowMs,
+  })
   let prior = runStore.get(runId)
   if (prior !== undefined && prior.status !== 'running') {
     return {
@@ -234,7 +253,7 @@ export async function runDecisionRuntime(input: {
       primaryTimeframe: '1h',
       triggerSource: `${trigger.source}:${trigger.id}`,
       modelVersion: `${config.route.provider}/${config.route.model}`,
-      promptVersion: `decision-r3-v1:${config.strategy}`,
+      promptVersion,
       createdAt: context.asOf,
     })
   }
@@ -269,7 +288,7 @@ export async function runDecisionRuntime(input: {
   let cumulativeCostKnown = prior?.costKnown === false ? false : true
 
   const addLedgerEntry = (call: DecisionModelCall): void => {
-    const reserve = reservations.get(call.requestHash) ?? { tokens: call.requestChars + config.route.maxTokens, usd: null }
+    const reserve = reservations.get(call.requestHash) ?? { tokens: call.estimatedInputTokens + config.route.maxTokens, usd: null }
     const startedAt = callStartedAt.get(call.requestHash)
     callStartedAt.delete(call.requestHash)
     const callDurationMs = startedAt === undefined ? null : Math.max(0, ports.clock.now() - startedAt)
@@ -293,7 +312,7 @@ export async function runDecisionRuntime(input: {
         costUsd: (current.costUsd ?? 0) + ledgerResult.estUsd,
         costKnown: cumulativeCostKnown,
         modelVersion: `${config.route.provider}/${config.route.model}`,
-        promptVersion: `decision-r3-v1:${config.strategy}`,
+        promptVersion,
         durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
       }, ports.clock.now())
     }
@@ -302,6 +321,7 @@ export async function runDecisionRuntime(input: {
       payload: {
         runId, trigger: trigger.id, stage: call.stage, promptVersion: call.promptVersion,
         requestHash: call.requestHash, requestChars: call.requestChars,
+        estimatedInputTokens: call.estimatedInputTokens,
         durationMs: callDurationMs,
         request: sanitizeModelTrace(call.request),
         responseHash: fingerprint(call.response),
@@ -318,11 +338,11 @@ export async function runDecisionRuntime(input: {
   }
 
   let budgetDenied: string | undefined
-  const beforeCall = async (request: { readonly requestHash: string; readonly requestChars: number }, stage: string): Promise<void> => {
+  const beforeCall = async (request: { readonly requestHash: string; readonly requestChars: number; readonly estimatedInputTokens: number }, stage: string): Promise<void> => {
     if (trigger.expiresAt !== undefined && ports.clock.now() >= trigger.expiresAt) {
       throw new Error('触发器在模型调用前已过期，拒绝使用陈旧事件判断')
     }
-    const estimatedUsage = { tokensIn: request.requestChars, tokensOut: config.route.maxTokens, tokensCached: 0 }
+    const estimatedUsage = { tokensIn: request.estimatedInputTokens, tokensOut: config.route.maxTokens, tokensCached: 0 }
     const result = ledger.preflight({
       at: ports.clock.now(),
       model: config.route.model,
@@ -336,7 +356,7 @@ export async function runDecisionRuntime(input: {
       budgetDenied = result.decision.reason
       journal.appendAudit({
         actor: 'system', kind: 'model_budget_denied',
-        payload: { runId, trigger: trigger.id, stage, requestHash: request.requestHash, requestChars: request.requestChars, reason: result.decision.reason },
+        payload: { runId, trigger: trigger.id, stage, requestHash: request.requestHash, requestChars: request.requestChars, estimatedInputTokens: request.estimatedInputTokens, reason: result.decision.reason },
         ts: ports.clock.now(),
       })
       throw new DecisionBudgetDenied(`模型预算准入拒绝：${result.decision.reason}`)

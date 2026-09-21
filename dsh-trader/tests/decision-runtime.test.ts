@@ -16,9 +16,10 @@ import { FeatureEngine } from '../src/market/features.js'
 import { MarketObservationStore } from '../src/market/observations.js'
 import { normalizeCandles, timeframeMs } from '../src/market/normalize.js'
 import { PlanStore } from '../src/plan/store.js'
-import { runDecisionRuntime } from '../src/agents/decision-runtime.js'
+import { decisionRunId, runDecisionRuntime } from '../src/agents/decision-runtime.js'
+import { DECISION_ENVELOPE_SCHEMA_VERSION } from '../src/agents/decision-envelope.js'
 import { DecisionRunStore } from '../src/agents/decision-run-store.js'
-import type { DecisionModel } from '../src/agents/decision-workflow.js'
+import { DECISION_WORKFLOW_PROMPT_VERSION, type DecisionModel } from '../src/agents/decision-workflow.js'
 import { raw } from './helpers/market.js'
 
 const AS_OF = Date.UTC(2026, 8, 20, 12)
@@ -26,11 +27,15 @@ const SYMBOL = 'BTC/USDT:USDT'
 
 class FakeDecisionModel implements DecisionModel {
   calls = 0
-  constructor(private readonly output: unknown, private readonly onStream?: () => void) {}
+  constructor(
+    private readonly output: unknown,
+    private readonly onStream?: () => void,
+    private readonly includeUsage = true,
+  ) {}
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.onStream?.()
-    yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 80, totalTokens: 380 } } as StreamChunk
+    if (this.includeUsage) yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 80, totalTokens: 380 } } as StreamChunk
     yield {
       type: 'block-end', index: 0,
       block: { type: 'tool-call', id: 'r3-call', name: String(options.tools?.[0]?.name), arguments: JSON.stringify(this.output) },
@@ -135,6 +140,27 @@ const config = {
 }
 
 describe('R3 decision runtime', () => {
+  it('binds prompt/schema versions, route and output budgets while keeping retries on the same identity', () => {
+    const identity = {
+      trigger,
+      symbol: SYMBOL,
+      strategy: 'single' as const,
+      route: config.route,
+      promptVersion: `${DECISION_WORKFLOW_PROMPT_VERSION}:single:schema-${DECISION_ENVELOPE_SCHEMA_VERSION}`,
+      schemaVersion: DECISION_ENVELOPE_SCHEMA_VERSION,
+      planWindowMs: config.planWindowMs,
+    }
+    const base = decisionRunId(identity)
+    expect(decisionRunId({ ...identity, promptVersion: 'next-prompt' })).not.toBe(base)
+    expect(decisionRunId({ ...identity, schemaVersion: 'next-schema' })).not.toBe(base)
+    expect(decisionRunId({ ...identity, route: { ...config.route, maxTokens: config.route.maxTokens + 1 } })).not.toBe(base)
+    expect(decisionRunId({ ...identity, route: { ...config.route, maxChars: config.route.maxChars + 1 } })).not.toBe(base)
+    expect(decisionRunId({ ...identity, route: { ...config.route, provider: 'other-provider' } })).not.toBe(base)
+    expect(decisionRunId({
+      ...identity, trigger: { ...trigger, attempt: trigger.attempt + 1 },
+    })).toBe(base)
+  })
+
   it('persists the exact R2 context/run, accounts real usage, and idempotently avoids a second model call', async () => {
     const db = new Database(':memory:')
     migrate(db)
@@ -184,6 +210,33 @@ describe('R3 decision runtime', () => {
       })
       expect(replayed.replayed).toBe(true)
       expect(model.calls).toBe(1)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('uses a new run instead of replaying a terminal result after route/output budget changes', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const model = new FakeDecisionModel(noTrade)
+    try {
+      const first = await runDecisionRuntime({
+        ...runtime, model, config,
+        trigger: { ...trigger, id: 'w1-route-version' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      const changed = await runDecisionRuntime({
+        ...runtime, model,
+        config: { ...config, route: { ...config.route, maxTokens: config.route.maxTokens + 1, maxChars: config.route.maxChars + 1 } },
+        trigger: { ...trigger, id: 'w1-route-version' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(first.status).toBe('completed')
+      expect(changed.status).toBe('completed')
+      expect(changed.replayed).toBe(false)
+      expect(changed.runId).not.toBe(first.runId)
+      expect(model.calls).toBe(2)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM decision_runs').get()).toMatchObject({ n: 2 })
     } finally {
       db.close()
     }
@@ -426,6 +479,52 @@ describe('R3 decision runtime', () => {
       expect(decision.size_qty * 5).toBeCloseTo(1, 6) // equity 1000 × configured 0.2% × envelope riskFraction 0.5
     } finally {
       db.close()
+    }
+  })
+
+  it('unknown model cost downgrades valid immediate and planned opens without saving or placing orders', async () => {
+    const base = {
+      outcome: 'act', thesis: '有效开仓候选', rejectedAlternatives: ['等待'],
+      claims: [], uncertainties: [], confidence: 0.6, riskFraction: 0.5,
+    }
+    const open = { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 95 } }
+    const scenarios = [
+      { name: 'immediate', output: { ...base, immediateAction: open } },
+      { name: 'plan commitment', output: {
+        ...base,
+        plan: {
+          thesis: '开仓承诺', confidence: 0.6, keyLevels: [], forbidden: [], noTrade: false,
+          invalidation: [{ id: 'inv', tf: '1h', when: 'bar.close < 90', then: { action: 'close' } }],
+          commitments: [{ id: 'entry', seq: 1, tf: '1h', when: 'position.qty == 0 and bar.close > 0', then: open }],
+        },
+      } },
+    ]
+    expect(scenarios).toHaveLength(2)
+
+    for (const scenario of scenarios) {
+      const db = new Database(':memory:')
+      migrate(db)
+      new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+      const clock = new ReplayClock(AS_OF)
+      const paper = new PaperBroker({ clock, book: { price: () => 102 }, initialEquityQuote: 1_000, slippageBps: 0, feeBps: 0 })
+      const runtime = makeRuntime(db, paper, clock)
+      seedExecutableContext(db, runtime)
+      const model = new FakeDecisionModel(scenario.output, undefined, false)
+      try {
+        const result = await runDecisionRuntime({
+          ...runtime, model, config,
+          trigger: { ...trigger, id: `w1-unknown-cost-${scenario.name}` },
+          symbol: SYMBOL, timeframe: '1h',
+        })
+        expect(result).toMatchObject({ status: 'review', eligibility: { state: 'decision_only' } })
+        expect(result.eligibility?.reasons).toContain('model call cost or usage is unknown')
+        expect(new DecisionRunStore(db).get(result.runId)).toMatchObject({ status: 'review', costKnown: false })
+        expect(runtime.plans.count(SYMBOL)).toBe(0)
+        expect(runtime.journal.intentIds()).toEqual([])
+        expect(await paper.getPositions()).toEqual([])
+      } finally {
+        db.close()
+      }
     }
   })
 

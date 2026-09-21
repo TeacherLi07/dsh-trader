@@ -18,6 +18,7 @@ import { normalizeCandles, timeframeMs } from '../src/market/normalize.js'
 import { PlanStore } from '../src/plan/store.js'
 import { makeCard } from './helpers/plan.js'
 import { raw } from './helpers/market.js'
+import { canonicalJson } from '../src/util/canonical.js'
 
 const AS_OF = 1_700_000_000_000
 const SYMBOL = 'ADA/USDT:USDT'
@@ -198,6 +199,15 @@ describe('R2 DecisionContext assembly and request rendering', () => {
     expect(captured?.messages[1]?.content).toContain('realizedNetPct')
     expect(captured?.messages[1]?.content).not.toContain('MUST-NOT-ENTER-CONTEXT')
     expect(request.requestChars).toBeGreaterThan(request.contextChars)
+    expect(request.estimatedInputTokens).toBeGreaterThan(request.requestChars)
+    // system/request 中含 CJK 文本；预算必须按实际 canonical UTF-8 payload 计字节，不能退化成 JS 字符数。
+    expect(request.estimatedInputTokens).toBe(
+      Buffer.byteLength(canonicalJson({
+        promptVersion: request.promptVersion,
+        messages: request.messages,
+        outputSchema: null,
+      }), 'utf8') + 4_096,
+    )
   })
 
   it('只注入触发 alias 的 PIT 预测市场快照，并将市场原文显式标记为不可信', async () => {
