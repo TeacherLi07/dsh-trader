@@ -17,8 +17,9 @@
 当前已完成行情、DSL、paper/HTX broker、订单状态机、保护单、恢复、对账与审计基础，以及 R1–R4
 的 DecisionContext、DecisionEnvelope、统一执行路径、成本闸与持久 W2/W3 worker。R3/R4 工程验收使用
 stub，不是模型质量或经济效果证据；生产 `dailyBudgetUsd` 仍未配置，因此生产 W1/W2/W3 不发模型请求。
-旧 JudgmentPack、多分析师与第二套模型下单工具链已删除。2026-09-20 的 SR1 安全审查修复已合并；
-结算 scheduler 已启动，reflector 尚未接入。下一步 R5 才进行真实模型回放与 forward-paper 验收。
+旧 JudgmentPack、多分析师与第二套模型下单工具链已删除；结算现区分真实成交/视界/paper、未知成本与基准，
+并按真实持仓窗口归因。R5 的静态 runner 与离线护栏已实现，但仓库没有可用的 200 窗口冻结 PIT 数据集；
+当前用户明确禁止真实模型/交易所连接，因此 R5 的真实判断/执行/经济证据与 R6 仍是外部阻塞，不能用 fixture 代替。
 
 本计划评估的是价格、衍生品、组合状态支持的交易判断，不宣称覆盖 LLM 的全部交易能力。当前
 模式保持 `paper`；R2–R5 完成后再评估 R6。此次收敛依据见 [决策记录 §17](docs/decision.md#architecture-review-2026-09-19)。
@@ -177,13 +178,17 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger` | 审计 append-only；限额与成本版本化 |
 | 预测市场 | `pm_markets`, `pm_series`, `pm_quotes`, `pm_watches` | PIT、只读、别名有期限且有上限 |
 
-当前 schema 为 v7。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v8。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
 必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
 禁止回写和删除；历史回补只能从真实抓取时刻起可见。v7 为 `triggers` 增加 `attempts`、
 `next_attempt_at`、`claimed_at`、`last_error`，并将 `failed` 纳入终态：worker 重启可恢复 claimed，
 瞬时失败按退避重试且有上限，陈旧事件过期后不得再调用模型或执行动作。
+v8 扩展 `outcomes`：`realized_net_pct`、`benchmark_pct`、`alpha_pct` 与 `fees_quote` 可为 NULL 表示未知；
+资金费金额与来源必须同时为空或同时可核验；`settlement_kind` 区分真实成交、视界估值、paper 与历史未知，
+`valuation_basis` 区分实际出场成交与视界 mark，`attributed_qty` 记录结算归因数量。v7 历史净额不再视作
+含完整资金费的净额，旧 benchmark 仅有单点或缺少标记时也迁移为 NULL，避免把未知伪装成零收益。
 
 R3 补足运行语义：run 必须绑定候选/提示词/模型版本与触发身份，不能只凭 context hash 合并不同
 实验；终结工件不可重写，重试按已持久化阶段恢复。状态为 running/failed 或 eligibility 未计算的
@@ -346,12 +351,12 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | 阶段 | 工作 | 完成判据 |
 |---|---|---|
 | R1 | schema v5 + DecisionContext 类型与 store | ✅ `decision_contexts` 保存 canonical 全文或不可变 content ref；`decision_runs` 保存 draft/critique/final/eligibility 与模型成本；终态 run 由 store 与 SQLite trigger 双重禁止改写；旧 context/token 表已从生产 schema/引用移除；验收：`dsh-trader/scripts/r1-acceptance.mjs` |
-| R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，历史证据见 `docs/r2-decision-context-2026-09-20.md` |
+| R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；当前 schema v8 渲染复验为 107,128 context / 119,243 request 字符及 123,751 UTF-8 保守输入 token 上界；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，证据见 `docs/r2-decision-context-2026-09-21.md` |
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
-| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-20.md`；没有真实模型调用 |
-| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-20.md`；没有真实模型调用 |
-| R5 | 真实 LLM 回放 + forward paper | ⬜ 已铺设单次模型请求/响应/成本审计与完整账户时间块 bootstrap；仍缺 `scripts/r5-acceptance.mjs` 真实模型运行入口、≥200 个真实判断窗口、执行样本覆盖及独立 forward-paper 经济证据；按 §12 先取得实验预算，stub 不算真实调用 |
+| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
+| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
+| R5 | 真实 LLM 回放 + forward paper | ⬜ 已实现 `scripts/r5-acceptance.mjs` 与纯本地预检：single/critique 共用样本但 Critic 指标只计 critique arm；≥200 个不同 PIT 时点与逐窗指纹、validation 跨 split 部分重叠拒绝、纠错/误报非空预标注分母、prompt/adapter/price/build artifact 版本冻结、凭据值拦截、稳定共享 control registry、UTF-8 保守 token 上界、原子日/总预算 reservation、实际 usage 超预留熔断、pending call 防重与逐调用审计。仍缺可验证来源/预注册证据的真实 PIT manifest、预算授权后的真实模型运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；静态工程门不代表判断质量或 R5 通过 |
 | R6 | P3 小额 `live_auto` | R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0 |
 
 R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs` 至 `scripts/r5-acceptance.mjs`，
@@ -366,7 +371,7 @@ R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs
   回撤上限。开发段用于修改方案，
   独立验证段用于判定；看到验证结果后改规则必须启动新实验，不能重用原验证段宣称通过。
 - **静态判断对照**：single/critique 使用完全相同的 context、账户和计划快照，比较引用错误、
-  推理缺陷、批评纠错/引入错误、拒绝理由和延迟。相同快照的重复采样不算独立市场样本。
+  推理缺陷、批评纠错/引入错误、拒绝理由和延迟。Critic 专属指标只在 critique arm 计分；预注册标签必须在非空独立窗口中分别覆盖至少一项应采纳纠错和应驳回误报；缺任一分母时实验无效。相同快照的重复采样不算独立市场样本，validation 与任何其他 split 的逐窗 PIT 重叠均禁止。
 - **交易效果对照**：冻结现有 DSL 规则基线 `rules`，与 single/critique 共用外部 PIT 数据、
   初始权益、风险上限、执行内核、成本模型和评估时间网格。各路独立维护账户、持仓、计划和
   由自身计划产生的 W2；不能为了相同 context 强制覆盖策略已经分叉的账户状态。
@@ -429,8 +434,15 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 1. 用真实 HTX key 验证“非空持仓 + 已挂算法保护单”的 merged 读取与 reconcile。失败时保持冻结，
    补齐读取或本地保护意图线索后重验；本地记录不能替代交易所侧已生效保护的证据。
 2. 确认固定模型路由可用并完成价目表种子；模型版本或行为显著变化必须重新跑 R5。
-3. R5 真实调用前由负责人显式确定 `dailyBudgetUsd`/`dailyTokenCap` 与实验总额度。当前 profile 刻意不设日预算，
-   所以 production W1/W2/W3 fail-closed；未获预算授权时只运行 stub/静态验收，不尝试付费 provider 调用。
+3. R5 真实调用前由负责人显式确定 `dailyBudgetUsd`/`dailyTokenCap` 与实验总额度，并配置不与 production/其他进程
+   共用的专用 provider key；provider 账户也应专用或设 provider-side hard cap，否则本地总额只覆盖本 control registry。
+   当前 profile 刻意不设日预算，所以 production W1/W2/W3 fail-closed；未获预算授权时只运行 preflight/stub，不尝试付费 provider 调用。
+
+**当前外部验收阻塞（2026-09-21）**：本轮用户指令明确暂不进行真实交易所或 LLM 连接测试。因此 R5 的真实 provider 调用、真实调用后的执行链样本与独立 forward-paper 经济闸，以及 R6 的 HTX 非空持仓+算法保护单对账和 live 运行观察均未执行、不得标为通过。离线 fixture/stub 只能证明工程行为，不能替代这些证据；继续前须取得后续明确授权，并满足上述预算、凭据隔离与 provider hard-cap 条件。
+
+**静态判断质量阈值待负责人冻结**：§10.3 要求报告预标注 outcome、Critic 纠错/引入错误及预测正确率，但目前只对 schema/evidence/硬闸写了数值通过线，没有定义 outcome accuracy 或 Critic 命中率的硬阈值。R5 runner 因此只将这些质量指标独立报告，不自行发明阈值或宣称模型质量通过；若要把静态判断质量作为放行条件，需在真实运行前把阈值写入新冻结 protocol。
+
+**结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 
 其中真实模型调用也是 R5 的必要输入；路由、额度或价目不可用时，允许先完成离线检查，但必须
 报告 R5 对应部分阻塞，不能用假模型替代。进入 live 前 arm、交易标的与风险限额仍需显式配置。

@@ -1861,8 +1861,8 @@ Luna Max 复核指出，“存在一条 market 路径”不足以证明 PM 信�
 `set_target` 只可在远端 stop 仍有效且目标位于盈利方向时执行；`set_trailing` 只可在当前远端 stop 仍有效时增加 reduce-only 追踪保护；
 `cancel_all` 在 `decision_only` 只允许当前标的并保持持仓保护，全局撤单保持 fail-closed。对账/持仓状态未知时不因动作名推断“减险”。
 
-生产 `dailyBudgetUsd` 仍有意未配置，所以 W1/W2/W3 不发真实模型请求。R3/R4 工程 stub 输出分别见
-[R3](../dsh-trader/docs/r3-decision-envelope-2026-09-20.md) 与 [R4](../dsh-trader/docs/r4-trigger-worker-2026-09-20.md)；
+生产 `dailyBudgetUsd` 仍有意未配置，所以 W1/W2/W3 不发真实模型请求。R3/R4 工程 stub 输出于 2026-09-21
+重跑并留档：[R3](r3-decision-envelope-2026-09-21.md) 与 [R4](r4-trigger-worker-2026-09-21.md)。
 它们不替代 R5 真实模型回放、forward-paper 和经济验收。
 
 R5 的统计实现不得继续使用旧 P1.5 的逐笔共同前缀配对。已在 `supervisor/ab.ts` 增加严格共同时间网格的

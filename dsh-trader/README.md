@@ -42,10 +42,10 @@
 | T2.8 | 真实 agent 运行时权限收窄 | ✅ create/resume 共用 scoped restrict；judge 无 `trade_execute_order`，只读角色无副作用工具 |
 | T2.9 | 固化判断 workflow `trade_workflow_run` | ✅ 已接线（代码组装 pack、固定脚本；spawn child 只允许 `structured_output`，结果/失败均落审计） |
 | R1 | schema v5 + `DecisionContext` / decision run 存储根 | ✅ canonical context 与 draft/critique/final/eligibility 已落库；旧 snapshot/token 表已移除；验收见 `scripts/r1-acceptance.mjs` |
-| R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档；PIT 组装行情、benchmark、衍生品、组合/保护、完整计划和历史 outcome；请求长度 119,015 / 180,000 字符；正常空、缺失/过期/暖机、PIT、密钥脱敏和超长拒发均有非空验收；证据见 `docs/r2-decision-context-2026-09-20.md`。仅捕获渲染请求，未调用真实模型 |
-| R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；旧判断/工具链已删除；stub 工程证据见 `docs/r3-decision-envelope-2026-09-20.md`（无真实模型调用） |
-| R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `docs/r4-trigger-worker-2026-09-20.md`（无真实模型调用） |
-| R5 | 真实模型与 forward-paper 效果验收 | ⬜ 已有逐调用审计与账户权益 block-bootstrap 基础；真实模型 runner、非空样本与独立 forward-paper 仍待显式实验预算和实际运行，lesson 默认关闭 |
+| R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档（当前 schema v8）；固定 PIT fixture 的 context/request 为 107,128 / 119,243 字符，request 上限 180,000，UTF-8 输入预算保守上界 123,751 tokens；非空样本含行情、benchmark、衍生品、组合/保护、计划与 outcome；缺失/过期/暖机、PIT、脱敏和超长拒发均通过；复验见 `../docs/r2-decision-context-2026-09-21.md`。只捕获请求，未调用模型 |
+| R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；旧判断/工具链已删除；stub 工程证据见 `../docs/r3-decision-envelope-2026-09-21.md`（外部模型调用 0） |
+| R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；结算对未知成本 fail-closed，但生产 funding resolver 尚未接入，经济验收仍受阻；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `../docs/r4-trigger-worker-2026-09-21.md`（外部模型调用 0） |
+| R5 | 真实模型与 forward-paper 效果验收 | ⬜ 固定 DSH provider 的静态 single/critique runner 与离线护栏已实现：Critic 指标只计 critique arm、逐窗 PIT 指纹及 validation 部分重叠拒绝、纠错/误报非空标签、凭据值拦截、构建产物指纹、稳定共享预算 registry；纯本地 preflight 不实例化 provider。用法见 [`docs/r5-runner.md`](../docs/r5-runner.md)。无真实模型调用；真实 PIT 来源/预注册、静态质量阈值、预算授权、运行样本、独立 forward-paper 与 funding resolver 仍待完成/验证，lesson 默认关闭 |
 | R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，需同时设置 `TRADER_MODE=live_auto`、独立 `TRADER_LIVE_ARMED=1`、两项凭据及全部非空限额；缺凭据不降级；逐单 `live_confirm` 与自进化不在当前架构 |
 
 ## 开发

@@ -19,10 +19,10 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0–P2 与 T3.2–T3.5 的执行安全基础已完成；SR1 安全审查修复已合并；当前模式为 `paper`。
-**下一步**：R1 存储根与 R2 context/请求渲染已完成，按 [plan.md](plan.md) R3 实现并接通 single/critique 与 eligibility，再做 R4 即时动作、W2/W3、结算/成本和 R5 真实模型对照；分别通过工程与经济验收后再评估 R6 小额 `live_auto`。R2 用固定 PIT 样本捕获渲染请求，没有真实模型调用；当前生产判断仍是旧多分析师链。进入连续 P3 前仍需用真 HTX 验证“有持仓 + 算法保护单”的 merged 对账。
+**当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 只通过本地 stub 验收，不代表真实模型质量或经济效果。R5 的静态 runner、离线预算/数据隔离护栏已实现并通过本地测试，但没有可验证来源的 200 窗口 PIT manifest，也未做真实模型调用；当前模式保持 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
+**下一步**：R5 仍需负责人提供外部可复核的 PIT 来源/预注册记录、冻结静态质量放行阈值，并在明确预算授权后完成真实 provider 调用、≥50 个非空执行链样本和独立 forward-paper 经济验收；生产 settlement 目前未注入 funding resolver，净额因此保持 NULL，经济验收前还要接通并核验资金费来源。不以 stub 或模拟结果替代。R6 还需真实 HTX 验证“非空持仓 + 算法保护单”的 merged 对账及非空安全观察。本任务明确禁止真实 LLM/交易所连接测试，因此这些项目保留为阻塞项。
 
-**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与非空验收均已接线。SR1 补上未成交挂单名义、远端保护验证、部分成交恢复与终态审计锁。R1 已移除旧 context/token 表；R2 建立双时间行情归档与 DecisionContext 渲染器，但尚未接入生产模型调用。旧多 agent 判断链按 R3 重写，不保留兼容层。
+**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与审计均已接线。SR1/SR2 收紧未成交挂单敞口、远端保护、部分成交恢复、执行 API 暴露和 live arm。R1–R4 建立 DecisionContext、结构化判断、eligibility、统一执行及持久 W2/W3 worker；R2 捕获过固定 PIT 请求，R3/R4 工程证据使用 stub。旧多 agent 判断链已删除。R5 未完成真实调用和经济验收。
 
 **永久硬边界**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
