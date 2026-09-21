@@ -74,7 +74,7 @@ function makeRuntime(db: Database.Database, brokerOverride?: Broker, clockOverri
   } as unknown as Broker
   const ports: TradePorts = {
     db, bars, features, plans, journal, broker, clock,
-    limits: EXAMPLE_LIMITS, mode: 'paper', riskPct: 0.002,
+    limits: EXAMPLE_LIMITS, mode: 'paper', liveArmed: false, waiver: false, riskPct: 0.002,
     symbols: [SYMBOL], timeframes: ['15m', '1h', '4h'], benchmark: SYMBOL,
     frozenSymbols: () => new Set(),
   }
@@ -164,6 +164,18 @@ describe('R3 decision runtime', () => {
       expect(trace.responseHash).toMatch(/^sha256:/)
       expect(trace.durationMs).not.toBeNull()
       expect(traceRows[0]?.payload_json).not.toContain('MODEL-TRACE-MUST-REDACT')
+      const attemptRows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'decision_run_attempt_started'").all() as { payload_json: string }[]
+      expect(attemptRows).toHaveLength(1)
+      expect(JSON.parse(attemptRows[0]!.payload_json)).toMatchObject({
+        runId: first.runId,
+        provider: config.route.provider,
+        model: config.route.model,
+        dailyBudgetUsd: config.dailyBudgetUsd,
+        dailyTokenCap: null,
+        trigger: { source: trigger.source, id: trigger.id, attempt: trigger.attempt },
+        contextHash: first.contextHash,
+      })
+      expect(attemptRows[0]?.payload_json).not.toContain('MODEL-TRACE-MUST-REDACT')
       expect(runtime.journal.recentDecisions().map((item) => item.action)).toContain('no_trade')
       expect(new BudgetLedger(db).dashboard({ day: '2026-09-20' }).some((row) => row.costKnown && row.estUsd > 0)).toBe(true)
 

@@ -124,8 +124,10 @@ class FakeExchange implements CcxtProExchangeLike {
 }
 
 function config(over: Partial<ExecRuntimeConfig> = {}): ExecRuntimeConfig {
-  return {
+  const merged: ExecRuntimeConfig = {
     mode: 'paper',
+    liveArmed: false,
+    waiver: false,
     riskPct: 0.005,
     symbols: [SYMBOL],
     timeframes: ['1h'],
@@ -139,6 +141,7 @@ function config(over: Partial<ExecRuntimeConfig> = {}): ExecRuntimeConfig {
     paperFeeBps: 5,
     ...over,
   }
+  return merged
 }
 
 function openDatabase(): Database.Database {
@@ -196,13 +199,62 @@ describe('ExecRuntime 组合根', () => {
     db.close()
   })
 
-  it('ccxt runtime 将 accountType 传给 fetchBalance；缺凭据安全降级为 paper', async () => {
+  it('versions the effective runtime config while persisting credential presence only', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const cfg = config({ apiKey: 'RUNTIME-KEY-DO-NOT-STORE', apiSecret: 'RUNTIME-SECRET-DO-NOT-STORE' })
+    const first = await createExecRuntime(cfg, { db, clock })
+    const row = db.prepare('SELECT version, waiver, params_json FROM config_versions ORDER BY version DESC LIMIT 1').get() as {
+      version: number; waiver: number; params_json: string
+    }
+    const serialized = row.params_json
+    const saved = JSON.parse(serialized) as {
+      mode: string; liveArmed: boolean; waiver: boolean; credentials: { keyInjected: boolean; secretInjected: boolean }
+    }
+    expect(saved).toMatchObject({
+      mode: 'paper', liveArmed: false, waiver: false,
+      credentials: { keyInjected: true, secretInjected: true },
+    })
+    expect(row.waiver).toBe(0)
+    expect(serialized).not.toContain('RUNTIME-KEY-DO-NOT-STORE')
+    expect(serialized).not.toContain('RUNTIME-SECRET-DO-NOT-STORE')
+    await first.dispose()
+
+    const second = await createExecRuntime(cfg, { db, clock })
+    expect(db.prepare('SELECT COUNT(*) AS n FROM config_versions').get()).toMatchObject({ n: 1 })
+    await second.dispose()
+    db.close()
+  })
+
+  it('paper 无限额只有显式 waiver 才能运行，且配置版本准确标记 waiver', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    try {
+      await expect(createExecRuntime(config({ limits: null }), { db, clock }))
+        .rejects.toThrow(/显式 waiver=true/)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM config_versions').get()).toMatchObject({ n: 0 })
+
+      const runtime = await createExecRuntime(config({ limits: null, waiver: true }), { db, clock })
+      const saved = db.prepare('SELECT waiver, params_json FROM config_versions ORDER BY version DESC LIMIT 1').get() as {
+        waiver: number; params_json: string
+      }
+      expect(saved.waiver).toBe(1)
+      expect(JSON.parse(saved.params_json)).toMatchObject({ mode: 'paper', waiver: true, limits: null })
+      expect(runtime.getPorts()).toMatchObject({ mode: 'paper', waiver: true, limits: null })
+      await runtime.dispose()
+    } finally {
+      db.close()
+    }
+  })
+
+  it('ccxt runtime 将 accountType 传给 fetchBalance；armed live_auto 缺凭据时 fail-closed', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     const exchange = new FakeExchange()
     const live = await createExecRuntime(
       config({
         mode: 'live_auto',
+        liveArmed: true,
         venue: 'htx',
         apiKey: 'key',
         apiSecret: 'secret',
@@ -224,14 +276,18 @@ describe('ExecRuntime 组合根', () => {
     expect(live.broker.venue).toBe('htx')
     await live.dispose()
 
-    const fallback = await createExecRuntime(
-      config({ mode: 'live_auto', venue: 'htx', apiKey: undefined, apiSecret: undefined }),
-      { db, clock },
-    )
-    expect(fallback.broker.venue).toBe('paper')
-    const fallbackAccount = await fallback.broker.getAccount()
-    expect(fallbackAccount.equityQuote).toBeGreaterThan(0)
-    await fallback.dispose()
+    let missingCredentialExchangeCalls = 0
+    await expect(createExecRuntime(
+      config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: undefined, apiSecret: undefined }),
+      {
+        db, clock,
+        createExchange: () => {
+          missingCredentialExchangeCalls += 1
+          return new FakeExchange()
+        },
+      },
+    )).rejects.toThrow(/API key 与 secret/)
+    expect(missingCredentialExchangeCalls).toBe(0)
     db.close()
   })
 
@@ -318,6 +374,7 @@ describe('ExecRuntime 组合根', () => {
     const runtime = await createExecRuntime(
       config({
         mode: 'live_auto',
+        liveArmed: true,
         venue: 'htx',
         apiKey: 'key',
         apiSecret: 'secret',
@@ -343,7 +400,7 @@ describe('ExecRuntime 组合根', () => {
     const exchange = new FakeExchange()
     exchange.openOrders = [{ id: 'orphan-order', clientOrderId: 'foreign-client', symbol: SYMBOL, status: 'open', type: 'limit', amount: 1, price: 100 }]
     const runtime = await createExecRuntime(
-      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret', liveAckOrphans: false }),
+      config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret', liveAckOrphans: false }),
       { db, clock, createExchange: () => exchange },
     )
     try {
@@ -372,7 +429,7 @@ describe('ExecRuntime 组合根', () => {
       stopPrice: 90, reduceOnly: false, createdAt: NOW, exchangeOrderId: 'missing-exchange-id',
     })
     const runtime = await createExecRuntime(
-      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
       { db, clock, createExchange: () => new FakeExchange() },
     )
     try {
@@ -384,7 +441,7 @@ describe('ExecRuntime 组合根', () => {
         intentId: 'new-open', clientOrderId: 'new-open', decisionId: 'new-open',
         symbol: SYMBOL, type: 'market', side: 'buy', qty: 0.01, notionalUsd: 1,
       }, account, {
-        mode: 'live_auto', limits: EXAMPLE_LIMITS, duplicateDecision: false,
+        mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS, duplicateDecision: false,
         paperVenue: 'paper', frozenSymbols: runtime.frozenSymbols(),
       })).toMatchObject({ kind: 'deny' })
     } finally {
@@ -416,7 +473,7 @@ describe('ExecRuntime 组合根', () => {
     exchange.openOrders = [exchange.directOrder]
 
     const runtime = await createExecRuntime(
-      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
       { db, clock, createExchange: () => exchange },
     )
     try {
@@ -439,7 +496,7 @@ describe('ExecRuntime 组合根', () => {
     // CrashRecovery 会按单标的读 6 个普通/算法列表；让随后的第一次完整对账读失败一次。
     exchange.failFetchOpenOrdersCall = 7
     const runtime = await createExecRuntime(
-      config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+      config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
       { db, clock, createExchange: () => exchange },
     )
     try {
@@ -458,7 +515,7 @@ describe('ExecRuntime 组合根', () => {
         reduceOnly: true,
       }
       expect(validateIntent(reducing, account, {
-        mode: 'live_auto', limits: EXAMPLE_LIMITS, duplicateDecision: false,
+        mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS, duplicateDecision: false,
         paperVenue: 'paper', frozenSymbols: runtime.frozenSymbols(),
       })).toEqual({ kind: 'allow' })
 
@@ -554,7 +611,7 @@ describe('ExecRuntime 组合根', () => {
     exchange.positions = [{ symbol: 'OTHER/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
     try {
       const runtime = await createExecRuntime(
-        config({ mode: 'live_auto', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+        config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
         { db, clock, createExchange: () => exchange },
       )
       try {
@@ -576,14 +633,14 @@ describe('ExecRuntime 组合根', () => {
     }
   })
 
-  it('live_confirm 在构造 exchange 前 fail-closed，且不触达下单路由', async () => {
+  it('live_auto 必须显式 arm 且限额非空；拒绝发生在构造 exchange 前', async () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     let exchangeCalls = 0
     try {
       await expect(
         createExecRuntime(
-          config({ mode: 'live_confirm', venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+          config({ mode: 'live_auto', liveArmed: false, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
           {
             db,
             clock,
@@ -593,7 +650,20 @@ describe('ExecRuntime 组合根', () => {
             },
           },
         ),
-      ).rejects.toThrow('当前没有结构化逐单确认通道')
+      ).rejects.toThrow(/显式 liveArmed=true/)
+      await expect(
+        createExecRuntime(
+          config({ mode: 'live_auto', liveArmed: true, limits: null, venue: 'htx', apiKey: 'key', apiSecret: 'secret' }),
+          {
+            db,
+            clock,
+            createExchange: () => {
+              exchangeCalls += 1
+              throw new Error('不应构造 exchange')
+            },
+          },
+        ),
+      ).rejects.toThrow(/全部硬风险限额/)
       expect(exchangeCalls).toBe(0)
       expect(db.prepare('SELECT COUNT(*) AS n FROM order_intents').get()).toEqual({ n: 0 })
     } finally {
@@ -610,6 +680,7 @@ describe('ExecRuntime 组合根', () => {
     const runtime = await createExecRuntime(
       config({
         mode: 'live_auto',
+        liveArmed: true,
         venue: 'htx',
         apiKey: 'key',
         apiSecret: 'secret',

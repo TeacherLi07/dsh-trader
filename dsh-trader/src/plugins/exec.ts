@@ -30,7 +30,9 @@ import type { DecisionContextConfig } from '../agents/context-config.js'
 export const name = 'trade-exec'
 
 export const Config = z.object({
-  mode: z.union(['paper', 'live_confirm', 'live_auto']).required(),
+  mode: z.union(['paper', 'live_auto']).required(),
+  liveArmed: z.boolean().default(false),
+  waiver: z.boolean().default(false),
   perOrderCapUsd: z.number(),
   maxExposureUsd: z.number(),
   maxLeverage: z.number(),
@@ -85,7 +87,9 @@ export const Config = z.object({
 })
 
 export interface ExecConfig {
-  mode: 'paper' | 'live_confirm' | 'live_auto'
+  mode: 'paper' | 'live_auto'
+  liveArmed?: boolean
+  waiver?: boolean
   perOrderCapUsd?: number
   maxExposureUsd?: number
   maxLeverage?: number
@@ -124,14 +128,14 @@ function hasCredential(value: string | undefined): boolean {
 }
 
 /**
- * 纯函数：只有非 paper 模式且两把凭据都存在，才允许组合根选择 CcxtBroker。
- * 没有凭据时保持 paper 是安全默认；返回值只包含路由，不携带任何密钥。
+ * 纯函数：只有 live_auto 已显式 arm 且两把凭据都存在，才允许组合根选择 CcxtBroker。
+ * 路由结果只表达是否具备 live 条件，不携带密钥；armed live_auto 缺凭据会被 apply/runtime 拒绝启动。
  */
 export function shouldUseLiveBroker(config: ExecConfig): boolean {
-  return config.mode !== 'paper' && hasCredential(config.apiKey) && hasCredential(config.apiSecret)
+  return config.mode === 'live_auto' && config.liveArmed === true && hasCredential(config.apiKey) && hasCredential(config.apiSecret)
 }
 
-/** 供组合根/测试使用的 broker 路由；缺凭据的 live 配置安全降级为 paper。 */
+/** 纯路由判断；live_auto 缺凭据时给出 paper 诊断路由，但 apply/runtime 会拒绝启动。 */
 export function resolveExecBroker(config: ExecConfig): ExecBrokerKind {
   return shouldUseLiveBroker(config) ? 'ccxt' : 'paper'
 }
@@ -140,7 +144,7 @@ export function resolveExecBroker(config: ExecConfig): ExecBrokerKind {
 export interface CredentialStatus {
   readonly keyInjected: boolean
   readonly secretInjected: boolean
-  /** 非 paper 且凭据齐全 = 允许走真实下单路由。 */
+  /** live_auto 已 arm 且凭据齐全 = 允许走真实下单路由。 */
   readonly liveCapable: boolean
   readonly route: ExecBrokerKind
 }
@@ -151,7 +155,7 @@ export function credentialStatus(config: ExecConfig): CredentialStatus {
   return {
     keyInjected,
     secretInjected,
-    liveCapable: config.mode !== 'paper' && keyInjected && secretInjected,
+    liveCapable: config.mode === 'live_auto' && config.liveArmed === true && keyInjected && secretInjected,
     route: resolveExecBroker(config),
   }
 }
@@ -168,7 +172,16 @@ export function limitsFromConfig(config: ExecConfig): RiskLimits | null {
     config.maxSpreadBps,
     config.maxOpenOrders,
   ]
-  if (values.some((value) => value === undefined)) return null
+  const supplied = values.filter((value) => value !== undefined).length
+  if (supplied === 0) return null
+  if (supplied !== values.length) {
+    throw new StartupParamsError(['风控限额字段不完整：不允许将部分配置当作 waiver'])
+  }
+  for (const [index, value] of values.entries()) {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+      throw new StartupParamsError([`风控限额字段 ${index + 1} 必须是有限正数`])
+    }
+  }
   return {
     perOrderCapUsd: config.perOrderCapUsd as number,
     maxExposureUsd: config.maxExposureUsd as number,
@@ -205,10 +218,11 @@ function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | un
     return undefined
   }
   const limits = limitsFromConfig(config)
-  // 本插件没有 waiver 配置；缺限额时拒绝启动 runtime，避免把配置遗漏当成显式放弃。
-  if (limits === null) return undefined
+  if (limits === null && (config.mode !== 'paper' || config.waiver !== true)) return undefined
   return {
     mode: config.mode,
+    liveArmed: config.liveArmed === true,
+    waiver: config.waiver === true,
     riskPct: config.riskPct,
     symbols: config.symbols,
     timeframes: config.timeframes,
@@ -217,14 +231,16 @@ function runtimeConfigFromExecConfig(config: ExecConfig): ExecRuntimeConfig | un
     venue: (config.venue ?? 'htx') as ExecRuntimeConfig['venue'],
     accountType: config.accountType ?? 'swap',
     positionSide: config.positionSide ?? 'both',
-    perOrderCapUsd: limits.perOrderCapUsd,
-    maxExposureUsd: limits.maxExposureUsd,
-    maxLeverage: limits.maxLeverage,
-    dailyLossLimitUsd: limits.dailyLossLimitUsd,
-    maxDrawdownUsd: limits.maxDrawdownUsd,
-    maxConsecutiveLosses: limits.maxConsecutiveLosses,
-    maxSpreadBps: limits.maxSpreadBps,
-    maxOpenOrders: limits.maxOpenOrders,
+    ...(limits === null ? { limits: null } : {
+      perOrderCapUsd: limits.perOrderCapUsd,
+      maxExposureUsd: limits.maxExposureUsd,
+      maxLeverage: limits.maxLeverage,
+      dailyLossLimitUsd: limits.dailyLossLimitUsd,
+      maxDrawdownUsd: limits.maxDrawdownUsd,
+      maxConsecutiveLosses: limits.maxConsecutiveLosses,
+      maxSpreadBps: limits.maxSpreadBps,
+      maxOpenOrders: limits.maxOpenOrders,
+    }),
     apiKey: config.apiKey,
     apiSecret: config.apiSecret,
     sandbox: config.sandbox,
@@ -260,16 +276,29 @@ export function apply(ctx: Context, config: ExecConfig): void {
   )
 
   if (config.reconcileEnabled === true) {
-    // apply 内的 runtime 创建是异步的，单纯在 Promise catch 里记录日志会让
-    // profile 看似启动成功；当前没有逐单 ask 通道，live_confirm 必须在注册
-    // 任何执行 runtime 之前同步拒绝。只读预检不创建 runtime，仍可独立运行。
-    assertExecRuntimeMode(config.mode)
+    // live_auto 未单独 arm 时在异步 runtime 创建前同步拒绝；只读预检不创建 runtime。
+    assertExecRuntimeMode(config.mode, config.liveArmed)
+    if (config.mode === 'live_auto' && !status.liveCapable) {
+      throw new StartupParamsError(['live_auto 必须同时注入非空 API key 与 secret；拒绝降级为 PaperBroker'])
+    }
   }
 
   // plan §12 #17：风控参数自洽校验。paper 模式权益已知 ⇒ **启动即校验，不自洽就拒绝启动**；
   // live 模式的权益要等首次 getAccount()，由 live-engine 做一次性校验并落审计。
   // 不自洽会让每一单都在 perOrderCapUsd 处被打回 —— 系统"看起来在跑"却永远不成交。
   const startupLimits = limitsFromConfig(config)
+  if (config.reconcileEnabled === true && config.waiver === true && config.mode !== 'paper') {
+    throw new StartupParamsError(['waiver 仅允许 paper 模式'])
+  }
+  if (config.reconcileEnabled === true && config.waiver === true && startupLimits !== null) {
+    throw new StartupParamsError(['已提供完整风险限额时不得同时设置 waiver'])
+  }
+  if (config.reconcileEnabled === true && startupLimits === null && config.waiver !== true) {
+    throw new StartupParamsError(['风险限额缺失：仅 paper 可通过显式 waiver=true 启动'])
+  }
+  if (config.reconcileEnabled === true && config.mode === 'live_auto' && startupLimits === null) {
+    throw new StartupParamsError(['live_auto 必须提供完整且非空的风险限额'])
+  }
   if (startupLimits !== null && config.riskPct !== undefined) {
     const inconsistent = startupLimitsError({
       mode: config.mode,

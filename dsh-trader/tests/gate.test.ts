@@ -32,6 +32,8 @@ const intent = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 const policy = (over: Partial<GatePolicy> = {}): GatePolicy => ({
   mode: 'paper',
   limits: EXAMPLE_LIMITS,
+  liveArmed: false,
+  waiver: false,
   // 宏观时间窗**默认不启用**（plan §12.1 #22）：这里刻意不传 `tradingWindowOpen`。
   duplicateDecision: false,
   paperVenue: 'paper',
@@ -104,12 +106,29 @@ describe('validateIntent (hard gate)', () => {
     expect(validateIntent(reduce, stressed, tight)).toEqual({ kind: 'allow' })
   })
 
-  it('keeps only the always-on checks when risk limits are explicitly waived', () => {
-    const waived = policy({ limits: null })
+  it('paper must explicitly waive missing limits; live_auto never accepts a missing limit or waiver', () => {
+    const waived = policy({ limits: null, waiver: true })
     expect(validateIntent(intent({ notionalUsd: 10_000_000 }), account, waived)).toEqual({ kind: 'allow' })
+    expect(validateIntent(intent(), account, policy({ limits: null }))).toMatchObject({
+      kind: 'deny', reason: expect.stringContaining('未显式 waiver'),
+    })
     expect(validateIntent(intent(), account, policy({ limits: null, duplicateDecision: true }))).toMatchObject({
       kind: 'deny',
     })
+
+    const liveAccount = { ...account, venue: 'htx' as const }
+    expect(validateIntent(intent(), liveAccount, policy({ mode: 'live_auto', limits: EXAMPLE_LIMITS }))).toMatchObject({
+      kind: 'deny', reason: expect.stringContaining('未显式 arm'),
+    })
+    expect(validateIntent(intent(), liveAccount, policy({
+      mode: 'live_auto', liveArmed: true, limits: null, waiver: true,
+    }))).toMatchObject({ kind: 'deny' })
+    expect(validateIntent(intent(), liveAccount, policy({
+      mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS,
+    }))).toEqual({ kind: 'allow' })
+    expect(validateIntent(intent({ reduceOnly: true }), liveAccount, policy({
+      mode: 'live_auto', limits: null,
+    }))).toEqual({ kind: 'allow' })
   })
 
   it('账户快照含 NaN 时 fail-closed，而不是让比较运算静默放行', () => {

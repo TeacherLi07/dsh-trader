@@ -299,10 +299,13 @@ refs、regime、TTL 和适用范围，且不能修改 prompt、配置、DSL、�
 ### 8.1 模式
 
 - `paper`：实时行情，本地撮合；默认模式。
-- `live_auto`：小额实盘，无逐单人工确认；启动时必须显式 arm，且全部限额非空。
+- `live_auto`：小额实盘，无逐单人工确认；启动必须 `TRADER_MODE=live_auto`、另行显式 `TRADER_LIVE_ARMED=1`、两项非空 HTX 凭据及完整非空限额；缺任一项不得创建交易 runtime，也不得降级成 paper。
 
 删除未实现的 `live_confirm`，也删除 live 下的 `waiver`。需要人工介入时使用 `/halt`、只读控制台和
 重新 arm，而不是保留一个名义存在、实际未接线的模式。
+
+真实 broker、动作执行器与组合根是包内实现，不从包根 API 或 package subpath 暴露；`plugins/*` 只通过统一组合根接线。
+硬闸在 `execute-action` 二次拒绝未 arm 或缺少完整限额的 live 开仓，不能仅依赖插件 Config 校验。
 
 ### 8.2 成本
 
@@ -345,6 +348,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | R1 | schema v5 + DecisionContext 类型与 store | ✅ `decision_contexts` 保存 canonical 全文或不可变 content ref；`decision_runs` 保存 draft/critique/final/eligibility 与模型成本；终态 run 由 store 与 SQLite trigger 双重禁止改写；旧 context/token 表已从生产 schema/引用移除；验收：`dsh-trader/scripts/r1-acceptance.mjs` |
 | R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，历史证据见 `docs/r2-decision-context-2026-09-20.md` |
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
+| SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
 | R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-20.md`；没有真实模型调用 |
 | R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-20.md`；没有真实模型调用 |
 | R5 | 真实 LLM 回放 + forward paper | ⬜ 已铺设单次模型请求/响应/成本审计与完整账户时间块 bootstrap；仍缺 `scripts/r5-acceptance.mjs` 真实模型运行入口、≥200 个真实判断窗口、执行样本覆盖及独立 forward-paper 经济证据；按 §12 先取得实验预算，stub 不算真实调用 |

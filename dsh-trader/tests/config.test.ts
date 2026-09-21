@@ -99,11 +99,13 @@ describe('startup params', () => {
     }
   })
 
-  it('treats an explicit waiver as first-class and keeps it continuously visible', () => {
-    const params = resolveStartupParams({ waiver: true, mode: 'live_auto' }, 1000)
+  it('allows a visible risk waiver in paper but forbids waiving live_auto limits', () => {
+    const params = resolveStartupParams({ waiver: true, mode: 'paper' }, 1000)
     expect(params.limits).toBeNull()
     expect(params.waiver).toBe(true)
     expect(describeStartup(params).join('\n')).toContain('风控参数已放弃')
+    expect(() => resolveStartupParams({ waiver: true, mode: 'live_auto' }, 1000)).toThrow(/live_auto 不允许 waiver/)
+    expect(() => resolveStartupParams({ waiver: true, mode: 'live_confirm' as never }, 1000)).toThrow(/mode 非法/)
   })
 
   it('启动自洽校验：paper 立即校验，live 交给首次账户读取（plan §12 #17）', () => {

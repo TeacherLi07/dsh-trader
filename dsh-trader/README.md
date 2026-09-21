@@ -46,7 +46,7 @@
 | R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；旧判断/工具链已删除；stub 工程证据见 `docs/r3-decision-envelope-2026-09-20.md`（无真实模型调用） |
 | R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `docs/r4-trigger-worker-2026-09-20.md`（无真实模型调用） |
 | R5 | 真实模型与 forward-paper 效果验收 | ⬜ 已有逐调用审计与账户权益 block-bootstrap 基础；真实模型 runner、非空样本与独立 forward-paper 仍待显式实验预算和实际运行，lesson 默认关闭 |
-| R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，以显式 arm 的小额 `live_auto` 运行；`live_confirm` 与自进化不在当前计划 |
+| R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，需同时设置 `TRADER_MODE=live_auto`、独立 `TRADER_LIVE_ARMED=1`、两项凭据及全部非空限额；缺凭据不降级；逐单 `live_confirm` 与自进化不在当前架构 |
 
 ## 开发
 

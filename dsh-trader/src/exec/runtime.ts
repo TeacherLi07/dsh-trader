@@ -33,6 +33,7 @@ import { HeartbeatStore } from '../supervisor/heartbeat.js'
 import { decisionContextConfig } from '../agents/context-config.js'
 import { protectPositionOrClose, protectionClientOrderId } from './protection.js'
 import { withExposureLock } from './exposure-lock.js'
+import { canonicalJson } from '../util/canonical.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx']
@@ -66,15 +67,12 @@ export interface ExecRuntime {
   dispose(): Promise<void>
 }
 
-export const LIVE_CONFIRM_UNSUPPORTED_REASON =
-  'live_confirm 拒绝启动：当前没有结构化逐单确认通道，禁止创建执行 runtime'
-
-/**
- * live_confirm 不能仅靠日志降级：若继续创建真实 broker，调用者会误以为每单都
- * 经过人工确认。插件入口和组合根都调用同一守卫，确保异步/直接调用两条路径一致。
- */
-export function assertExecRuntimeMode(mode: ExecRuntimeConfig['mode']): void {
-  if (mode === 'live_confirm') throw new Error(LIVE_CONFIRM_UNSUPPORTED_REASON)
+/** paper 是缺省；live_auto 必须显式 arm，不能因旧模式名或遗漏配置悄悄进入执行 runtime。 */
+export function assertExecRuntimeMode(mode: ExecRuntimeConfig['mode'], liveArmed?: boolean): void {
+  if (mode !== 'paper' && mode !== 'live_auto') throw new Error(`mode 非法：${String(mode)}`)
+  if (mode === 'live_auto' && liveArmed !== true) {
+    throw new Error('live_auto 需要显式 liveArmed=true；未 arm 时拒绝创建执行 runtime')
+  }
 }
 
 interface RiskOutcomeRow {
@@ -240,9 +238,15 @@ function limitsFromConfig(config: ExecRuntimeConfig): RiskLimits | null {
 }
 
 function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): void {
-  if (!['paper', 'live_confirm', 'live_auto'].includes(config.mode)) {
+  if (!['paper', 'live_auto'].includes(config.mode)) {
     throw new Error('mode 非法：' + String(config.mode))
   }
+  if (config.mode === 'live_auto' && limits === null) throw new Error('live_auto 必须提供全部硬风险限额')
+  if (config.mode === 'live_auto' && config.waiver === true) throw new Error('live_auto 不允许 waiver')
+  if (config.mode === 'paper' && limits === null && config.waiver !== true) {
+    throw new Error('paper 无硬风险限额时必须显式 waiver=true')
+  }
+  if (limits !== null && config.waiver === true) throw new Error('已有完整硬风险限额时不能同时设置 waiver')
   if (!Number.isFinite(config.riskPct) || config.riskPct <= 0 || config.riskPct > 0.05) {
     throw new Error('riskPct 必须在 (0, 0.05] 内')
   }
@@ -260,6 +264,9 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
     throw new Error('settleMs 必须是有限正数')
   }
   if (config.mode !== 'paper') {
+    if (!hasCredential(config.apiKey) || !hasCredential(config.apiSecret)) {
+      throw new Error('live_auto 必须同时注入非空 API key 与 secret')
+    }
     if (!LIVE_VENUES.includes(config.venue as Exclude<Venue, 'paper'>)) {
       throw new Error('实盘 venue 非法：' + String(config.venue) + '（生产只允许 htx）')
     }
@@ -270,6 +277,53 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
   finitePositive(config.paperInitialEquityQuote, 'paperInitialEquityQuote')
   finiteNonNegative(config.paperSlippageBps, 'paperSlippageBps')
   finiteNonNegative(config.paperFeeBps, 'paperFeeBps')
+}
+
+/** 版本化可审计运行配置，但只存凭据存在性；密钥本身绝不进入数据库。 */
+function recordExecConfigVersion(
+  db: Database.Database,
+  now: number,
+  config: ExecRuntimeConfig,
+  limits: RiskLimits | null,
+): void {
+  const safeParams = {
+    mode: config.mode,
+    liveArmed: config.liveArmed === true,
+    waiver: config.waiver === true,
+    riskPct: config.riskPct,
+    symbols: [...config.symbols],
+    timeframes: [...config.timeframes],
+    benchmark: config.benchmark,
+    limits,
+    venue: config.venue,
+    accountType: config.accountType,
+    positionSide: config.positionSide ?? 'both',
+    decisionContext: decisionContextConfig(config.decisionContext),
+    reconcileMs: config.reconcileMs,
+    settleMs: config.settleMs ?? 60_000,
+    liveAckOrphans: config.liveAckOrphans ?? config.acknowledgeOrphans ?? false,
+    sandbox: config.sandbox === true,
+    paperInitialEquityQuote: config.paperInitialEquityQuote ?? 10_000,
+    paperSlippageBps: config.paperSlippageBps ?? 5,
+    paperFeeBps: config.paperFeeBps ?? 5,
+    credentials: {
+      keyInjected: hasCredential(config.apiKey),
+      secretInjected: hasCredential(config.apiSecret),
+    },
+  }
+  const paramsJson = canonicalJson(safeParams)
+  const statements = new Statements(db)
+  const latest = statements.get('SELECT version, params_json FROM config_versions ORDER BY version DESC LIMIT 1')
+  const insert = statements.get('INSERT INTO config_versions (ts, author, waiver, params_json) VALUES (?, ?, ?, ?)')
+  const record = db.transaction(() => {
+    const existing = latest.get() as { version: number; params_json: string } | undefined
+    if (existing?.params_json === paramsJson) return existing.version
+    insert.run(now, 'system', config.waiver === true ? 1 : 0, paramsJson)
+    const inserted = statements.get('SELECT MAX(version) AS version FROM config_versions').get() as { version: number | null }
+    if (inserted.version === null) throw new Error('runtime config version insert failed')
+    return inserted.version
+  })
+  record()
 }
 
 type ExchangeFactory = (venue: 'htx', options?: Readonly<Record<string, unknown>>) => CcxtProExchangeLike | Promise<CcxtProExchangeLike>
@@ -321,13 +375,12 @@ export async function createExecRuntime(
   const startup = new StartupTracker(journal, deps.clock)
   startup.start('database')
 
-  // 当前没有结构化的逐单人工确认通道；在任何 runtime 参数/交易所处理前失败，
-  // 不能把未确认的实盘执行伪装成安全过渡档。
   let limits: RiskLimits | null
   try {
-    assertExecRuntimeMode(config.mode)
+    assertExecRuntimeMode(config.mode, config.liveArmed)
     limits = limitsFromConfig(config)
     validateConfig(config, limits)
+    recordExecConfigVersion(deps.db, deps.clock.now(), config, limits)
   } catch (error) {
     startup.fail('database', error)
     throw error
@@ -350,9 +403,7 @@ export async function createExecRuntime(
 
   startup.start('exchange')
   try {
-    if (config.mode === 'paper' || !hasCredential(config.apiKey) || !hasCredential(config.apiSecret)) {
-      // 缺凭据的 live 配置安全落到 paper，但保留原 mode；gate 会因 venue=paper deny，
-      // 所以这个降级不会把「想实盘」误变成可下单的纸面授权。
+    if (config.mode === 'paper') {
       const priceOf = deps.priceOf ?? config.priceOf ?? defaultPriceOf(bars, config.symbols, config.timeframes)
       broker = new PaperBroker({
         clock: deps.clock,
@@ -437,6 +488,8 @@ export async function createExecRuntime(
     clock: deps.clock,
     limits,
     mode: config.mode,
+    liveArmed: config.liveArmed === true,
+    waiver: config.waiver === true,
     riskPct: config.riskPct,
     symbols: Object.freeze([...config.symbols]),
     timeframes: Object.freeze([...config.timeframes]),

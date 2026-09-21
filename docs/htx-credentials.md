@@ -65,7 +65,9 @@ node scripts/htx-preflight.mjs htx BTC/USDT:USDT /tmp/htx-preflight.json
 哑值最终返回 `api-signature-not-valid / Incorrect Access key`，恰好证明"凭据确实送到了交易所并被校验"。
 回归测试见 `tests/exec-ccxt-broker.test.ts`（断言 `exchange.apiKey`/`exchange.secret` 被写入、错误消息脱敏）。
 
-## 5. 之后（不在本文范围，plan §12.2 A）
+## 5. 后续边界（可执行计划见 `plan.md` §8.1 / §12）
 
 - 第②步：`paper` 模式跑通全链路（行情仍用真实公开数据）；
-- 第③步：`live_confirm`（每单人工 `ask`），稳住后再评估 `live_auto`（需 §12.2 E 授权）。
+- R5 真实模型/forward-paper 验收和 HTX 非空保护单对账完成、且取得明确授权前，不进入 P3；
+- 当前没有 `live_confirm` 逐单确认协议。未来获准启用实盘时，必须同时设置
+  `TRADER_MODE=live_auto` 与 `TRADER_LIVE_ARMED=1`，并提供完整非空硬风险限额；缺任一条件拒绝创建 runtime。

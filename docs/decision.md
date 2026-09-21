@@ -3,7 +3,7 @@
 > **本文是 rationale / 证据 / 被否决选项的记录，不是施工图。可执行计划见 [`plan.md`](../plan.md)。**
 > 原文件名 `docs/dsh-crypto-trading-agent-plan.md`；§0–§16 保留历史依据，不代表当前实现或授权边界。
 > 实现时包名与目录定为 **`dsh-trader`**（见 `/workspace/dsh-trader/`）；本文中出现的 `dsh-trading-agents` 为历史名称。
-> 最新架构审议见 [§17（2026-09-19）](#architecture-review-2026-09-19)。旧文中的固定多角色、持久 desk、
+> 架构审议见 [§17（2026-09-19）](#architecture-review-2026-09-19)；当前运行模式与 arm 边界以 [§21（2026-09-20）](#21-2026-09-20-删除-live_confirm-并强制-live_auto-arm) 和 `plan.md` 为准。旧文中的固定多角色、持久 desk、
 > waiver 和“反思让模型越做越准”等表述，按当前 `plan.md` 的范围与验收解释。
 
 > 参考项目：[TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)（LangGraph 多智能体交易框架）
@@ -1869,3 +1869,22 @@ R5 的统计实现不得继续使用旧 P1.5 的逐笔共同前缀配对。已�
 完整账户权益对齐、权益回撤与时间块配对 bootstrap；缺失时间点、空曲线或少于两个独立时间块均拒绝产出有效 CI。
 旧 `scripts/ab-gate.mjs` 与逐笔 bootstrap 只留作历史 P1.5 替身诊断，不能作为 R5 结论。真实 LLM/forward-paper
 执行仍等待 §12 的显式预算/额度决定，因此 R5 未完成。
+
+## 21. 2026-09-20：删除 live_confirm 并强制 live_auto arm
+
+`live_confirm` 没有真实逐单确认协议，保留它会让配置界面声称有一条实际不存在的安全模式，因此从 RunMode、插件 schema、
+启动解析和运行时路由删除。旧值即使以 untyped 配置或与 paper waiver 组合出现，也会在解析时拒绝。
+
+### 21.1 2026-09-21：封闭公开交易 API 并统一 arm/waiver
+
+真实执行现在要求 `TRADER_MODE=live_auto`、独立 `TRADER_LIVE_ARMED=1`、两项非空 HTX 凭据及完整限额同时存在；
+插件入口先同步检查，组合根再校验，缺凭据时拒绝启动而不是降级 PaperBroker，避免 mode/route 错配。
+paper 下可显式 waiver，live_auto 不可 waiver。
+没有 arm 时 `resolveExecBroker` 只能返回 paper，不能仅凭环境里的 key 自动进入 live。
+`createExecRuntime` 再独立校验 arm 和非空限额，并把生效配置版本化到 `config_versions`；只记录 key/secret 注入布尔，
+不落实际值。paper waiver 的 `config_versions.waiver` 与参数正文一致；部分限额不能伪装成 waiver。
+相同配置重启复用最新版本，限额、waiver、arm、mode 或 credential presence 改变才新增版本。
+
+包根仅保留 DSH carrier metadata，不再重导出 `HtxBroker`、`executeAction`、`createExecRuntime` 等交易内核 API；
+验收脚本走未映射到 package exports 的 `internal-api`，从 Node 包 API 不能直接取得真实 broker 或执行路径。
+硬闸本身也二次检查 live arm 与限额，防止内部调用绕过启动 Config。

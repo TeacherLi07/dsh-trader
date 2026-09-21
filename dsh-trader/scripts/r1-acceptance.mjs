@@ -12,7 +12,7 @@ import {
   SCHEMA_VERSION,
   freezeDecisionContext,
   migrate,
-} from '../lib/index.js'
+} from '../lib/internal-api.js'
 
 const AS_OF = 1_700_000_000_000
 const db = new Database(':memory:')

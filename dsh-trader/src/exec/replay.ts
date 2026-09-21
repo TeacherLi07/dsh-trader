@@ -44,7 +44,9 @@ export interface ReplayDeps {
   readonly rules?: readonly RuleSpec[]
   readonly riskPct: number
   readonly mode: RunMode
+  readonly liveArmed?: boolean
   readonly limits: RiskLimits | null
+  readonly waiver?: boolean
   /** 结算视界（plan §7.9 / §12 #18）；省略时按 `timeframe` 推导（4 根 bar 夹在 4h–24h）。 */
   readonly reflectionHorizonMs?: number
   /** 判断通道（W2/W3）。不注入 = A 臂（纯机械执行）。 */
@@ -270,7 +272,9 @@ export async function replay(deps: ReplayDeps, request: ReplayRequest): Promise<
               position,
               riskPct: deps.riskPct,
               mode: deps.mode,
+              liveArmed: deps.liveArmed === true,
               limits: deps.limits,
+              waiver: deps.waiver === true,
               reflectionHorizonMs:
                 deps.reflectionHorizonMs ?? horizonMsForTimeframe(request.timeframe),
               alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),

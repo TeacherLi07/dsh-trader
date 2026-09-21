@@ -28,6 +28,7 @@ class PartialFillBroker implements Broker {
   observedPositionQty = 0.25
   reduceCalls = 0
   protectiveRequests: ProtectiveRequest[] = []
+  placeOrderRequests: OrderRequest[] = []
   cancelAllCalls: { readonly includeProtection: boolean }[] = []
   #ack: OrderAck | undefined
   #position: PositionSnapshot | undefined
@@ -49,6 +50,7 @@ class PartialFillBroker implements Broker {
   }
 
   async placeOrder(request: OrderRequest): Promise<OrderAck> {
+    this.placeOrderRequests.push(request)
     if (request.reduceOnly === true) {
       this.reduceCalls += 1
       const before = this.#position?.qty ?? 0
@@ -106,6 +108,38 @@ class PartialFillBroker implements Broker {
 }
 
 describe('executeAction partial-fill safety', () => {
+  it('the direct action path rejects live_auto opens without arm or complete limits before broker submission', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    const journal = new DecisionJournal(db)
+    const broker = new PartialFillBroker()
+    const clock = new ReplayClock(NOW)
+    const plan = makeCard({ planId: 'direct-gate-plan', symbol: SYMBOL, createdAt: NOW - 1, windowEndsAt: NOW + 1_000_000 })
+    const run = (conditionId: string, liveArmed: boolean, limits: typeof EXAMPLE_LIMITS | null) => executeAction({
+      journal, broker, clock, plan, conditionId,
+      action: {
+        action: 'open', side: 'long', method: 'market',
+        stop: { method: 'structure', level: 90 }, riskFraction: 1,
+      },
+      symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
+      referencePrice: 100, atr: null, riskPct: 0.001,
+      mode: 'live_auto', liveArmed, limits,
+      reflectionHorizonMs: 14_400_000, alreadyIntended: () => false,
+    })
+    try {
+      const unarmed = await run('unarmed', false, EXAMPLE_LIMITS)
+      expect(unarmed).toMatchObject({ executed: false, denied: true })
+      expect(unarmed.reason).toContain('未显式 arm')
+
+      const unlimited = await run('no-limits', true, null)
+      expect(unlimited).toMatchObject({ executed: false, denied: true })
+      expect(unlimited.reason).toContain('完整硬风险限额')
+      expect(broker.placeOrderRequests).toEqual([])
+    } finally {
+      db.close()
+    }
+  })
+
   it('cancels an unfilled remainder, journals actual partial quantity, and protects the live position', async () => {
     const db = new Database(':memory:')
     migrate(db)
@@ -124,7 +158,7 @@ describe('executeAction partial-fill safety', () => {
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
-        riskPct: 0.001, mode: 'live_auto', limits: EXAMPLE_LIMITS,
+        riskPct: 0.001, mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS,
         reflectionHorizonMs: 14_400_000, alreadyIntended: () => false,
       })
 
@@ -157,7 +191,7 @@ describe('executeAction partial-fill safety', () => {
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
-        riskPct: 0.001, mode: 'live_auto', limits: EXAMPLE_LIMITS,
+        riskPct: 0.001, mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS,
         reflectionHorizonMs: 14_400_000, alreadyIntended: () => false,
         freezeSymbol: (symbol) => frozen.add(symbol),
       })
@@ -193,7 +227,7 @@ describe('executeAction partial-fill safety', () => {
         },
         symbol: SYMBOL, timeframe: '1h', barTs: NOW - 3_600_000,
         referencePrice: 100, atr: null, account: await broker.getAccount(), position: undefined,
-        riskPct: 0.001, mode: 'live_auto', limits: EXAMPLE_LIMITS,
+        riskPct: 0.001, mode: 'live_auto', liveArmed: true, limits: EXAMPLE_LIMITS,
         reflectionHorizonMs: 14_400_000, alreadyIntended: () => false,
         freezeSymbol: (symbol) => frozen.add(symbol),
       })

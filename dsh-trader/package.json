@@ -12,7 +12,15 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./plugins/*": "./lib/plugins/*.js"
+    "./plugins/db": "./lib/plugins/db.js",
+    "./plugins/market": "./lib/plugins/market.js",
+    "./plugins/rules": "./lib/plugins/rules.js",
+    "./plugins/exec": "./lib/plugins/exec.js",
+    "./plugins/supervisor": "./lib/plugins/supervisor.js",
+    "./plugins/predictions": "./lib/plugins/predictions.js",
+    "./plugins/commands": "./lib/plugins/commands.js",
+    "./plugins/probe": "./lib/plugins/probe.js",
+    "./plugins/ui": "./lib/plugins/ui.js"
   },
   "dsh": {
     "bundle": {

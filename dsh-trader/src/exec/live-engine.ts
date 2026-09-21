@@ -43,7 +43,9 @@ export interface LiveEngineDeps {
   readonly broker: Broker
   readonly clock: Clock
   readonly mode: RunMode
+  readonly liveArmed?: boolean
   readonly limits: RiskLimits | null
+  readonly waiver?: boolean
   readonly riskPct: number
   readonly reflectionHorizonMs?: number
   /** 可选持久触发队列；未注入时由 engine 内存集合承担同一进程内去重。 */
@@ -255,7 +257,9 @@ export class LiveEngine {
       position,
       riskPct: this.deps.riskPct,
       mode: this.deps.mode,
+      liveArmed: this.deps.liveArmed === true,
       limits: this.deps.limits,
+      waiver: this.deps.waiver === true,
       reflectionHorizonMs:
         this.deps.reflectionHorizonMs ?? horizonMsForTimeframe(input.timeframe),
       alreadyIntended: (clientOrderId) => this.deps.journal.hasClientOrderId(clientOrderId),

@@ -41,12 +41,16 @@
       name: dsh-trader/plugins/exec
       config:
         # ★ 运行模式由**启动参数**决定，不写死在仓库里（红线「默认 paper」）：
-        #   · 交互：`TRADER_MODE=live_auto dsh --profile trade`
+        #   · 交互：`TRADER_MODE=live_auto TRADER_LIVE_ARMED=1 dsh --profile trade`
         #   · 生产：通过 Docker secret/env-file 注入（见部署手册）
         #   未设 ⇒ paper；非法值会被本插件 Config 的 union 校验**拒绝启动**，不会静默降级。
         #   为什么用环境变量而不是 `--patch`：patch 的 `config` 是**整行替换**，用 --patch 覆盖
-        #   mode 会把限额一起丢掉；env 是本项目既有的启动参数通道（TRADER_API_KEY/VENUE/ACCOUNT_TYPE）。
+        #   mode 会把限额一起丢掉；env 是本项目既有的启动参数通道（TRADER_API_KEY/VENUE/ACCOUNT_TYPE/LIVE_ARMED）。
         mode: !!js process.env.TRADER_MODE || 'paper'
+        # live_auto 单独显式 arm；少了这一位即使 mode/key 都在也不会启动交易 runtime。
+        liveArmed: !!js process.env.TRADER_LIVE_ARMED === '1'
+        # 仅 paper 可显式无风险限额运行；live_auto 一律拒绝 waiver。
+        waiver: false
         # ── 风险限额：由**实测权益 24.914 USDT** 推导，不写死"安全数"（plan §6.5 / §12 #17）──
         # 单笔风险 0.2% → 0.05 USDT；BTC 1h 2×ATR 止损约 0.5% → 名义 ≈10 USDT。
         # 自洽校验：maxNotionalAtMinStop = 24.914 × 0.002 ÷ 0.005 ≈ 9.97 ≤ perOrderCapUsd=12 ✓

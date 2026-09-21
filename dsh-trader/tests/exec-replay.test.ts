@@ -306,6 +306,7 @@ describe('回放审计修复', () => {
       riskPct: 0.01,
       mode: 'paper',
       limits: null,
+      waiver: true,
     }
     return { db, clock, bars, queue, broker, deps }
   }

@@ -239,6 +239,27 @@ export async function runDecisionRuntime(input: {
     })
   }
 
+  journal.appendAudit({
+    actor: 'system', kind: 'decision_run_attempt_started',
+    payload: {
+      runId,
+      trigger: {
+        source: trigger.source, id: trigger.id, at: trigger.at, attempt: trigger.attempt,
+        expiresAt: trigger.expiresAt ?? null, predictionAlias: trigger.predictionAlias ?? null,
+      },
+      strategy: config.strategy,
+      provider: config.route.provider,
+      model: config.route.model,
+      maxOutputTokens: config.route.maxTokens,
+      maxRequestChars: config.route.maxChars,
+      dailyBudgetUsd: config.dailyBudgetUsd ?? null,
+      dailyTokenCap: config.dailyTokenCap ?? null,
+      planWindowMs: config.planWindowMs,
+      contextHash: context.contextHash,
+    },
+    ts: ports.clock.now(),
+  })
+
   const ledger = new BudgetLedger(ports.db)
   const prices = new PriceTableStore(ports.db)
   const reservations = new Map<string, { readonly tokens: number; readonly usd: number | null }>()
@@ -517,7 +538,9 @@ export async function runDecisionRuntime(input: {
         atr,
         riskPct: ports.riskPct,
         mode: ports.mode,
+        liveArmed: ports.liveArmed,
         limits: ports.limits,
+        waiver: ports.waiver,
         reflectionHorizonMs: ports.reflectionHorizonMs ?? 4 * 3_600_000,
         alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
         ...(ports.frozenSymbols === undefined ? {} : { frozenSymbols: ports.frozenSymbols }),

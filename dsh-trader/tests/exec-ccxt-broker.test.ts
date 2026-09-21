@@ -672,12 +672,13 @@ describe('CcxtBroker', () => {
 })
 
 describe('exec plugin broker routing', () => {
-  const base = { mode: 'live_confirm' as const }
+  const base = { mode: 'live_auto' as const, liveArmed: true }
 
-  it('only selects ccxt for non-paper mode with both credentials', () => {
+  it('selects ccxt only for armed live_auto with both credentials', () => {
     expect(shouldUseLiveBroker({ ...base, apiKey: API_KEY, apiSecret: API_SECRET })).toBe(true)
     expect(resolveExecBroker({ ...base, apiKey: API_KEY, apiSecret: API_SECRET })).toBe('ccxt')
     expect(resolveExecBroker({ ...base, apiKey: API_KEY })).toBe('paper')
+    expect(resolveExecBroker({ ...base, liveArmed: false, apiKey: API_KEY, apiSecret: API_SECRET })).toBe('paper')
     expect(resolveExecBroker({ mode: 'paper', apiKey: API_KEY, apiSecret: API_SECRET })).toBe('paper')
     expect(resolveExecBroker({ ...base, apiKey: ' ', apiSecret: API_SECRET })).toBe('paper')
   })

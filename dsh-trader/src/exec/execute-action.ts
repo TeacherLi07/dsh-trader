@@ -50,7 +50,9 @@ export interface ExecuteActionArgs {
   readonly position?: PositionSnapshot
   readonly riskPct: number
   readonly mode: RunMode
+  readonly liveArmed?: boolean
   readonly limits: RiskLimits | null
+  readonly waiver?: boolean
   readonly reflectionHorizonMs: number
   /** 查询已落库意图；实现必须以 clientOrderId 为唯一键。 */
   readonly alreadyIntended: (clientOrderId: string) => boolean
@@ -544,7 +546,9 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
   // 不传 `tradingWindowOpen`：宏观时间窗**不是硬闸**（plan §12.1 #22），由 news 分析师提示词软判断。
   const policy: GatePolicy = {
     mode: args.mode,
+    liveArmed: args.liveArmed === true,
     limits: args.limits,
+    waiver: args.waiver === true,
     duplicateDecision: args.alreadyIntended(intent.clientOrderId),
     paperVenue: 'paper',
     ...(args.frozenSymbols === undefined ? {} : { frozenSymbols: args.frozenSymbols() }),

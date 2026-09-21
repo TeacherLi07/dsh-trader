@@ -27,7 +27,7 @@ import {
   normalizeCandles,
   renderDecisionRequest,
   timeframeMs,
-} from '../lib/index.js'
+} from '../lib/internal-api.js'
 
 const OUT = process.argv[2]
 const AS_OF = 1_700_000_000_000

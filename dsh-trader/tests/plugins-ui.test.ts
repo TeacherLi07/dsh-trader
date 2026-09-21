@@ -43,6 +43,8 @@ function makePorts(db: Database.Database, clock: ReplayClock, over: Partial<Trad
     clock,
     limits: null,
     mode: 'paper',
+    liveArmed: false,
+    waiver: true,
     riskPct: 0.002,
     symbols: ['BTC/USDT'],
     timeframes: ['1h'],

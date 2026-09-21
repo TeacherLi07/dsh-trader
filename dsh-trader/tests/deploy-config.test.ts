@@ -13,6 +13,8 @@ describe('部署配置：运行模式来自启动参数', () => {
 
   it('trade-exec.mode 引用 TRADER_MODE，而不是字面量', () => {
     expect(patch).toMatch(/mode:\s*!!js\s+process\.env\.TRADER_MODE/)
-    expect(patch).not.toMatch(/^\s*mode:\s*(paper|live_confirm|live_auto)\s*$/m)
+    expect(patch).not.toMatch(/^\s*mode:\s*(paper|live_auto)\s*$/m)
+    expect(patch).toMatch(/liveArmed:\s*!!js\s+process\.env\.TRADER_LIVE_ARMED\s*===\s*'1'/)
+    expect(patch).toMatch(/waiver:\s*false/)
   })
 })

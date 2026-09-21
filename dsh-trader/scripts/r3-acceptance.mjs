@@ -23,7 +23,7 @@ import {
   SCHEMA_VERSION,
   migrate,
   runDecisionRuntime,
-} from '../lib/index.js'
+} from '../lib/internal-api.js'
 
 const OUT = process.argv[2]
 const AS_OF = Date.UTC(2026, 8, 20, 12)
@@ -64,6 +64,8 @@ try {
     clock,
     limits: null,
     mode: 'paper',
+    liveArmed: false,
+    waiver: true,
     riskPct: 0.002,
     symbols: [SYMBOL],
     timeframes: ['15m', '1h', '4h'],

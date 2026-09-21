@@ -26,6 +26,10 @@ export interface TradePorts {
   readonly clock: Clock
   readonly limits: RiskLimits | null
   readonly mode: RunMode
+  /** 运行时接受到的 live arm；模型和调用方不能从 prompt 文本取得此授权。 */
+  readonly liveArmed: boolean
+  /** paper 无硬限额时必须有显式 waiver；live_auto 永远不接受 waiver。 */
+  readonly waiver: boolean
   readonly riskPct: number
   readonly reflectionHorizonMs?: number
   readonly pm?: PmStore
@@ -46,6 +50,10 @@ export interface TradePorts {
  */
 export interface ExecRuntimeConfig {
   readonly mode: RunMode
+  /** live_auto 必须由启动配置单独显式 arm；默认未 arm。 */
+  readonly liveArmed?: boolean
+  /** 仅 paper 可显式放弃硬风险限额；用于配置审计与 gate 二次校验。 */
+  readonly waiver?: boolean
   readonly riskPct: number
   readonly symbols: readonly string[]
   readonly timeframes: readonly string[]

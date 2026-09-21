@@ -16,7 +16,7 @@ import {
   TriggerQueue,
   dispatchNextTrigger,
   migrate,
-} from '../lib/index.js'
+} from '../lib/internal-api.js'
 
 const OUT = process.argv[2]
 const NOW = Date.UTC(2026, 8, 20, 12)

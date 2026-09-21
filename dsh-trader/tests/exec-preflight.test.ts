@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
-import { EXAMPLE_LIMITS } from '../src/config.js'
+import { EXAMPLE_LIMITS, StartupParamsError } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
 import type { AccountSnapshot, Broker, OrderAck, OrderRequest, PositionSnapshot } from '../src/exec/broker.js'
 import { validateIntent } from '../src/exec/gate.js'
@@ -12,7 +12,7 @@ import {
   runReadOnlyPreflight,
   type ReadOnlyBalanceSource,
 } from '../src/exec/preflight.js'
-import { credentialStatus } from '../src/plugins/exec.js'
+import { apply as applyExecPlugin, credentialStatus, limitsFromConfig } from '../src/plugins/exec.js'
 import type { LocalOrderSnapshot } from '../src/exec/reconcile.js'
 
 const NOW = 1_700_000_000_000
@@ -205,20 +205,35 @@ describe('凭据状态：只输出布尔', () => {
     expect(status).toEqual({ keyInjected: true, secretInjected: true, liveCapable: false, route: 'paper' })
   })
 
-  it('live 模式缺凭据安全降级 paper', () => {
-    expect(credentialStatus({ mode: 'live_confirm' })).toEqual({
+  it('live broker route 缺凭据标记为 paper；runtime 启动仍另行 fail-closed', () => {
+    expect(credentialStatus({ mode: 'live_auto' })).toEqual({
       keyInjected: false,
       secretInjected: false,
       liveCapable: false,
       route: 'paper',
     })
-    expect(credentialStatus({ mode: 'live_confirm', apiKey: 'k' }).liveCapable).toBe(false)
+    expect(credentialStatus({ mode: 'live_auto', liveArmed: true, apiKey: 'k' }).liveCapable).toBe(false)
+    expect(credentialStatus({ mode: 'live_auto', apiKey: 'k', apiSecret: 's' }).route).toBe('paper')
   })
 
-  it('live 模式 + 两把凭据才 liveCapable', () => {
-    const status = credentialStatus({ mode: 'live_auto', apiKey: 'k', apiSecret: 's' })
+  it('live_auto + 显式 arm + 两把凭据才 liveCapable', () => {
+    const status = credentialStatus({ mode: 'live_auto', liveArmed: true, apiKey: 'k', apiSecret: 's' })
     expect(status.liveCapable).toBe(true)
     expect(status.route).toBe('ccxt')
+  })
+})
+
+describe('plugin 风险限额解析', () => {
+  it('全空表示未提供，部分配置必须报错而不能混同为 waiver', () => {
+    expect(limitsFromConfig({ mode: 'paper' })).toBeNull()
+    expect(() => limitsFromConfig({ mode: 'paper', perOrderCapUsd: 10 })).toThrow(StartupParamsError)
+  })
+
+  it('armed live_auto 缺 API 凭据时在插件入口同步拒绝，不启动 paper runtime', () => {
+    const context = { logger: () => ({ info: () => undefined }) } as never
+    expect(() => applyExecPlugin(context, {
+      mode: 'live_auto', liveArmed: true, reconcileEnabled: true,
+    })).toThrow(/API key 与 secret/)
   })
 })
 

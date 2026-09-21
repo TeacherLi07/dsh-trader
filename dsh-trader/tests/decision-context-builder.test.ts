@@ -69,7 +69,7 @@ function fixtureBroker(over: {
 function ports(broker = fixtureBroker(), clock = new ReplayClock(AS_OF)): TradePorts {
   return {
     db, bars, features, plans, journal, broker, clock,
-    limits: EXAMPLE_LIMITS, mode: 'paper', riskPct: 0.002,
+    limits: EXAMPLE_LIMITS, mode: 'paper', liveArmed: false, waiver: false, riskPct: 0.002,
     symbols: [SYMBOL], timeframes: ['15m', '1h', '4h'], benchmark: BENCHMARK,
     frozenSymbols: () => new Set(),
   }

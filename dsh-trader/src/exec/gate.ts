@@ -10,7 +10,7 @@
  *   · 永远生效：模式一致性、幂等、结构校验；
  *   · **只拦"增加敞口"的订单**：perOrderCap / 总敞口 / 杠杆 / 挂单数 / 日亏 / 回撤 / 连亏 / 点差；
  *   · **降险订单（reduceOnly）直接放行** —— "不能开仓永远比乱开仓安全"，同理"能平仓永远比不能平仓安全"；
- *   · `limits === null`（用户显式放弃风控）时只保留永远生效的三条，并在审计里持续可见。
+ *   · `limits === null` 只有 paper + 显式 waiver 可用于开仓；live_auto 开仓必须有 arm 与完整限额。
  */
 
 import type { AccountSnapshot, OrderRequest, Venue } from './broker.js'
@@ -19,6 +19,8 @@ import type { RiskLimits, RunMode } from '../config.js'
 export interface GatePolicy {
   readonly mode: RunMode
   readonly limits: RiskLimits | null
+  readonly liveArmed?: boolean
+  readonly waiver?: boolean
   /**
    * 宏观事件窗口是否允许开新仓。
    *
@@ -78,6 +80,12 @@ export function validateIntent(
   if (policy.mode !== 'paper' && account.venue === policy.paperVenue) {
     return deny(`${policy.mode} 模式不允许提交到 ${policy.paperVenue} 撮合`)
   }
+  if (increasesExposure(intent) && policy.mode === 'live_auto' && policy.liveArmed !== true) {
+    return deny('live_auto 未显式 arm，拒绝增加敞口')
+  }
+  if (increasesExposure(intent) && policy.mode === 'live_auto' && policy.waiver === true) {
+    return deny('live_auto 不接受 waiver，拒绝增加敞口')
+  }
 
   // ---- 永远生效：幂等 ----
   if (policy.duplicateDecision) {
@@ -128,7 +136,18 @@ export function validateIntent(
   }
 
   const limits = policy.limits
-  if (limits === null) return ALLOW // 用户显式放弃风控：安全机制（幂等/对账/心跳）仍然生效
+  if (limits === null) {
+    if (increasesExposure(intent) && policy.mode === 'live_auto') {
+      return deny('live_auto 必须提供完整硬风险限额，拒绝增加敞口')
+    }
+    if (increasesExposure(intent) && policy.mode === 'paper' && policy.waiver !== true) {
+      return deny('paper 无硬风险限额但未显式 waiver，拒绝增加敞口')
+    }
+    return ALLOW // 显式 paper waiver 与降险订单仍保留幂等/冻结/模式等永远生效的检查
+  }
+  if (increasesExposure(intent) && policy.waiver === true) {
+    return deny('配置同时包含硬风险限额与 waiver，拒绝增加敞口')
+  }
 
   // 降险订单不受风控限额阻挡（可平不可开）
   if (!increasesExposure(intent)) return ALLOW

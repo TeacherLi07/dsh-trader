@@ -4,13 +4,13 @@
  * 规则（plan.md §14.3）：
  *   · 风控参数是**运行时输入**，不是代码常量，也不是配置默认值；
  *   · **缺省即拒绝启动** —— 系统不替用户猜一个"安全的数"，那会制造虚假安全感；
- *   · 用户可**显式放弃**（一等公民路径），但放弃必须留痕、持续可见、且可随时补上；
+ *   · paper 可**显式放弃**（一等公民路径），但 live_auto 必须有完整限额且不接受 waiver；
  *   · 放弃风控**不等于**放弃安全机制：幂等、对账、心跳熔断不随风控参数一起消失（§6.3）。
  */
 
-export type RunMode = 'paper' | 'live_confirm' | 'live_auto'
+export type RunMode = 'paper' | 'live_auto'
 
-export const RUN_MODES = ['paper', 'live_confirm', 'live_auto'] as const
+export const RUN_MODES = ['paper', 'live_auto'] as const
 
 /** 硬闸读取的全部阈值；`null` 表示用户显式放弃了风控参数。 */
 export interface RiskLimits {
@@ -26,13 +26,13 @@ export interface RiskLimits {
 
 export interface StartupParams {
   readonly mode: RunMode
-  /** 单笔风险占总权益比例，例如 0.01 = 1%。0 仅在有 waiver 时合法。 */
+  /** 单笔风险占总权益比例，例如 0.01 = 1%。paper waiver 可为 0，live_auto 不可 waiver。 */
   readonly riskPct: number
   readonly symbols: readonly string[]
   /** 结算基准（crypto 用 BTC/ETH，绝不用 SPY）。 */
   readonly benchmark: string
   readonly limits: RiskLimits | null
-  /** true = 用户明确知悉后果后放弃风控参数，风险自负。必须写进审计与启动摘要。 */
+  /** true = paper 用户明确知悉后果后放弃风控参数；live_auto 绝不允许。 */
   readonly waiver: boolean
   readonly decidedAt: number
 }
@@ -43,6 +43,7 @@ export interface StartupParamsInput {
   symbols?: readonly string[]
   benchmark?: string
   limits?: Partial<RiskLimits>
+  /** 仅 paper 可以显式放弃风险限额；live_auto 不允许此字段绕过限额。 */
   waiver?: boolean
   decidedAt?: number
   /** 账户报价币种权益；传入后才启用启动期自洽校验，省略以保持旧调用方行为。 */
@@ -159,13 +160,20 @@ export function startupLimitsError(input: {
 }
 
 /**
- * 解析启动参数：缺省即抛 `StartupParamsError`；仅当 `waiver === true` 时返回受限参数集。
+ * 解析启动参数：缺省即抛 `StartupParamsError`；paper 才允许显式 waiver。
  * `now` 由注入的 Clock 提供，便于回放与测试。
  */
 export function resolveStartupParams(input: StartupParamsInput, now: number): StartupParams {
   const decidedAt = input.decidedAt ?? now
 
+  if (input.mode !== undefined && !(RUN_MODES as readonly string[]).includes(String(input.mode))) {
+    throw new StartupParamsError([`mode 非法：${String(input.mode)}`])
+  }
+
   if (input.waiver === true) {
+    if (input.mode === 'live_auto') {
+      throw new StartupParamsError(['live_auto 不允许 waiver，必须提供完整风险限额'])
+    }
     return Object.freeze({
       mode: input.mode ?? 'paper',
       riskPct: input.riskPct ?? 0,
@@ -180,7 +188,7 @@ export function resolveStartupParams(input: StartupParamsInput, now: number): St
   const errors: string[] = []
 
   if (input.mode === undefined) {
-    errors.push('mode 未提供（paper | live_confirm | live_auto）')
+    errors.push('mode 未提供（paper | live_auto）')
   } else if (!RUN_MODES.includes(input.mode)) {
     errors.push(`mode 非法：${String(input.mode)}`)
   }
