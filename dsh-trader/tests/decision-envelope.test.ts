@@ -15,6 +15,7 @@ function context(over: {
   readonly priceStatus?: string
   readonly reconciliationState?: string
   readonly predictionAvailable?: boolean
+  readonly specification?: Record<string, unknown>
 } = {}) {
   return freezeDecisionContext({
     symbol: SYMBOL,
@@ -22,11 +23,15 @@ function context(over: {
     asOf: AS_OF,
     sections: {
       mandate: { asOf: AS_OF, source: 'test', missing: [], value: {
-        runtime: { mode: 'paper', limits: { perOrderCapUsd: 100, maxExposureUsd: 200 } },
+        runtime: { mode: 'paper', riskPct: 0.002, limits: { perOrderCapUsd: 100, maxExposureUsd: 200 } },
         contextConfig: { accountMaxAgeMs: 10_000, specMaxAgeMs: 10_000 },
         contractSpecification: {
           observation: { eventTime: AS_OF - 1 },
-          value: { linear: true, contractSize: 1, amountStepContracts: 0.001 },
+          value: {
+            linear: true, contractSize: 1, amountStepContracts: 0.001,
+            priceStep: 0.01, minAmountContracts: 0.001, minNotionalQuote: 1,
+            ...over.specification,
+          },
         },
       } },
       market: { asOf: AS_OF, source: 'test', missing: [], value: {
@@ -104,6 +109,39 @@ describe('DecisionEnvelope R3 validation', () => {
     const validRef = parseDecisionEnvelopeCandidate(candidate(), noPrice)
     expect(validRef.ok).toBe(true)
     if (validRef.ok) expect(evaluateDecisionEligibility(noPrice, validRef.candidate, validRef.evidenceIssues).state).toBe('decision_only')
+  })
+
+  it('requires complete market minimum specs and a risk-sized order above both exchange floors', () => {
+    const missingSpecs: readonly Record<string, unknown>[] = [
+      { priceStep: null },
+      { minAmountContracts: null },
+      { minNotionalQuote: null },
+    ]
+    expect(missingSpecs).toHaveLength(3)
+    for (const specification of missingSpecs) {
+      const frozen = context({ specification })
+      const parsed = parseDecisionEnvelopeCandidate(candidate(), frozen)
+      expect(parsed.ok).toBe(true)
+      if (parsed.ok) expect(evaluateDecisionEligibility(frozen, parsed.candidate, parsed.evidenceIssues).state).toBe('decision_only')
+    }
+
+    const tooFewContracts = context({ specification: { minAmountContracts: 0.3 } })
+    const quantityCandidate = parseDecisionEnvelopeCandidate(candidate(), tooFewContracts)
+    expect(quantityCandidate.ok).toBe(true)
+    if (quantityCandidate.ok) {
+      const eligibility = evaluateDecisionEligibility(tooFewContracts, quantityCandidate.candidate, quantityCandidate.evidenceIssues)
+      expect(eligibility.state).toBe('decision_only')
+      expect(eligibility.reasons.join(' ')).toContain('quantity/notional not executable')
+    }
+
+    const tooMuchNotional = context({ specification: { minNotionalQuote: 21 } })
+    const notionalCandidate = parseDecisionEnvelopeCandidate(candidate(), tooMuchNotional)
+    expect(notionalCandidate.ok).toBe(true)
+    if (notionalCandidate.ok) {
+      const eligibility = evaluateDecisionEligibility(tooMuchNotional, notionalCandidate.candidate, notionalCandidate.evidenceIssues)
+      expect(eligibility.state).toBe('decision_only')
+      expect(eligibility.reasons.join(' ')).toContain('notional is below market minimum')
+    }
   })
 
   it('PM W3 context cannot authorize opening until an independent market gate is validated', () => {

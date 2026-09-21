@@ -1,6 +1,7 @@
 /** R3 的唯一模型裁决工件与确定性资格检查（plan §3.1 / §6）。 */
 
 import type { DecisionContext } from './decision-context.js'
+import { computeSize, stopPriceFor } from '../exec/sizing.js'
 import {
   ACTION_KINDS,
   computeContentHash,
@@ -14,6 +15,7 @@ import {
   type PlanAction,
   type PlanCard,
 } from '../plan/schema.js'
+import { fingerprint } from '../util/canonical.js'
 
 export type ClaimKind = 'observation' | 'inference' | 'assumption'
 
@@ -155,6 +157,9 @@ export const DECISION_ENVELOPE_TOOL = {
     required: ['outcome', 'thesis', 'rejectedAlternatives', 'claims', 'uncertainties', 'confidence', 'riskFraction'],
   },
 } as const
+
+/** 工具名、说明或 schema 任一变化都不得复用旧 terminal run。 */
+export const DECISION_ENVELOPE_SCHEMA_VERSION = fingerprint(DECISION_ENVELOPE_TOOL)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -323,8 +328,11 @@ export function evaluateDecisionEligibility(
 ): EligibilityResult {
   const reasons = [...evidenceIssues]
   if (envelope.outcome !== 'act') return { state: 'decision_only', reasons, validatedEvidencePaths: [] }
-  const opens = actionHasOpen(envelope.immediateAction) || envelope.plan?.commitments.some((item) => actionHasOpen(item.then)) === true
-  if (!opens) return { state: 'decision_only', reasons, validatedEvidencePaths: [] }
+  const openActions = [
+    ...(actionHasOpen(envelope.immediateAction) ? [envelope.immediateAction] : []),
+    ...(envelope.plan?.commitments.flatMap((item) => actionHasOpen(item.then) ? [item.then] : []) ?? []),
+  ]
+  if (openActions.length === 0) return { state: 'decision_only', reasons, validatedEvidencePaths: [] }
 
   const portfolio = isRecord(context.sections.portfolio.value) ? context.sections.portfolio.value : undefined
   const account = portfolio !== undefined && isRecord(portfolio['account']) ? portfolio['account'] : undefined
@@ -362,6 +370,11 @@ export function evaluateDecisionEligibility(
   if (specification === undefined || specification['linear'] !== true ||
       !Number.isFinite(specification['contractSize']) || Number(specification['contractSize']) <= 0 ||
       !Number.isFinite(specification['amountStepContracts']) || Number(specification['amountStepContracts']) <= 0) reasons.push('linear market specification unavailable')
+  if (specification === undefined || !Number.isFinite(specification['priceStep']) || Number(specification['priceStep']) <= 0 ||
+      !Number.isFinite(specification['minAmountContracts']) || Number(specification['minAmountContracts']) <= 0 ||
+      !Number.isFinite(specification['minNotionalQuote']) || Number(specification['minNotionalQuote']) < 0) {
+    reasons.push('market minimum order specification unavailable')
+  }
   if (mandate !== undefined && isRecord(mandate['contractSpecification']) && isRecord(mandate['contractSpecification']['observation'])) {
     const specTime = mandate['contractSpecification']['observation']['eventTime']
     if (!Number.isFinite(specTime) || now - Number(specTime) > maxSpecAgeMs) reasons.push('linear market specification stale')
@@ -382,6 +395,71 @@ export function evaluateDecisionEligibility(
   const atrImmediateOpen = actionHasOpen(envelope.immediateAction) && envelope.immediateAction.stop.method === 'atr'
   if ((atrPlanOpen || atrInvalidationOpen || atrImmediateOpen) &&
       (features?.['atr14'] === undefined || !isRecord(features['atr14']) || features['atr14']['status'] !== 'ok')) reasons.push('ATR stop dependency unavailable')
+
+  // eligibility 必须复算实际定仓并应用交易所张数步进；仅有 contractSize/step 但没有最小量规格，
+  // 会把必然被交易所拒绝的微型订单误标成可开仓。ccxt 的 amount 是张数，内部执行数量则是基础币。
+  const entryPrice = close !== undefined && close['status'] === 'ok' && typeof close['value'] === 'number'
+    ? close['value']
+    : Number.NaN
+  const equityQuote = account !== undefined && typeof account['equityQuote'] === 'number'
+    ? account['equityQuote']
+    : Number.NaN
+  const riskPct = runtime !== undefined && typeof runtime['riskPct'] === 'number' ? runtime['riskPct'] : Number.NaN
+  const contractSize = specification !== undefined && typeof specification['contractSize'] === 'number'
+    ? specification['contractSize']
+    : Number.NaN
+  const amountStepContracts = specification !== undefined && typeof specification['amountStepContracts'] === 'number'
+    ? specification['amountStepContracts']
+    : Number.NaN
+  const minAmountContracts = specification !== undefined && typeof specification['minAmountContracts'] === 'number'
+    ? specification['minAmountContracts']
+    : Number.NaN
+  const minNotionalQuote = specification !== undefined && typeof specification['minNotionalQuote'] === 'number'
+    ? specification['minNotionalQuote']
+    : Number.NaN
+  const perOrderCapUsd = limits !== undefined && typeof limits['perOrderCapUsd'] === 'number'
+    ? limits['perOrderCapUsd']
+    : Number.NaN
+  const remainingExposureUsd = remainingLimits !== undefined && typeof remainingLimits['exposureUsd'] === 'number'
+    ? remainingLimits['exposureUsd']
+    : Number.NaN
+  const atr = features !== undefined && isRecord(features['atr14']) && features['atr14']['status'] === 'ok' &&
+    typeof features['atr14']['value'] === 'number' ? features['atr14']['value'] : null
+  const sizingInputsAvailable = Number.isFinite(entryPrice) && entryPrice > 0 &&
+    Number.isFinite(equityQuote) && equityQuote > 0 && Number.isFinite(riskPct) && riskPct > 0 &&
+    Number.isFinite(contractSize) && contractSize > 0 && Number.isFinite(amountStepContracts) && amountStepContracts > 0 &&
+    Number.isFinite(minAmountContracts) && minAmountContracts > 0 &&
+    Number.isFinite(minNotionalQuote) && minNotionalQuote >= 0 &&
+    Number.isFinite(perOrderCapUsd) && perOrderCapUsd > 0 &&
+    Number.isFinite(remainingExposureUsd) && remainingExposureUsd > 0
+  if (!sizingInputsAvailable) {
+    reasons.push('open sizing inputs unavailable')
+  } else {
+    const maxNotionalUsd = Math.min(perOrderCapUsd, remainingExposureUsd)
+    for (const [index, action] of openActions.entries()) {
+      const stopPrice = stopPriceFor(entryPrice, action.side, action.stop, atr)
+      if (stopPrice === undefined) {
+        reasons.push(`open[${index}] stop cannot be derived from fresh market data`)
+        continue
+      }
+      const sizing = computeSize({
+        equityQuote,
+        riskPct: riskPct * envelope.riskFraction,
+        entryPrice,
+        stopPrice,
+        qtyStep: amountStepContracts * contractSize,
+        minQty: minAmountContracts * contractSize,
+        maxNotionalUsd,
+      })
+      if (!sizing.ok) {
+        reasons.push(`open[${index}] quantity/notional not executable: ${sizing.reason}`)
+        continue
+      }
+      const contracts = sizing.qty / contractSize
+      if (contracts + 1e-9 < minAmountContracts) reasons.push(`open[${index}] quantity is below market minimum`)
+      if (sizing.notionalUsd + 1e-9 < minNotionalQuote) reasons.push(`open[${index}] notional is below market minimum`)
+    }
+  }
   const validatedEvidencePaths = [...new Set(envelope.claims.flatMap((claim) => claim.evidencePaths)
     .filter((path) => evidenceValueAvailable(pointerValue(context, path))))]
   return {
