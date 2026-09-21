@@ -9,15 +9,18 @@ DSH 启动时按 **继承的 `process.env` > `$PWD/.env` > `$DSH_HOME/.env`** �
 
 ```bash
 install -m 600 /dev/null ~/.dsh/.env      # 建空文件并直接给 0600
-# 然后用编辑器写入两行（不要 echo，避免进 shell history）：
+# 然后用编辑器写入需要的变量（不要 echo，避免进 shell history）：
+#   DEEPSEEK_API_KEY=<DeepSeek API key>
 #   TRADER_API_KEY=<key>
 #   TRADER_API_SECRET=<secret>
 chmod 600 ~/.dsh/.env
 ```
 
-- 变量名固定为 `TRADER_API_KEY` / `TRADER_API_SECRET`；HTX 不需要 passphrase。
-- **不要**放 `/workspace/.env`：项目层随 clone 走。
-- 7×24 无人值守走 systemd：`EnvironmentFile=%h/.dsh/trading.env`（同样 `chmod 600`）。
+- DeepSeek provider 使用 `DEEPSEEK_API_KEY`；HTX 变量名固定为 `TRADER_API_KEY` / `TRADER_API_SECRET`，HTX 不需要 passphrase。
+- 仓库内本地开发可用 `dsh-trader/.env`（已显式列入 `.gitignore`）。从 `dsh-trader/` 启动 DSH 时会自动加载；模板行默认注释，填值时只取消相应行注释，**不要保留空赋值**，否则会遮蔽 `$DSH_HOME/.env` 的同名值。文件权限设为 `chmod 600 dsh-trader/.env`。独立 Node 脚本用 `node --env-file=.env scripts/<script>.mjs ...` 加载。
+- **不要**放 `/workspace/.env`：DSH 按当前工作目录加载 `.env`。
+- 7×24 无人值守仍走 systemd：`EnvironmentFile=%h/.dsh/trading.env`（同样 `chmod 600`），不要依赖仓库内文件。
+- R5 的 `TRADER_R5_API_KEY` 有单独的隔离要求，不要复用这里的 `DEEPSEEK_API_KEY`。
 - HTX key 权限最小化：**只开交易、禁用提现、绑 IP 白名单**；`paper` 与 `live` 用不同 key。
 
 ## 2. 确认"已注入"（不泄露值）
