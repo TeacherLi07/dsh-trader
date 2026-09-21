@@ -18,8 +18,8 @@
 的 DecisionContext、DecisionEnvelope、统一执行路径、成本闸与持久 W2/W3 worker。R3/R4 工程验收使用
 stub，不是模型质量或经济效果证据；生产 `dailyBudgetUsd` 仍未配置，因此生产 W1/W2/W3 不发模型请求。
 旧 JudgmentPack、多分析师与第二套模型下单工具链已删除；结算现区分真实成交/视界/paper、未知成本与基准，
-并按真实持仓窗口归因。R5 的静态 runner 与离线护栏已实现，但仓库没有可用的 200 窗口冻结 PIT 数据集；
-当前用户明确禁止真实模型/交易所连接，因此 R5 的真实判断/执行/经济证据与 R6 仍是外部阻塞，不能用 fixture 代替。
+并按真实持仓窗口归因。负责人选择 `critique` 为生产默认，保留 `single` 配置回退，并明确不做付费 single/critique 对照实验；
+这一选择不是效果证据。R5/R6 的真实 critique 验收、forward-paper 经济证据与 HTX 安全观察仍未完成，不能用 fixture 代替。
 
 本计划评估的是价格、衍生品、组合状态支持的交易判断，不宣称覆盖 LLM 的全部交易能力。当前
 模式保持 `paper`；R2–R5 完成后再评估 R6。此次收敛依据见 [决策记录 §17](docs/decision.md#architecture-review-2026-09-19)。
@@ -257,8 +257,10 @@ RiskCritic 只寻找数据缺口、反事实、组合风险、执行风险和失
 使用稳定 id，final 必须逐项接受或驳回并说明理由；回应完整不等于回应正确。模型版本、推理/
 输出预算和提示词固定并记录，运行时不自选模型、角色、脚本或工具。
 
-两个候选只在实验入口组合阶段；生产一次部署只启用一个冻结方案，R5 选定后移除落选的生产
-分支，保留实验脚本与历史工件供复核。共用 schema 不要求单次候选伪造 draft/critique 内容。
+生产由 `trade-supervisor.decisionStrategy` 选择路径，合法值为 `single` / `critique`，默认 `critique`；
+`single` 保留为显式回退。负责人选择 critique 是成本取舍，不代表已经证明它优于 single，故不再要求
+付费两路静态比较。切换只在部署边界进行；先排空/核对 running run 与 claimed trigger，因为策略参与 run 身份，
+切换期间重试会形成不同 run。共用 schema 不要求 single 伪造 draft/critique 内容。
 
 ### 6.2 `eligibility`
 
@@ -356,7 +358,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
 | R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
 | R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
-| R5 | 真实 LLM 回放 + forward paper | ⬜ 已实现 `scripts/r5-acceptance.mjs` 与纯本地预检：single/critique 共用样本但 Critic 指标只计 critique arm；≥200 个不同 PIT 时点与逐窗指纹、validation 跨 split 部分重叠拒绝、纠错/误报非空预标注分母、prompt/adapter/price/build artifact 版本冻结、凭据值拦截、稳定共享 control registry、UTF-8 保守 token 上界、原子日/总预算 reservation、实际 usage 超预留熔断、pending call 防重与逐调用审计。仍缺可验证来源/预注册证据的真实 PIT manifest、预算授权后的真实模型运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；静态工程门不代表判断质量或 R5 通过 |
+| R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。R5 仍需预算授权后的真实 critique 运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
 | R6 | P3 小额 `live_auto` | R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0 |
 
 R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs` 至 `scripts/r5-acceptance.mjs`，
@@ -370,9 +372,10 @@ R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs
   成本口径、触发频率、评估时段/结束条件、最低有效时间块数、区间估计方法、选择规则和绝对
   回撤上限。开发段用于修改方案，
   独立验证段用于判定；看到验证结果后改规则必须启动新实验，不能重用原验证段宣称通过。
-- **静态判断对照**：single/critique 使用完全相同的 context、账户和计划快照，比较引用错误、
-  推理缺陷、批评纠错/引入错误、拒绝理由和延迟。Critic 专属指标只在 critique arm 计分；预注册标签必须在非空独立窗口中分别覆盖至少一项应采纳纠错和应驳回误报；缺任一分母时实验无效。相同快照的重复采样不算独立市场样本，validation 与任何其他 split 的逐窗 PIT 重叠均禁止。
-- **交易效果对照**：冻结现有 DSL 规则基线 `rules`，与 single/critique 共用外部 PIT 数据、
+- **静态判断对照**：负责人已决定不付费比较 single/critique；生产默认 critique，保留 single 回退，
+  但不宣称 critique 更准或更赚钱。`scripts/r5-acceptance.mjs` 的两路比较能力仅保留为可选工具；若未来恢复，
+  必须重新明确授权，并沿用相同冻结 context、非空纠错/误报标签、PIT 去重与预算护栏。Critic 专属指标只在 critique arm 计分。
+- **交易效果对照**：冻结现有 DSL 规则基线 `rules`，与已选 critique workflow 共用外部 PIT 数据、
   初始权益、风险上限、执行内核、成本模型和评估时间网格。各路独立维护账户、持仓、计划和
   由自身计划产生的 W2；不能为了相同 context 强制覆盖策略已经分叉的账户状态。
 - 所有运行包含失败、修复、`NO_TRADE/REVIEW`、拒绝和未成交。回放必须把推理/排队延迟计入
@@ -384,9 +387,9 @@ R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs
 
 ### 10.3 工程与判断可靠性
 
-- 共同评估窗口至少 200 个；每个 LLM 候选均有真实调用。至少 50 个非空样本实际经过执行链，
-  且动作、拒绝、恢复等已声明覆盖项分别有分母；不得要求模型为凑数量强行开仓。合成安全用例
-  与真实 LLM/行情样本分开统计，不能合并为交易有效性的样本量。
+- 付费 single/critique 静态比较及其 200 窗口门槛已由负责人明确放弃，不作为当前策略选择前置；
+  若未来恢复需重新预注册。R5 仍要求至少 50 个非空样本实际经过所选 critique 的执行链，动作、拒绝、
+  恢复等覆盖项分别有分母；不得为凑数量强行开仓。合成安全用例与真实 LLM/行情样本分开统计。
 - 最终 schema 成功率 ≥99%，首次成功率与修复率单列；失败后的安全 `REVIEW` 不算 schema
   成功。错误引用进入可执行工件=0、硬闸绕过=0、重复成交=0；缺失/过期测试必须确实触发拒绝。
 - 依据预先标注的事实/动作要求，检查模型是否使用了计划失效、保护缺失、相关敞口、成本升高等
@@ -403,9 +406,8 @@ R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs
 - 用共同时间块的账户收益差估计 95% 置信区间；按时间块重采样并保持同段标的的相关关系，
   块长度根据开发段的持有期/依赖性确定后冻结，不把每笔交易当独立同分布样本。必须报告有效
   时间块数；数量不足或区间不稳定时结论无效，增加 bootstrap 次数不能补足市场样本。
-- 开发段选方案时，critique 只有相对 single 的全成本净收益增量得到支持且不突破绝对回撤上限
-  才保留；少交易、少拒绝或更高共识本身不构成选择理由。收益差 95% CI 下界不大于 0 时优先
-  single，但仍需独立验证，不能把“未证明差异”解释为两个方案等效。
+- 策略选择已由负责人固定为 critique；该选择不是相对 single 的实证优势，也不应描述为两者等效。
+  当前不为比较两种 workflow 产生模型费用。所选 critique 相对 `rules` 的全成本经济验收仍按下一条执行。
 - 选定的 LLM 方案在独立前向 paper 段相对 rules 的全成本收益差 95% CI 下界必须 >0，自身
   全成本净收益为正，且绝对回撤不超过实验前冻结的上限，才通过经济闸门。rules 无交易或回撤
   为 0 时仍使用绝对上限，不用失效的回撤比。未证实则继续 paper，不进入 R6。
@@ -438,9 +440,9 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
    共用的专用 provider key；provider 账户也应专用或设 provider-side hard cap，否则本地总额只覆盖本 control registry。
    当前 profile 刻意不设日预算，所以 production W1/W2/W3 fail-closed；未获预算授权时只运行 preflight/stub，不尝试付费 provider 调用。
 
-**当前外部验收阻塞（2026-09-21）**：本轮用户指令明确暂不进行真实交易所或 LLM 连接测试。因此 R5 的真实 provider 调用、真实调用后的执行链样本与独立 forward-paper 经济闸，以及 R6 的 HTX 非空持仓+算法保护单对账和 live 运行观察均未执行、不得标为通过。离线 fixture/stub 只能证明工程行为，不能替代这些证据；继续前须取得后续明确授权，并满足上述预算、凭据隔离与 provider hard-cap 条件。
+**当前验收阻塞（2026-09-21）**：负责人已取消付费 single/critique 静态对照并选择 critique；该决定不构成模型质量或策略增益证据。R5 仍缺明确预算授权后的 critique provider/forward-paper 运行、≥50 个非空执行链样本、资金费来源及独立经济验收；R6 仍缺 HTX 非空持仓+算法保护单对账和非空安全观察。未获得预算与隔离凭据授权前不发模型请求；未完成这些证据前不得标为通过或启用 live。
 
-**静态判断质量阈值待负责人冻结**：§10.3 要求报告预标注 outcome、Critic 纠错/引入错误及预测正确率，但目前只对 schema/evidence/硬闸写了数值通过线，没有定义 outcome accuracy 或 Critic 命中率的硬阈值。R5 runner 因此只将这些质量指标独立报告，不自行发明阈值或宣称模型质量通过；若要把静态判断质量作为放行条件，需在真实运行前把阈值写入新冻结 protocol。
+**静态对照状态**：single/critique 付费对照已由负责人明确取消，相关 outcome/Critic 指标不产生结论；若未来重新启用该实验，必须先冻结指标阈值、PIT manifest、预算与新的预注册协议。当前选择 critique 不得表述为相对 single 已验证更优。
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 

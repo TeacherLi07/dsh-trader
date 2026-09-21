@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { R5_FIXED_MODEL, R5_FIXED_PROVIDER } from '../src/supervisor/r5.js'
+import { resolveDecisionStrategy } from '../src/plugins/supervisor.js'
 
 /**
  * plan §12.2 E：运行模式必须由**启动参数**决定，不在仓库里写死。
@@ -21,5 +22,13 @@ describe('部署配置：运行模式来自启动参数', () => {
 
   it('R5 静态实验冻结的模型路由与生产 supervisor 路由一致', () => {
     expect(patch).toContain(`l3: { provider: ${R5_FIXED_PROVIDER}, model: ${R5_FIXED_MODEL} }`)
+  })
+
+  it('默认选择 critique，保留 single 配置回退，拒绝未知策略', () => {
+    expect(patch).toMatch(/^\s*decisionStrategy:\s*critique\b/m)
+    expect(resolveDecisionStrategy(undefined)).toBe('critique')
+    expect(resolveDecisionStrategy('critique')).toBe('critique')
+    expect(resolveDecisionStrategy('single')).toBe('single')
+    expect(() => resolveDecisionStrategy('anything-else')).toThrow(/decisionStrategy 必须是 single\|critique/)
   })
 })

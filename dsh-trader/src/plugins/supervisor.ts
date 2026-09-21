@@ -66,8 +66,9 @@ const DEFAULT_WINDOWS: readonly WindowSpec[] = [
   { id: 'w1-20', at: '20:00Z' },
 ]
 
-function strategyOf(value: string | undefined): DecisionStrategy {
-  const strategy = value ?? 'single'
+export function resolveDecisionStrategy(value: string | undefined): DecisionStrategy {
+  // 负责人选择 critique 作为默认生产流程；single 仍由插件 Config 显式切回，不代表效果比较结论。
+  const strategy = value ?? 'critique'
   if (strategy !== 'single' && strategy !== 'critique') throw new Error(`decisionStrategy 必须是 single|critique，收到 ${strategy}`)
   return strategy
 }
@@ -104,7 +105,7 @@ function triggerLimitsOf(input: Partial<TriggerLimits> | undefined): TriggerLimi
 }
 
 export function apply(ctx: Context, config: SupervisorConfig): void {
-  const strategy = strategyOf(config.decisionStrategy)
+  const strategy = resolveDecisionStrategy(config.decisionStrategy)
   const route = routeOf(config)
   if (config.dailyBudgetUsd !== undefined && (!Number.isFinite(config.dailyBudgetUsd) || config.dailyBudgetUsd <= 0)) {
     throw new Error('dailyBudgetUsd 必须为正数；未配置时 fail-closed 禁止调用模型')

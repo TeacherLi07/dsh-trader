@@ -19,8 +19,8 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 只通过本地 stub 验收，不代表真实模型质量或经济效果。R5 的静态 runner、离线预算/数据隔离护栏已实现并通过本地测试，但没有可验证来源的 200 窗口 PIT manifest，也未做真实模型调用；当前模式保持 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
-**下一步**：R5 仍需负责人提供外部可复核的 PIT 来源/预注册记录、冻结静态质量放行阈值，并在明确预算授权后完成真实 provider 调用、≥50 个非空执行链样本和独立 forward-paper 经济验收；生产 settlement 目前未注入 funding resolver，净额因此保持 NULL，经济验收前还要接通并核验资金费来源。不以 stub 或模拟结果替代。R6 还需真实 HTX 验证“非空持仓 + 算法保护单”的 merged 对账及非空安全观察。本任务明确禁止真实 LLM/交易所连接测试，因此这些项目保留为阻塞项。
+**当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 只通过本地 stub 验收，不代表真实模型质量或经济效果。负责人选择 `critique` 为默认，`trade-supervisor.decisionStrategy` 可切回 `single`；付费 single/critique 对照已取消，选择不代表效果证据。R5 runner 的离线护栏已通过本地测试；当前仍是 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
+**下一步**：R5 仍需明确预算与凭据隔离授权后完成所选 critique 的真实 provider/forward-paper 运行、≥50 个非空执行链样本和独立经济验收；生产 settlement 未注入 funding resolver，净额因此保持 NULL，经济验收前还要接通并核验资金费来源。不以 stub 或模拟结果替代。R6 还需真实 HTX 验证“非空持仓 + 算法保护单”的 merged 对账及非空安全观察。当前改动不进行真实 LLM/交易所连接测试，这些项目继续阻塞。
 
 **已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与审计均已接线。SR1/SR2 收紧未成交挂单敞口、远端保护、部分成交恢复、执行 API 暴露和 live arm。R1–R4 建立 DecisionContext、结构化判断、eligibility、统一执行及持久 W2/W3 worker；R2 捕获过固定 PIT 请求，R3/R4 工程证据使用 stub。旧多 agent 判断链已删除。R5 未完成真实调用和经济验收。
 

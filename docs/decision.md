@@ -1888,3 +1888,14 @@ paper 下可显式 waiver，live_auto 不可 waiver。
 包根仅保留 DSH carrier metadata，不再重导出 `HtxBroker`、`executeAction`、`createExecRuntime` 等交易内核 API；
 验收脚本走未映射到 package exports 的 `internal-api`，从 Node 包 API 不能直接取得真实 broker 或执行路径。
 硬闸本身也二次检查 live arm 与限额，防止内部调用绕过启动 Config。
+
+## 22. 2026-09-21：选择 critique 默认，不做付费 single/critique 对照
+
+负责人决定直接采用三步 `critique` workflow，不为 single 与 critique 的相对效果支付实验成本。
+生产 `trade-supervisor.decisionStrategy` 默认设为 `critique`，显式改成 `single` 可回退；两条代码路径都保留。
+切换需在部署边界进行，并先排空/核对 running decision run 与 claimed trigger，避免策略参与 run identity 后
+重试同一 trigger 产生另一 run。
+
+该决定是成本/产品选择，不是 `critique` 优于 `single` 的证据；不宣称两种策略等效，也不将保留的 R5 两路
+静态 runner 当成已执行。默认 `dailyBudgetUsd` 仍未配置，因此仅将默认策略改为 critique 不会启动模型调用。
+这项决定不豁免所选 critique 的 R5 真实 forward-paper、成本后经济门槛或 R6 HTX 非空保护对账。

@@ -112,7 +112,7 @@
       name: dsh-trader/plugins/supervisor
       config:
         l3: { provider: deepseek-official, model: deepseek-flash }
-        decisionStrategy: single
+        decisionStrategy: critique # 可显式改为 single；变更前先排空/核对 running 与 claimed 触发器
         maxOutputTokens: 1024
         wakeLimits:
           judgmentPerHour: 3

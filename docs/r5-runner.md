@@ -1,5 +1,7 @@
 # R5 真实模型静态对照运行器
 
+**当前决策**：负责人已选择 production 默认 `critique`，并取消付费 single/critique 对照实验。此 runner 与 single 实现保留为将来可选的研究工具，但当前不执行；选择 critique 不证明它优于 single。所选策略的真实 forward-paper/经济验收仍是 R5 独立门槛，且需要单独的预算与凭据授权。
+
 `dsh-trader/scripts/r5-acceptance.mjs` 是真实 provider 静态判断对照入口，复用 DSH `ctx.llm` 与项目的结构化 DecisionWorkflow、价目表、预算账本、DecisionRun 和 append-only 审计。它不实现或冒充经济验收：报告固定写明 `executionChainSamples=0`、`economicGate=not_run`、`r5OverallPassed=false`。
 
 ## 安全运行方式
