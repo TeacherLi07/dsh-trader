@@ -73,6 +73,125 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
   })
 
+  it('v8 outcomes 用 NULL 表示未知净额/基准，并要求资金费值与来源成对持久化', () => {
+    insertDecision('d-unknown', 'outcome-unknown')
+    insertDecision('d-zero-funding', 'outcome-zero-funding')
+    insertDecision('d-bad-source', 'outcome-bad-source')
+    const insertOutcome = (args: {
+      readonly id: string
+      readonly decisionId: string
+      readonly funding: number | null
+      readonly source: string | null
+    }): void => {
+      db.prepare(
+        `INSERT INTO outcomes
+          (outcome_id, decision_id, symbol, settled_at, horizon_ms, entry_price, exit_price,
+           realized_gross_pct, realized_net_pct, benchmark_pct, alpha_pct, mfe_pct, mae_pct,
+           stop_hit, fees_quote, funding_fee_quote, funding_source, settlement_kind,
+           valuation_basis, attributed_qty, evidence_refs_json)
+         VALUES (?, ?, 'BTC/USDT:USDT', 100, 14400000, 100, 101, 1, NULL, NULL, NULL,
+           1, -1, 0, 0, ?, ?, 'horizon_mark', 'horizon_mark', 1, '[]')`,
+      ).run(args.id, args.decisionId, args.funding, args.source)
+    }
+
+    insertOutcome({ id: 'o-unknown', decisionId: 'd-unknown', funding: null, source: null })
+    insertOutcome({ id: 'o-known-zero', decisionId: 'd-zero-funding', funding: 0, source: 'fixture:verified-zero' })
+    expect(db.prepare(
+      'SELECT realized_net_pct, benchmark_pct, alpha_pct, funding_fee_quote, funding_source FROM outcomes ORDER BY outcome_id',
+    ).all()).toEqual([
+      { realized_net_pct: null, benchmark_pct: null, alpha_pct: null, funding_fee_quote: 0, funding_source: 'fixture:verified-zero' },
+      { realized_net_pct: null, benchmark_pct: null, alpha_pct: null, funding_fee_quote: null, funding_source: null },
+    ])
+    expect(() => insertOutcome({ id: 'o-bad-source', decisionId: 'd-bad-source', funding: 0, source: null })).toThrow()
+  })
+
+  it('v7 迁移保留 gross 证据，但缺资金费或成对基准时间窗时标成 unknown', () => {
+    db.exec(`
+      DROP TABLE outcomes;
+      CREATE TABLE outcomes (
+        outcome_id TEXT PRIMARY KEY,
+        decision_id TEXT NOT NULL UNIQUE REFERENCES decisions (decision_id),
+        symbol TEXT NOT NULL,
+        settled_at INTEGER NOT NULL,
+        horizon_ms INTEGER NOT NULL,
+        entry_price REAL NOT NULL,
+        exit_price REAL NOT NULL,
+        realized_gross_pct REAL NOT NULL,
+        realized_net_pct REAL NOT NULL,
+        benchmark_pct REAL NOT NULL,
+        alpha_pct REAL NOT NULL,
+        mfe_pct REAL NOT NULL,
+        mae_pct REAL NOT NULL,
+        stop_hit INTEGER NOT NULL DEFAULT 0,
+        fees_quote REAL NOT NULL DEFAULT 0,
+        evidence_refs_json TEXT NOT NULL
+      );
+    `)
+    insertDecision('d-legacy', 'outcome-legacy')
+    insertDecision('d-legacy-unmarked', 'outcome-legacy-unmarked')
+    insertDecision('d-legacy-one-benchmark', 'outcome-legacy-one-benchmark')
+    const insertLegacyOutcome = (outcomeId: string, decisionId: string, refs: readonly string[]): void => {
+      db.prepare(
+        `INSERT INTO outcomes VALUES (?, ?, 'BTC/USDT:USDT', 200, 14400000, 100, 105, 5, 4.8, 0, 4.8, 5, -1, 0, 0.2, ?)`,
+      ).run(outcomeId, decisionId, JSON.stringify(refs))
+    }
+    insertLegacyOutcome('o-legacy', 'd-legacy', ['decision:d-legacy', 'benchmark:unavailable'])
+    // v7 遇到缺基准时写 0 且没有 unavailable 标记，单靠数值/标签不能视作真实零收益。
+    insertLegacyOutcome('o-legacy-unmarked', 'd-legacy-unmarked', ['decision:d-legacy-unmarked'])
+    // v7 只留最后一个 benchmark bar，不能证明窗口两端与标的行情对齐。
+    insertLegacyOutcome('o-legacy-one-benchmark', 'd-legacy-one-benchmark', [
+      'decision:d-legacy-one-benchmark',
+      'bar:benchmark:3600000',
+    ])
+    db.exec('PRAGMA user_version = 7')
+
+    migrate(db)
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+    const migrated = db.prepare(
+      'SELECT outcome_id, realized_gross_pct, realized_net_pct, benchmark_pct, alpha_pct, fees_quote, funding_fee_quote, funding_source, settlement_kind, valuation_basis FROM outcomes ORDER BY outcome_id',
+    ).all()
+    expect(migrated).toEqual([
+      {
+        outcome_id: 'o-legacy',
+        realized_gross_pct: 5,
+        realized_net_pct: null,
+        benchmark_pct: null,
+        alpha_pct: null,
+        fees_quote: 0.2,
+        funding_fee_quote: null,
+        funding_source: null,
+        settlement_kind: 'legacy_unknown',
+        valuation_basis: 'legacy_unknown',
+      },
+      {
+        outcome_id: 'o-legacy-one-benchmark',
+        realized_gross_pct: 5,
+        realized_net_pct: null,
+        benchmark_pct: null,
+        alpha_pct: null,
+        fees_quote: 0.2,
+        funding_fee_quote: null,
+        funding_source: null,
+        settlement_kind: 'legacy_unknown',
+        valuation_basis: 'legacy_unknown',
+      },
+      {
+        outcome_id: 'o-legacy-unmarked',
+        realized_gross_pct: 5,
+        realized_net_pct: null,
+        benchmark_pct: null,
+        alpha_pct: null,
+        fees_quote: 0.2,
+        funding_fee_quote: null,
+        funding_source: null,
+        settlement_kind: 'legacy_unknown',
+        valuation_basis: 'legacy_unknown',
+      },
+    ])
+    expect(() => migrate(db)).not.toThrow()
+    expect((db.prepare('SELECT COUNT(*) AS n FROM outcomes').get() as { n: number }).n).toBe(3)
+  })
+
   it('从旧版本升级时补齐双时间 observation 表与 append-only 触发器', () => {
     db.exec(`DROP TRIGGER market_observations_no_update;
       DROP TRIGGER market_observations_no_delete;
@@ -111,7 +230,7 @@ describe('schema (plan §4.1 invariants)', () => {
     `)
 
     migrate(db)
-    expect(db.pragma('user_version', { simple: true })).toBe(7)
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
     const columns = (db.prepare('PRAGMA table_info(triggers)').all() as { name: string }[]).map((row) => row.name)
     expect(columns).toEqual(expect.arrayContaining(['attempts', 'next_attempt_at', 'claimed_at', 'last_error']))
     expect(db.prepare('SELECT state, attempts, next_attempt_at FROM triggers WHERE trigger_id = ?').get('q1')).toMatchObject({

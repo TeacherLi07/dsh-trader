@@ -111,7 +111,14 @@ export interface FillView {
   readonly fee: number | null
   readonly side: string
   readonly ts: number
+  /** 执行场所决定该成交是否属于独立 paper simulation 账户。 */
+  readonly venue?: string
+  /** 同一开仓决策的保护成交沿用 decisionId；区分入场与减险腿。 */
+  readonly reduceOnly?: boolean
 }
+
+export type SettlementKind = 'realized' | 'horizon_mark' | 'paper_simulation' | 'legacy_unknown'
+export type SettlementValuationBasis = 'actual_exit_fills' | 'horizon_mark' | 'legacy_unknown'
 
 export interface DecisionSummary {
   readonly decisionId: string
@@ -143,10 +150,16 @@ export interface DecisionHistoryEntry extends DecisionSummary {
   readonly outcome: {
     readonly settledAt: number
     readonly realizedGrossPct: number
-    readonly realizedNetPct: number
-    readonly benchmarkPct: number
-    readonly alphaPct: number
-    readonly feesQuote: number
+    /** 缺手续费/资金费时为 null；缺基准时 benchmark/alpha 为 null。 */
+    readonly realizedNetPct: number | null
+    readonly benchmarkPct: number | null
+    readonly alphaPct: number | null
+    readonly feesQuote: number | null
+    readonly fundingFeeQuote: number | null
+    readonly fundingSource: string | null
+    readonly settlementKind: SettlementKind
+    readonly valuationBasis: SettlementValuationBasis
+    readonly attributedQty: number | null
     readonly stopHit: boolean
     readonly evidenceRefs: readonly string[]
   } | null
@@ -225,6 +238,11 @@ interface DecisionHistoryRow {
   benchmark_pct: number | null
   alpha_pct: number | null
   fees_quote: number | null
+  funding_fee_quote: number | null
+  funding_source: string | null
+  settlement_kind: SettlementKind | null
+  valuation_basis: SettlementValuationBasis | null
+  attributed_qty: number | null
   stop_hit: number | null
   evidence_refs_json: string | null
 }
@@ -254,7 +272,7 @@ export interface PendingSettlement {
   readonly rationale: string | null
 }
 
-/** 交易级结算结果（plan §7.9）：净额含手续费/滑点，基准用 BTC/ETH，**不是 SPY**。 */
+/** 结算结果（plan §7.9）：净额只在费用可核验时给值；实际成交、视界估值与 paper 结果分开标记。 */
 export interface OutcomeRecord {
   readonly outcomeId: string
   readonly decisionId: string
@@ -264,13 +282,20 @@ export interface OutcomeRecord {
   readonly entryPrice: number
   readonly exitPrice: number
   readonly realizedGrossPct: number
-  readonly realizedNetPct: number
-  readonly benchmarkPct: number
-  readonly alphaPct: number
+  readonly realizedNetPct: number | null
+  readonly benchmarkPct: number | null
+  readonly alphaPct: number | null
   readonly mfePct: number
   readonly maePct: number
   readonly stopHit: boolean
-  readonly feesQuote: number
+  readonly feesQuote: number | null
+  /** 正数表示已支付的资金费，负数表示资金费收入；null 表示未能核验。 */
+  readonly fundingFeeQuote?: number | null
+  readonly fundingSource?: string | null
+  /** paper 结果独立分类；valuationBasis 继续说明是实际出场还是 horizon mark。 */
+  readonly settlementKind?: SettlementKind
+  readonly valuationBasis?: SettlementValuationBasis
+  readonly attributedQty?: number | null
   /** 证据指针：结算用到的订单/成交/行情指纹 —— 让反思**可以被推翻**。 */
   readonly evidenceRefs: readonly string[]
 }
@@ -297,13 +322,18 @@ interface OutcomeRow {
   entry_price: number
   exit_price: number
   realized_gross_pct: number
-  realized_net_pct: number
-  benchmark_pct: number
-  alpha_pct: number
+  realized_net_pct: number | null
+  benchmark_pct: number | null
+  alpha_pct: number | null
   mfe_pct: number
   mae_pct: number
   stop_hit: number
-  fees_quote: number
+  fees_quote: number | null
+  funding_fee_quote: number | null
+  funding_source: string | null
+  settlement_kind: SettlementKind
+  valuation_basis: SettlementValuationBasis
+  attributed_qty: number | null
   evidence_refs_json: string
 }
 
@@ -324,6 +354,11 @@ function toOutcome(row: OutcomeRow): OutcomeRecord {
     maePct: row.mae_pct,
     stopHit: row.stop_hit === 1,
     feesQuote: row.fees_quote,
+    fundingFeeQuote: row.funding_fee_quote,
+    fundingSource: row.funding_source,
+    settlementKind: row.settlement_kind,
+    valuationBasis: row.valuation_basis,
+    attributedQty: row.attributed_qty,
     evidenceRefs: JSON.parse(row.evidence_refs_json) as string[],
   }
 }
@@ -436,16 +471,95 @@ export class DecisionJournal {
 
   /** 写入结算结果。`decision_id` 唯一 ⇒ 重跑不会追加第二条（结算幂等根）。 */
   recordOutcome(outcome: OutcomeRecord): boolean {
+    return this.#insertOutcome(outcome)
+  }
+
+  /** outcome 与 decision 回指在同一事务提交；审计状态也与新 outcome 原子落盘。 */
+  recordOutcomeAndLink(
+    outcome: OutcomeRecord,
+    learningStatus: 'settlement_only' | 'reflection_configured',
+  ): boolean {
+    return this.#statements.transaction(() => {
+      const inserted = this.#insertOutcome(outcome)
+      const stored = this.#statements
+        .get('SELECT outcome_id FROM outcomes WHERE decision_id = ?')
+        .get(outcome.decisionId) as { outcome_id: string } | undefined
+      if (stored === undefined) throw new Error(`结算写入后找不到 outcome：${outcome.decisionId}`)
+
+      const decision = this.#statements
+        .get('SELECT outcome_id FROM decisions WHERE decision_id = ?')
+        .get(outcome.decisionId) as { outcome_id: string | null } | undefined
+      if (decision === undefined) throw new Error(`结算关联找不到 decision：${outcome.decisionId}`)
+      if (decision.outcome_id !== null && decision.outcome_id !== stored.outcome_id) {
+        throw new Error(`decision 已关联到不同 outcome：${outcome.decisionId}`)
+      }
+      this.#statements
+        .get('UPDATE decisions SET outcome_id = ? WHERE decision_id = ? AND outcome_id IS NULL')
+        .run(stored.outcome_id, outcome.decisionId)
+
+      if (inserted) {
+        this.appendAudit({
+          actor: 'system',
+          kind: 'settlement_completed',
+          payload: {
+            decisionId: outcome.decisionId,
+            outcomeId: stored.outcome_id,
+            settlementKind: outcome.settlementKind ?? 'legacy_unknown',
+            valuationBasis: outcome.valuationBasis ?? 'legacy_unknown',
+            learningStatus,
+            netKnown: outcome.realizedNetPct !== null,
+            benchmarkKnown: outcome.benchmarkPct !== null,
+            fundingKnown: outcome.fundingFeeQuote !== null && outcome.fundingFeeQuote !== undefined,
+          },
+          ts: outcome.settledAt,
+        })
+      }
+      return inserted
+    })
+  }
+
+  /** 修复旧版两步写入在崩溃窗口留下的 outcome；修复后不重算、不重复结算。 */
+  repairOutcomeAssociation(decisionId: string): boolean {
+    return this.#statements.transaction(() => {
+      const outcome = this.#statements
+        .get('SELECT outcome_id, settled_at FROM outcomes WHERE decision_id = ?')
+        .get(decisionId) as { outcome_id: string; settled_at: number } | undefined
+      if (outcome === undefined) return false
+      const decision = this.#statements
+        .get('SELECT outcome_id FROM decisions WHERE decision_id = ?')
+        .get(decisionId) as { outcome_id: string | null } | undefined
+      if (decision === undefined) throw new Error(`outcome 关联找不到 decision：${decisionId}`)
+      if (decision.outcome_id !== null && decision.outcome_id !== outcome.outcome_id) {
+        throw new Error(`decision 已关联到不同 outcome：${decisionId}`)
+      }
+      if (decision.outcome_id === null) {
+        this.#statements
+          .get('UPDATE decisions SET outcome_id = ? WHERE decision_id = ? AND outcome_id IS NULL')
+          .run(outcome.outcome_id, decisionId)
+        this.appendAudit({
+          actor: 'system',
+          kind: 'settlement_link_repaired',
+          payload: { decisionId, outcomeId: outcome.outcome_id, learningStatus: 'legacy_unknown' },
+          ts: outcome.settled_at,
+        })
+      }
+      return true
+    })
+  }
+
+  #insertOutcome(outcome: OutcomeRecord): boolean {
     const result = this.#statements
       .get(
         `INSERT INTO outcomes
            (outcome_id, decision_id, symbol, settled_at, horizon_ms, entry_price, exit_price,
             realized_gross_pct, realized_net_pct, benchmark_pct, alpha_pct, mfe_pct, mae_pct,
-            stop_hit, fees_quote, evidence_refs_json)
+            stop_hit, fees_quote, funding_fee_quote, funding_source, settlement_kind,
+            valuation_basis, attributed_qty, evidence_refs_json)
          VALUES
            (@outcomeId, @decisionId, @symbol, @settledAt, @horizonMs, @entryPrice, @exitPrice,
             @realizedGrossPct, @realizedNetPct, @benchmarkPct, @alphaPct, @mfePct, @maePct,
-            @stopHit, @feesQuote, @evidenceRefsJson)
+            @stopHit, @feesQuote, @fundingFeeQuote, @fundingSource, @settlementKind,
+            @valuationBasis, @attributedQty, @evidenceRefsJson)
          ON CONFLICT (decision_id) DO NOTHING`,
       )
       .run({
@@ -464,6 +578,11 @@ export class DecisionJournal {
         maePct: outcome.maePct,
         stopHit: outcome.stopHit ? 1 : 0,
         feesQuote: outcome.feesQuote,
+        fundingFeeQuote: outcome.fundingFeeQuote ?? null,
+        fundingSource: outcome.fundingSource ?? null,
+        settlementKind: outcome.settlementKind ?? 'legacy_unknown',
+        valuationBasis: outcome.valuationBasis ?? 'legacy_unknown',
+        attributedQty: outcome.attributedQty ?? null,
         evidenceRefsJson: canonicalJson(outcome.evidenceRefs),
       })
     return Number(result.changes) > 0
@@ -636,7 +755,8 @@ export class DecisionJournal {
   fillsForDecision(decisionId: string): readonly FillView[] {
     const rows = this.#statements
       .get(
-        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts, COALESCE(oi.side, 'buy') AS side
+        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts,
+                oi.side, oi.venue, oi.reduce_only
          FROM fills f
          JOIN orders o ON o.order_id = f.order_id
          JOIN order_intents oi ON oi.client_order_id = o.client_order_id
@@ -649,15 +769,19 @@ export class DecisionJournal {
       price: number
       fee: number | null
       ts: number
-      side: string
+      side: string | null
+      venue: string
+      reduce_only: number
     }[]
     return rows.map((row) => ({
       fillId: row.fill_id,
       qty: row.qty,
       price: row.price,
       fee: row.fee,
-      side: row.side,
+      side: row.side ?? '',
       ts: row.ts,
+      venue: row.venue,
+      reduceOnly: row.reduce_only === 1,
     }))
   }
 
@@ -666,31 +790,36 @@ export class DecisionJournal {
    * 用途：结算 `reduce`/`close` 决策时重建当时的持仓与**真实入场均价** ——
    * 否则会把"平仓成交"当成新入场，把一笔 +20% 的回合记成 ~0%（实测）。
    */
-  fillsForSymbolBefore(symbol: string, beforeTs: number): readonly FillView[] {
+  fillsForSymbolBefore(symbol: string, beforeTs: number, venue?: string): readonly FillView[] {
     const rows = this.#statements
       .get(
-        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts, COALESCE(oi.side, 'buy') AS side
+        `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts,
+                oi.side, oi.venue, oi.reduce_only
          FROM fills f
          JOIN orders o ON o.order_id = f.order_id
          JOIN order_intents oi ON oi.client_order_id = o.client_order_id
-         WHERE oi.symbol = ? AND f.ts < ?
+         WHERE oi.symbol = ? AND f.ts < ? AND (? IS NULL OR oi.venue = ?)
          ORDER BY f.ts ASC, f.fill_id ASC`,
       )
-      .all(symbol, beforeTs) as {
+      .all(symbol, beforeTs, venue ?? null, venue ?? null) as {
       fill_id: string
       qty: number
       price: number
       fee: number | null
       ts: number
-      side: string
+      side: string | null
+      venue: string
+      reduce_only: number
     }[]
     return rows.map((row) => ({
       fillId: row.fill_id,
       qty: row.qty,
       price: row.price,
       fee: row.fee,
-      side: row.side,
+      side: row.side ?? '',
       ts: row.ts,
+      venue: row.venue,
+      reduceOnly: row.reduce_only === 1,
     }))
   }
 
@@ -1158,11 +1287,12 @@ export class DecisionJournal {
     const limit = options.limit ?? 20
     if (!Number.isSafeInteger(asOf) || asOf < 0) throw new Error('history.asOf 必须是非负安全整数毫秒时间戳')
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('history.limit 必须在 1..100')
-    const fields = `SELECT d.decision_id, d.run_id, d.symbol, d.decided_at, d.action, d.size_qty,
+  const fields = `SELECT d.decision_id, d.run_id, d.symbol, d.decided_at, d.action, d.size_qty,
         d.stop_price, d.confidence, d.rationale, d.context_hash, d.executed, d.reflection_due_at,
         d.tokens_in, d.tokens_out, d.tokens_cached, d.cost_usd, d.cost_known, d.duration_ms,
         d.trigger_source, o.outcome_id, o.settled_at, o.realized_gross_pct, o.realized_net_pct,
-        o.benchmark_pct, o.alpha_pct, o.fees_quote, o.stop_hit, o.evidence_refs_json
+        o.benchmark_pct, o.alpha_pct, o.fees_quote, o.funding_fee_quote, o.funding_source,
+        o.settlement_kind, o.valuation_basis, o.attributed_qty, o.stop_hit, o.evidence_refs_json
       FROM decisions d
       LEFT JOIN outcomes o ON o.decision_id = d.decision_id AND o.settled_at <= ?`
     const rows = (options.symbol === undefined
@@ -1175,10 +1305,15 @@ export class DecisionJournal {
         ? {
             settledAt: row.settled_at!,
             realizedGrossPct: row.realized_gross_pct!,
-            realizedNetPct: row.realized_net_pct!,
-            benchmarkPct: row.benchmark_pct!,
-            alphaPct: row.alpha_pct!,
-            feesQuote: row.fees_quote!,
+            realizedNetPct: row.realized_net_pct,
+            benchmarkPct: row.benchmark_pct,
+            alphaPct: row.alpha_pct,
+            feesQuote: row.fees_quote,
+            fundingFeeQuote: row.funding_fee_quote,
+            fundingSource: row.funding_source,
+            settlementKind: row.settlement_kind ?? 'legacy_unknown',
+            valuationBasis: row.valuation_basis ?? 'legacy_unknown',
+            attributedQty: row.attributed_qty,
             stopHit: row.stop_hit === 1,
             evidenceRefs: parseJsonArray(row.evidence_refs_json!),
           }

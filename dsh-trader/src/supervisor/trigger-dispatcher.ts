@@ -101,6 +101,7 @@ function failed(
     readonly journal: DecisionJournal
     readonly clock: Clock
     readonly trigger: StoredTrigger
+    readonly runId?: string
     readonly reason: string
     readonly retryable: boolean
     readonly retryPolicy?: TriggerRetryPolicy
@@ -112,11 +113,16 @@ function failed(
   const terminal = updated.state === 'failed' || updated.state === 'expired'
   const kind = updated.state === 'expired' ? 'expired' : terminal ? 'failed' : 'retry'
   audit(input.journal, kind === 'retry' ? 'trigger.retry_scheduled' : 'trigger.attempt_terminal', updated, now, {
+    runId: input.runId ?? null,
     reason: updated.lastError ?? 'trigger attempt failed',
     nextAttemptAt: updated.nextAttemptAt,
     state: updated.state,
   })
-  return { kind, triggerId: updated.triggerId, reason: updated.lastError ?? 'trigger attempt failed' }
+  return {
+    kind, triggerId: updated.triggerId,
+    ...(input.runId === undefined ? {} : { runId: input.runId }),
+    reason: updated.lastError ?? 'trigger attempt failed',
+  }
 }
 
 /**
@@ -311,6 +317,7 @@ export async function dispatchNextTrigger(input: {
   if (result.retryable === true) {
     return failed({
       queue: input.queue, journal: input.journal, clock: input.clock, trigger,
+      ...(result.runId === undefined ? {} : { runId: result.runId }),
       reason: result.reason ?? 'DecisionRuntime reported retryable model failure',
       retryable: true,
       ...(input.retryPolicy === undefined ? {} : { retryPolicy: input.retryPolicy }),

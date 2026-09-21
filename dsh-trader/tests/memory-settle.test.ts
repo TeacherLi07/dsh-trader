@@ -13,6 +13,7 @@ import {
   horizonMsForTimeframe,
   reflectorRoute,
   type ReflectionInput,
+  type FundingCostResolver,
 } from '../src/memory/settle.js'
 import { TIMEFRAMES } from '../src/plan/schema.js'
 import { raw } from './helpers/market.js'
@@ -72,7 +73,30 @@ function flatBars(symbol: string, closes: readonly number[], range = 1): void {
 /** 一条"已成交"的决策：decisions → order_intents → orders → fills 全链打通。 */
 function executedDecision(
   over: Partial<DecisionRecord> & { readonly decisionId: string },
-  fill: { readonly side: 'buy' | 'sell'; readonly price: number; readonly qty: number; readonly fee: number | null },
+  fill: {
+    readonly side: 'buy' | 'sell'
+    readonly price: number
+    readonly qty: number
+    readonly fee: number | null
+    readonly ts?: number
+    readonly reduceOnly?: boolean
+  },
+  venue = 'paper',
+): void {
+  executedDecisionWithFills(over, [fill], venue)
+}
+
+function executedDecisionWithFills(
+  over: Partial<DecisionRecord> & { readonly decisionId: string },
+  fills: readonly {
+    readonly side: 'buy' | 'sell'
+    readonly price: number
+    readonly qty: number
+    readonly fee: number | null
+    readonly ts?: number
+    readonly reduceOnly?: boolean
+  }[],
+  venue = 'paper',
 ): void {
   const decision: DecisionRecord = {
     symbol: 'BTC/USDT',
@@ -85,40 +109,43 @@ function executedDecision(
     ...over,
   }
   expect(journal.recordDecision(decision)).toBe(true)
-  const coid = `co-${over.decisionId}`
-  journal.recordIntent({
-    intentId: `intent-${over.decisionId}`,
-    clientOrderId: coid,
-    decisionId: over.decisionId,
-    venue: 'paper',
-    symbol: decision.symbol,
-    state: 'filled',
-    type: 'market',
-    side: fill.side,
-    qty: fill.qty,
-    reduceOnly: false,
-    createdAt: T0,
-  })
-  const exchangeOrderId = `ex-${over.decisionId}`
-  journal.recordOrder({
-    orderId: exchangeOrderId,
-    venue: 'paper',
-    exchangeOrderId,
-    clientOrderId: coid,
-    symbol: decision.symbol,
-    status: 'filled',
-    qty: fill.qty,
-    filledQty: fill.qty,
-    updatedAt: T0,
-  })
-  journal.recordFill({
-    fillId: `fill-${over.decisionId}`,
-    orderId: exchangeOrderId,
-    qty: fill.qty,
-    price: fill.price,
-    fee: fill.fee,
-    feeCurrency: 'USDT',
-    ts: T0,
+  fills.forEach((fill, index) => {
+    const ts = fill.ts ?? decision.decidedAt
+    const coid = `co-${over.decisionId}-${index}`
+    journal.recordIntent({
+      intentId: `intent-${over.decisionId}-${index}`,
+      clientOrderId: coid,
+      decisionId: over.decisionId,
+      venue,
+      symbol: decision.symbol,
+      state: 'filled',
+      type: 'market',
+      side: fill.side,
+      qty: fill.qty,
+      reduceOnly: fill.reduceOnly ?? decision.action !== 'open',
+      createdAt: ts,
+    })
+    const exchangeOrderId = `ex-${over.decisionId}-${index}`
+    journal.recordOrder({
+      orderId: exchangeOrderId,
+      venue,
+      exchangeOrderId,
+      clientOrderId: coid,
+      symbol: decision.symbol,
+      status: 'filled',
+      qty: fill.qty,
+      filledQty: fill.qty,
+      updatedAt: ts,
+    })
+    journal.recordFill({
+      fillId: `fill-${over.decisionId}-${index}`,
+      orderId: exchangeOrderId,
+      qty: fill.qty,
+      price: fill.price,
+      fee: fill.fee,
+      feeCurrency: 'USDT',
+      ts,
+    })
   })
   journal.markDecisionExecuted(over.decisionId)
   journal.markDecisionReflectionDue(over.decisionId, over.reflectionDueAt ?? T0 + HORIZON)
@@ -127,6 +154,7 @@ function executedDecision(
 function scheduler(
   reflector?: (input: ReflectionInput) => Promise<{ text: string; evidenceRefs: readonly string[] }>,
   horizonMs: number | undefined = HORIZON,
+  resolveFundingCost: FundingCostResolver | null = () => ({ amountQuote: 0, source: 'fixture:known-zero' }),
 ) {
   return new SettlementScheduler({
     journal,
@@ -136,6 +164,7 @@ function scheduler(
     ...(horizonMs === undefined ? {} : { horizonMs }),
     benchmarkSymbol: BENCH,
     slippageBps: 10,
+    ...(resolveFundingCost === null ? {} : { resolveFundingCost }),
     ...(reflector === undefined ? {} : { reflector }),
   })
 }
@@ -179,11 +208,11 @@ describe('computeSettlement', () => {
     rationale: 'trend',
   }
 
-  it('结算用实际成交价，扣手续费与双边滑点，alpha 相对基准', () => {
+  it('结算按已含滑点的成交价计收益，只扣已核验手续费/资金费', () => {
     const result = computeSettlement(
       {
         decision,
-        fills: [{ fillId: 'f1', qty: 1, price: 100, fee: 0.5, side: 'buy', ts: T0 }],
+        fills: [{ fillId: 'f1', qty: 1, price: 100, fee: 0.5, side: 'buy', ts: T0, venue: 'paper' }],
         entryPrice: 100,
         direction: 1,
         bars: [
@@ -194,20 +223,110 @@ describe('computeSettlement', () => {
           { openTime: T0, close: 100 },
           { openTime: T0 + HOUR, close: 101 },
         ],
+        fundingCost: { amountQuote: 0, source: 'fixture:known-zero' },
       },
-      { slippageBps: 10 },
+      { slippageBps: 500 },
     )
     expect(result.exitPrice).toBe(104)
     expect(result.realizedGrossPct).toBeCloseTo(4, 10)
-    // 0.5 手续费 / 100 名义 = 0.5%，双边滑点 2 × 10bp = 0.2%
-    expect(result.realizedNetPct).toBeCloseTo(3.3, 10)
+    // 0.5 手续费 / 100 名义 = 0.5%；传入的滑点估算不能覆盖撮合成交价。
+    expect(result.realizedNetPct).toBeCloseTo(3.5, 10)
     expect(result.benchmarkPct).toBeCloseTo(1, 10)
-    expect(result.alphaPct).toBeCloseTo(2.3, 10)
+    expect(result.alphaPct).toBeCloseTo(2.5, 10)
     expect(result.mfePct).toBeCloseTo(5, 10)
     expect(result.maePct).toBeCloseTo(-4, 10)
     expect(result.stopHit).toBe(false)
     expect(result.feesQuote).toBe(0.5)
+    expect(result.fundingFeeQuote).toBe(0)
+    expect(result.settlementKind).toBe('paper_simulation')
+    expect(result.valuationBasis).toBe('horizon_mark')
     expect(result.evidenceRefs).toContain('fill:f1')
+  })
+
+  it('paper entry/exit fill 已各含 10bp 撮合滑点时，实际成交收益不再扣配置滑点', () => {
+    const result = computeSettlement(
+      {
+        decision,
+        fills: [
+          { fillId: 'paper-entry', qty: 1, price: 100.1, fee: 0, side: 'buy', ts: T0, venue: 'paper' },
+          { fillId: 'paper-exit', qty: 1, price: 101.899, fee: 0, side: 'sell', ts: T0 + HOUR, venue: 'paper' },
+        ],
+        entryPrice: 100.1,
+        direction: 1,
+        exitPrice: 101.899,
+        bars: [
+          { openTime: T0, high: 101, low: 99, close: 100 },
+          { openTime: T0 + HOUR, high: 102, low: 100, close: 101 },
+        ],
+        benchmarkBars: [
+          { openTime: T0, close: 100 },
+          { openTime: T0 + HOUR, close: 100 },
+        ],
+        fundingCost: { amountQuote: 0, source: 'fixture:known-zero' },
+      },
+      { slippageBps: 10 },
+    )
+    const fillToFillPct = ((101.899 - 100.1) / 100.1) * 100
+    expect(result.realizedGrossPct).toBeCloseTo(fillToFillPct, 10)
+    expect(result.realizedNetPct).toBeCloseTo(fillToFillPct, 10)
+    expect(result.settlementKind).toBe('paper_simulation')
+    expect(result.valuationBasis).toBe('actual_exit_fills')
+  })
+
+  it('benchmark 缺失或只有一个观测点时保留 unknown，不把零收益写成基准/alpha', () => {
+    const base = {
+      decision,
+      fills: [{ fillId: 'f-known', qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
+      entryPrice: 100,
+      direction: 1 as const,
+      bars: [
+        { openTime: T0, high: 102, low: 99, close: 101 },
+        { openTime: T0 + HOUR, high: 103, low: 100, close: 101 },
+      ],
+      fundingCost: { amountQuote: 0, source: 'fixture:known-zero' },
+    }
+    const missing = computeSettlement({ ...base, benchmarkBars: [] }, { slippageBps: 10 })
+    const onePoint = computeSettlement(
+      { ...base, benchmarkBars: [{ openTime: T0, close: 100 }] },
+      { slippageBps: 10 },
+    )
+    const partialWindow = computeSettlement(
+      {
+        ...base,
+        benchmarkBars: [
+          { openTime: T0 + HOUR, close: 100 },
+          { openTime: T0 + 2 * HOUR, close: 101 },
+        ],
+      },
+      { slippageBps: 10 },
+    )
+
+    expect(missing.realizedNetPct).toBeCloseTo(1, 10)
+    expect(missing.benchmarkPct).toBeNull()
+    expect(missing.alphaPct).toBeNull()
+    expect(onePoint.benchmarkPct).toBeNull()
+    expect(onePoint.alphaPct).toBeNull()
+    expect(partialWindow.benchmarkPct).toBeNull()
+    expect(partialWindow.alphaPct).toBeNull()
+    expect(missing.evidenceRefs).toContain('benchmark:unavailable')
+  })
+
+  it('缺少资金费来源时净收益 unknown，而不是把资金费当成零', () => {
+    const result = computeSettlement(
+      {
+        decision,
+        fills: [{ fillId: 'f-funding', qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
+        entryPrice: 100,
+        direction: 1,
+        bars: [{ openTime: T0, high: 102, low: 99, close: 101 }],
+        benchmarkBars: [{ openTime: T0, close: 100 }, { openTime: T0 + HOUR, close: 100 }],
+      },
+      { slippageBps: 0 },
+    )
+    expect(result.realizedGrossPct).toBeCloseTo(1, 10)
+    expect(result.realizedNetPct).toBeNull()
+    expect(result.fundingFeeQuote).toBeNull()
+    expect(result.fundingSource).toBeNull()
   })
 
   it('做空方向反转收益，并识别止损', () => {
@@ -292,19 +411,6 @@ describe('SettlementScheduler', () => {
     expect(journal.pendingSettlements(NOW)).toHaveLength(1)
   })
 
-  it('真实成交手续费未知时保持 pending，不把未知成本按 0 结算', async () => {
-    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
-    flatBars(BENCH, [100, 100, 100, 100, 100])
-    executedDecision({ decisionId: 'fee-unknown' }, { side: 'buy', price: 100, qty: 1, fee: null })
-
-    const result = await scheduler().runOnce(NOW)
-    expect(result.scanned).toBeGreaterThan(0)
-    expect(result.deferred).toBe(1)
-    expect(result.deferredIds).toContain('fee-unknown')
-    expect(journal.outcomeFor('fee-unknown')).toBeUndefined()
-    expect(journal.pendingSettlements(NOW)).toHaveLength(1)
-  })
-
   it('未显式传 horizonMs 时按计划卡 tf 推导并写入 outcome', async () => {
     flatBars('BTC/USDT', [100, 101, 102, 103, 104])
     flatBars(BENCH, [100, 100, 100, 100, 100])
@@ -315,7 +421,7 @@ describe('SettlementScheduler', () => {
     expect(journal.outcomeFor('d-derived-horizon')?.horizonMs).toBe(horizonMsForTimeframe(TF))
   })
 
-  it('从实际成交结算：净额、基准、alpha、MFE/MAE、止损', async () => {
+  it('从成交与显式成本结算：净额、基准、alpha、MFE/MAE、止损', async () => {
     flatBars('BTC/USDT', [100, 101, 104, 105, 105])
     flatBars(BENCH, [100, 100, 101, 101, 101])
     executedDecision({ decisionId: 'd1', stopPrice: 90 }, { side: 'buy', price: 100, qty: 1, fee: 0.5 })
@@ -327,12 +433,148 @@ describe('SettlementScheduler', () => {
     expect(outcome).toBeDefined()
     expect(outcome?.entryPrice).toBe(100)
     expect(outcome?.exitPrice).toBe(105)
-    expect(outcome?.realizedNetPct).toBeCloseTo(4.3, 10)
+    expect(outcome?.realizedNetPct).toBeCloseTo(4.5, 10)
     expect(outcome?.benchmarkPct).toBeCloseTo(1, 10)
-    expect(outcome?.alphaPct).toBeCloseTo(3.3, 10)
+    expect(outcome?.alphaPct).toBeCloseTo(3.5, 10)
+    expect(outcome?.fundingFeeQuote).toBe(0)
     expect(outcome?.stopHit).toBe(false)
     expect(outcome?.evidenceRefs.some((ref) => ref.startsWith('fill:'))).toBe(true)
     expect(journal.pendingSettlements(NOW)).toHaveLength(0)
+  })
+
+  it('多笔 entry/partial exit 按方向与实际数量加权，并按退出量分摊入场费', async () => {
+    flatBars('BTC/USDT', [100, 105, 110, 115, 120, 120])
+    flatBars(BENCH, [100, 100, 100, 100, 100, 100])
+    executedDecisionWithFills(
+      { decisionId: 'multi-entry', reflectionDueAt: T0 + 100 * HOUR },
+      [
+        { side: 'buy', price: 100, qty: 0.4, fee: 0.04, ts: T0 },
+        { side: 'buy', price: 110, qty: 0.6, fee: 0.06, ts: T0 + HOUR / 2 },
+      ],
+      'paper',
+    )
+    executedDecisionWithFills(
+      { decisionId: 'multi-exit', action: 'close', decidedAt: T0 + 2 * HOUR, reflectionDueAt: T0 + HORIZON },
+      [
+        { side: 'sell', price: 120, qty: 0.25, fee: 0.025, ts: T0 + 2 * HOUR },
+        { side: 'sell', price: 124, qty: 0.25, fee: 0.025, ts: T0 + 2 * HOUR + 1 },
+      ],
+      'paper',
+    )
+
+    let fundingRequest: Parameters<NonNullable<FundingCostResolver>>[0] | undefined
+    const result = await scheduler(undefined, HORIZON, (request) => {
+      fundingRequest = request
+      return { amountQuote: 0.05, source: 'fixture:funding-ledger' }
+    }).runOnce(T0 + 10 * HOUR)
+
+    expect(result.scanned).toBe(1)
+    expect(result.settled).toBe(1)
+    const outcome = journal.outcomeFor('multi-exit')
+    expect(outcome).toMatchObject({
+      entryPrice: 106,
+      exitPrice: 122,
+      attributedQty: 0.5,
+      feesQuote: 0.1, // 当前出场费 0.05 + 50% 的历史入场费 0.05
+      fundingFeeQuote: 0.05,
+      fundingSource: 'fixture:funding-ledger',
+      settlementKind: 'paper_simulation',
+      valuationBasis: 'actual_exit_fills',
+    })
+    const grossPct = ((122 - 106) / 106) * 100
+    expect(outcome?.realizedGrossPct).toBeCloseTo(grossPct, 10)
+    expect(outcome?.realizedNetPct).toBeCloseTo(grossPct - (0.1 / 53) * 100 - (0.05 / 53) * 100, 10)
+    expect(outcome?.evidenceRefs).toEqual(expect.arrayContaining([
+      'fill:fill-multi-entry-0',
+      'fill:fill-multi-entry-1',
+      'fill:fill-multi-exit-0',
+      'fill:fill-multi-exit-1',
+    ]))
+    expect(fundingRequest).toMatchObject({
+      from: T0,
+      until: T0 + 2 * HOUR + 1,
+      quantity: 0.5,
+      direction: 1,
+      fills: expect.arrayContaining([
+        expect.objectContaining({ fillId: 'fill-multi-entry-0' }),
+        expect.objectContaining({ fillId: 'fill-multi-exit-1' }),
+      ]),
+    })
+  })
+
+  it('多笔 paper entry 的 horizon mark 是模拟账户估值，成交滑点不重复扣', async () => {
+    flatBars('BTC/USDT', [120, 120, 120, 120, 120])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecisionWithFills(
+      { decisionId: 'paper-mark' },
+      [
+        { side: 'buy', price: 100, qty: 0.4, fee: 0, ts: T0 },
+        { side: 'buy', price: 110, qty: 0.6, fee: 0, ts: T0 + 1 },
+      ],
+      'paper',
+    )
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.settled).toBe(1)
+    const outcome = journal.outcomeFor('paper-mark')
+    expect(outcome).toMatchObject({
+      entryPrice: 106,
+      exitPrice: 120,
+      attributedQty: 1,
+      settlementKind: 'paper_simulation',
+      valuationBasis: 'horizon_mark',
+      feesQuote: 0,
+      fundingFeeQuote: 0,
+    })
+    expect(outcome?.realizedNetPct).toBeCloseTo(outcome?.realizedGrossPct as number, 10)
+  })
+
+  it('平仓归因不跨 paper 与 htx 账户借用入场成交', async () => {
+    flatBars('BTC/USDT', [100, 100, 100, 100, 100])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecision(
+      { decisionId: 'paper-entry', reflectionDueAt: T0 + 100 * HOUR },
+      { side: 'buy', price: 100, qty: 1, fee: 0 },
+      'paper',
+    )
+    executedDecision(
+      { decisionId: 'htx-close', action: 'close', decidedAt: T0 + HOUR, reflectionDueAt: T0 + HORIZON },
+      { side: 'sell', price: 101, qty: 1, fee: 0, ts: T0 + HOUR },
+      'htx',
+    )
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.deferredIds).toContain('htx-close')
+    expect(journal.outcomeFor('htx-close')).toBeUndefined()
+  })
+
+  it('资金费和单点 benchmark 缺失时仍记录 gross，持久 net/benchmark/alpha 均为 unknown', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    flatBars(BENCH, [100])
+    executedDecision(
+      { decisionId: 'unknown-costs' },
+      { side: 'buy', price: 100, qty: 1, fee: 0 },
+      'htx',
+    )
+
+    const result = await scheduler(undefined, HORIZON, null).runOnce(NOW)
+    expect(result.settled).toBe(1)
+    const outcome = journal.outcomeFor('unknown-costs')
+    expect(outcome?.realizedGrossPct).toBeGreaterThan(0)
+    expect(outcome?.realizedNetPct).toBeNull()
+    expect(outcome?.benchmarkPct).toBeNull()
+    expect(outcome?.alphaPct).toBeNull()
+    expect(outcome?.fundingFeeQuote).toBeNull()
+    expect(outcome?.fundingSource).toBeNull()
+    expect(db.prepare(
+      'SELECT realized_net_pct, benchmark_pct, alpha_pct, funding_fee_quote, funding_source FROM outcomes WHERE decision_id = ?',
+    ).get('unknown-costs')).toEqual({
+      realized_net_pct: null,
+      benchmark_pct: null,
+      alpha_pct: null,
+      funding_fee_quote: null,
+      funding_source: null,
+    })
   })
 
   it('重复结算幂等：第二次只跳过，不追加第二条 outcome', async () => {
@@ -350,6 +592,12 @@ describe('SettlementScheduler', () => {
     const second = await scheduler().runOnce(NOW)
     expect(second).toMatchObject({ scanned: 1, settled: 0, skipped: 1 })
     expect((db.prepare('SELECT COUNT(*) AS n FROM outcomes').get() as { n: number }).n).toBe(1)
+    expect(journal.pendingSettlements(NOW)).toHaveLength(0)
+    expect(journal.outcomeFor('d1')?.settlementKind).toBe('paper_simulation')
+    const audit = db.prepare(
+      `SELECT payload_json FROM audit_events WHERE kind = 'settlement_completed'`,
+    ).get() as { payload_json: string }
+    expect(JSON.parse(audit.payload_json)).toMatchObject({ learningStatus: 'settlement_only' })
   })
 
   it('一次扫描结算全部标的，而不是只结算"当前正在分析的那个"', async () => {
@@ -378,7 +626,7 @@ describe('SettlementScheduler', () => {
     )
 
     await scheduler().runOnce(NOW)
-    expect(journal.outcomeFor('d1')?.stopHit).toBe(true)
+    expect(journal.outcomeFor('d1')).toMatchObject({ stopHit: true, realizedGrossPct: -8 })
   })
 
   it('未到期的决策不结算', async () => {
@@ -408,12 +656,21 @@ describe('SettlementScheduler', () => {
   it('反思器入参只有 decision 与 outcome —— 结构上看不到历史反思', async () => {
     flatBars('BTC/USDT', [100, 100, 101, 101, 101])
     flatBars(BENCH, [100, 100, 100, 100, 100])
-    executedDecision({ decisionId: 'd1' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+    executedDecision(
+      { decisionId: 'entry', reflectionDueAt: T0 + 100 * HOUR },
+      { side: 'buy', price: 100, qty: 1, fee: 0 },
+      'htx',
+    )
+    executedDecision(
+      { decisionId: 'd1', action: 'close', decidedAt: T0 + 2 * HOUR, reflectionDueAt: T0 + HORIZON },
+      { side: 'sell', price: 101, qty: 1, fee: 0, ts: T0 + 2 * HOUR },
+      'htx',
+    )
 
     const seen: ReflectionInput[] = []
     const run = scheduler(async (input) => {
       seen.push(input)
-      return { text: '趋势跟随有效。', evidenceRefs: ['fill:fill-d1'] }
+      return { text: '趋势跟随有效。', evidenceRefs: ['fill:fill-d1-0'] }
     })
     const result = await run.runOnce(NOW)
     expect(result.reflectionsWritten).toBe(1)
@@ -430,6 +687,8 @@ describe('SettlementScheduler', () => {
       'takeProfit',
     ])
     expect(JSON.stringify(seen[0])).not.toContain('lesson')
+    expect(journal.outcomeFor('d1')?.settlementKind).toBe('realized')
+    expect(journal.outcomeFor('d1')?.valuationBasis).toBe('actual_exit_fills')
     expect(journal.recentLessons()).toHaveLength(1)
     expect(journal.recentLessons()[0]?.text).toBe('趋势跟随有效。')
 
@@ -445,7 +704,16 @@ describe('SettlementScheduler', () => {
   it('非法反思被拒时不写入 lessons，并给出可读原因', async () => {
     flatBars('BTC/USDT', [100, 100, 101, 101, 101])
     flatBars(BENCH, [100, 100, 100, 100, 100])
-    executedDecision({ decisionId: 'd1' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+    executedDecision(
+      { decisionId: 'entry', reflectionDueAt: T0 + 100 * HOUR },
+      { side: 'buy', price: 100, qty: 1, fee: 0 },
+      'htx',
+    )
+    executedDecision(
+      { decisionId: 'd1', action: 'close', decidedAt: T0 + 2 * HOUR, reflectionDueAt: T0 + HORIZON },
+      { side: 'sell', price: 101, qty: 1, fee: 0, ts: T0 + 2 * HOUR },
+      'htx',
+    )
 
     const result = await scheduler(async () => ({ text: '我觉得挺好', evidenceRefs: [] })).runOnce(NOW)
     expect(result.settled).toBe(1)
@@ -456,7 +724,7 @@ describe('SettlementScheduler', () => {
     expect(journal.recentLessons()).toHaveLength(0)
   })
 
-  it('没有成交的决策用窗口内第一根 bar 收盘价作为参考入场价', async () => {
+  it('没有成交明细时即使有 bar 也不生成伪收益样本', async () => {
     flatBars('BTC/USDT', [102, 103, 104, 105, 106])
     flatBars(BENCH, [100, 100, 101, 101, 101])
     journal.recordDecision({
@@ -470,8 +738,11 @@ describe('SettlementScheduler', () => {
     })
     journal.markDecisionReflectionDue('d-hold', T0 + HORIZON)
 
-    await scheduler().runOnce(NOW)
-    expect(journal.outcomeFor('d-hold')?.entryPrice).toBe(102)
+    const result = await scheduler().runOnce(NOW)
+    expect(result.settled).toBe(0)
+    expect(result.deferred).toBe(1)
+    expect(journal.outcomeFor('d-hold')).toBeUndefined()
+    expect(journal.pendingSettlements(NOW)).toHaveLength(1)
   })
 })
 
@@ -500,16 +771,10 @@ describe('结算的数据可用性（P1 ④）', () => {
   })
 
   it('数据补齐后重试成功（"含重试"是可验证的）', async () => {
-    journal.recordDecision({
-      decisionId: 'd-retry',
-      symbol: 'BTC/USDT',
-      timeframe: TF,
-      decidedAt: T0,
-      contextHash: 'ctx:retry',
-      action: 'open',
-      executed: false,
-    })
-    journal.markDecisionReflectionDue('d-retry', T0 + HORIZON)
+    executedDecision(
+      { decisionId: 'd-retry' },
+      { side: 'buy', price: 100, qty: 1, fee: 0 },
+    )
     expect((await scheduler().runOnce(NOW)).deferred).toBe(1)
 
     flatBars('BTC/USDT', [100, 101, 102, 103, 104])
@@ -626,7 +891,7 @@ describe('结算 PIT 与交易级净额（审计修复）', () => {
     // 最后一根 bar 的 openTime = T0+4h（= horizon 终点）⇒ 它在 horizon 之后才收盘
     flatBars('BTC/USDT', [100, 101, 102, 103, 999])
     flatBars(BENCH, [100, 100, 101, 101, 101])
-    journal.recordDecision({
+    executedDecision({
       decisionId: 'd-hold2',
       symbol: 'BTC/USDT',
       timeframe: TF,
@@ -634,8 +899,7 @@ describe('结算 PIT 与交易级净额（审计修复）', () => {
       contextHash: 'ctx:hold2',
       action: 'open',
       executed: false,
-    })
-    journal.markDecisionReflectionDue('d-hold2', T0 + HORIZON)
+    }, { side: 'buy', price: 100, qty: 1, fee: 0 })
 
     await scheduler().runOnce(NOW)
     // 只能是 horizon 内最后一根（openTime T0+3h，close 103），绝不是 999
@@ -655,8 +919,84 @@ describe('结算 PIT 与交易级净额（审计修复）', () => {
     expect(closeOutcome?.entryPrice).toBe(100)
     // 一个 +20% 的回合必须被记成 +20% 左右，而不是 ~0%
     expect(closeOutcome?.realizedGrossPct).toBeCloseTo(20, 6)
-    // 双边滑点（scheduler slippageBps=10 ⇒ 2×0.1%）后为 19.8%，基准未动 ⇒ alpha 同步
-    expect(closeOutcome?.realizedNetPct).toBeCloseTo(19.8, 6)
-    expect(closeOutcome?.alphaPct).toBeCloseTo(19.8, 6)
+    // 实际入场/出场成交价已经包含执行滑点，不在结算时重复扣减。
+    expect(closeOutcome?.realizedNetPct).toBeCloseTo(20, 6)
+    expect(closeOutcome?.alphaPct).toBeCloseTo(20, 6)
+  })
+
+  it('保护单反向成交归属开仓决策，完整止损按实际 entry/exit 计算', async () => {
+    flatBars('BTC/USDT', [100, 90, 90, 90, 90])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecisionWithFills({ decisionId: 'protected-open' }, [
+      { side: 'buy', price: 100, qty: 1, fee: 0, ts: T0 },
+      { side: 'sell', price: 90, qty: 1, fee: 0, ts: T0 + HOUR, reduceOnly: true },
+    ], 'htx')
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.errors).toEqual([])
+    expect(result.settled).toBe(1)
+    expect(journal.outcomeFor('protected-open')).toMatchObject({
+      entryPrice: 100,
+      exitPrice: 90,
+      realizedGrossPct: -10,
+      settlementKind: 'realized',
+      valuationBasis: 'actual_exit_fills',
+      attributedQty: 1,
+    })
+  })
+
+  it('保护单部分成交后按已实现 PnL 加剩余 horizon mark 归因', async () => {
+    flatBars('BTC/USDT', [100, 104, 105, 104, 104])
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecisionWithFills({ decisionId: 'partially-protected-open' }, [
+      { side: 'buy', price: 100, qty: 2, fee: 0, ts: T0 },
+      { side: 'sell', price: 90, qty: 1, fee: 0, ts: T0 + HOUR, reduceOnly: true },
+    ], 'htx')
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.errors).toEqual([])
+    expect(result.settled).toBe(1)
+    expect(journal.outcomeFor('partially-protected-open')).toMatchObject({
+      exitPrice: 104,
+      realizedGrossPct: -3,
+      settlementKind: 'horizon_mark',
+      valuationBasis: 'horizon_mark',
+      attributedQty: 2,
+    })
+  })
+
+  it('close 的 benchmark/MFE/MAE/stopHit 与真实持仓时段对齐，排除平仓后的行情', async () => {
+    seedBars('BTC/USDT', [
+      { openTime: T0, close: 100, high: 102, low: 98 },
+      { openTime: T0 + HOUR, close: 110, high: 112, low: 108 },
+      { openTime: T0 + 2 * HOUR, close: 90, high: 140, low: 80 },
+      { openTime: T0 + 3 * HOUR, close: 90, high: 95, low: 85 },
+      { openTime: T0 + 4 * HOUR, close: 90, high: 95, low: 85 },
+    ])
+    flatBars(BENCH, [100, 105, 130, 132, 133])
+    executedDecision(
+      { decisionId: 'held-entry', reflectionDueAt: T0 + 100 * HOUR },
+      { side: 'buy', price: 100, qty: 1, fee: 0, ts: T0 },
+      'htx',
+    )
+    executedDecision(
+      {
+        decisionId: 'time-aligned-close', action: 'close', decidedAt: T0 + 2 * HOUR,
+        reflectionDueAt: T0 + 3 * HOUR, stopPrice: 95,
+      },
+      { side: 'sell', price: 110, qty: 1, fee: 0, ts: T0 + 2 * HOUR },
+      'htx',
+    )
+
+    const result = await scheduler().runOnce(NOW)
+    expect(result.errors).toEqual([])
+    expect(journal.outcomeFor('time-aligned-close')).toMatchObject({
+      realizedGrossPct: 10,
+      benchmarkPct: 5,
+      alphaPct: 5,
+      mfePct: 12,
+      maePct: -2,
+      stopHit: false,
+    })
   })
 })

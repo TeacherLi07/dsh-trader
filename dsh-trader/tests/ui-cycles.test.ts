@@ -99,6 +99,11 @@ describe('Trade Console cycle read model', () => {
         maePct: -0.5,
         stopHit: false,
         feesQuote: 0.1,
+        fundingFeeQuote: null,
+        fundingSource: null,
+        settlementKind: 'realized',
+        valuationBasis: 'actual_exit_fills',
+        attributedQty: 2,
         evidenceRefs: ['bar:one'],
       })
       journal.markDecisionOutcome('cycle-1', 'outcome-1')
@@ -136,7 +141,16 @@ describe('Trade Console cycle read model', () => {
       expect(detail.orders).toHaveLength(1)
       expect(detail.orders[0]?.orders).toHaveLength(1)
       expect(detail.fills).toHaveLength(1)
-      expect(detail.outcome).toMatchObject({ outcomeId: 'outcome-1', realizedNetPct: 2.8 })
+      expect(detail.outcome).toMatchObject({
+        outcomeId: 'outcome-1',
+        realizedNetPct: 2.8,
+        benchmarkPct: 1,
+        settlementKind: 'realized',
+        valuationBasis: 'actual_exit_fills',
+        attributedQty: 2,
+        fundingFeeQuote: null,
+        fundingSource: null,
+      })
       expect(detail.lesson?.text).toBe('等待确认后的突破更稳健')
       expect(detail.audit.some((event) => event.kind === 'execute.denied')).toBe(true)
       expect(readCycleDetail(db, 'missing-cycle')).toBeUndefined()

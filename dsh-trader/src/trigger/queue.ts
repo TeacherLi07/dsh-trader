@@ -6,6 +6,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { DecisionRunStore } from '../agents/decision-run-store.js'
 import { Statements } from '../db/statements.js'
 import { canonicalJson } from '../util/canonical.js'
 
@@ -117,11 +118,41 @@ function appendError(previous: string | null, reason: string, attempt?: number):
   return [previous, entry].filter((value): value is string => value !== null).join('\n').slice(-5_000)
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 export class TriggerQueue {
   readonly #statements: Statements
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
+  }
+
+  #failAssociatedDecisionRuns(trigger: Pick<StoredTrigger, 'triggerId' | 'purpose'>, reason: string, now: number): number {
+    if (trigger.purpose !== 'commitment' && trigger.purpose !== 'novelty') return 0
+    const source = trigger.purpose === 'novelty' ? 'W3' : 'W2'
+    const triggerSource = `${source}:${trigger.triggerId}`
+    const rows = this.#statements.get(
+      `SELECT run_id FROM decision_runs WHERE trigger_source = ? AND status = 'running' ORDER BY created_at, run_id`,
+    ).all(triggerSource) as { readonly run_id: string }[]
+    const store = new DecisionRunStore(this.db)
+    let failed = 0
+    for (const row of rows) {
+      const run = store.get(row.run_id)
+      if (run?.status !== 'running') continue
+      const final = isRecord(run.final) ? run.final : {}
+      store.update(run.runId, {
+        status: 'failed',
+        final: { ...final, workerFailure: { triggerId: trigger.triggerId, reason } },
+        ...(run.eligibility === null ? {
+          eligibility: { state: 'decision_only', reasons: [reason], validatedEvidencePaths: [] },
+        } : {}),
+        finishedAt: now,
+      }, now)
+      failed += 1
+    }
+    return failed
   }
 
   /**
@@ -266,10 +297,14 @@ export class TriggerQueue {
       const expired: StoredTrigger[] = []
       for (const row of rows) {
         const result = update.run(row.trigger_id)
-        if (Number(result.changes) === 1) expired.push({
-          ...toTrigger(row), state: 'expired', claimedAt: null,
-          lastError: appendError(row.last_error, '触发器在处理前过期'),
-        })
+        if (Number(result.changes) === 1) {
+          const trigger = {
+            ...toTrigger(row), state: 'expired' as const, claimedAt: null,
+            lastError: appendError(row.last_error, '触发器在处理前过期'),
+          }
+          this.#failAssociatedDecisionRuns(trigger, trigger.lastError, now)
+          expired.push(trigger)
+        }
       }
       return expired
     })()
@@ -281,14 +316,17 @@ export class TriggerQueue {
     const row = this.#statements.get(`SELECT * FROM triggers WHERE trigger_id = ?`).get(triggerId) as TriggerRow | undefined
     if (row === undefined) throw new Error(`触发器不存在：${triggerId}`)
     if (row.state !== 'queued' && row.state !== 'claimed') throw new Error(`只能过期 queued/claimed 触发：${triggerId}`)
-    const lastError = appendError(row.last_error, safeErrorText(reason))
-    const result = this.#statements.get(`UPDATE triggers
-      SET state = 'expired', claimed_at = NULL, last_error = ?
-      WHERE trigger_id = ? AND state IN ('queued', 'claimed')`).run(lastError, triggerId)
-    if (Number(result.changes) !== 1) throw new Error(`触发器过期状态竞争：${triggerId}`)
-    const updated = this.get(triggerId)
-    if (updated === undefined) throw new Error(`触发器过期后消失：${triggerId}`)
-    return updated
+    return this.db.transaction(() => {
+      const lastError = appendError(row.last_error, safeErrorText(reason))
+      const result = this.#statements.get(`UPDATE triggers
+        SET state = 'expired', claimed_at = NULL, last_error = ?
+        WHERE trigger_id = ? AND state IN ('queued', 'claimed')`).run(lastError, triggerId)
+      if (Number(result.changes) !== 1) throw new Error(`触发器过期状态竞争：${triggerId}`)
+      const updated = this.get(triggerId)
+      if (updated === undefined) throw new Error(`触发器过期后消失：${triggerId}`)
+      this.#failAssociatedDecisionRuns(updated, updated.lastError ?? lastError, now)
+      return updated
+    })()
   }
 
   /** queued 行若已耗尽次数则不可再领取；调用方逐条审计这些终态。 */
@@ -307,10 +345,14 @@ export class TriggerQueue {
       const failed: StoredTrigger[] = []
       for (const row of rows) {
         const result = update.run(row.trigger_id)
-        if (Number(result.changes) === 1) failed.push({
-          ...toTrigger(row), state: 'failed', claimedAt: null,
-          lastError: appendError(row.last_error, '已达到最大触发尝试次数'),
-        })
+        if (Number(result.changes) === 1) {
+          const trigger = {
+            ...toTrigger(row), state: 'failed' as const, claimedAt: null,
+            lastError: appendError(row.last_error, '已达到最大触发尝试次数'),
+          }
+          this.#failAssociatedDecisionRuns(trigger, trigger.lastError, now)
+          failed.push(trigger)
+        }
       }
       return failed
     })()
@@ -326,27 +368,30 @@ export class TriggerQueue {
     if (!Number.isSafeInteger(baseDelayMs) || baseDelayMs < 0 || !Number.isSafeInteger(maxDelayMs) || maxDelayMs < baseDelayMs) {
       throw new Error('retry delay 配置非法')
     }
-    const row = this.#statements.get(`SELECT * FROM triggers WHERE trigger_id = ? AND state = 'claimed'`).get(triggerId) as
-      | TriggerRow
-      | undefined
-    if (row === undefined) throw new Error(`只能重试 claimed 触发：${triggerId}`)
-    const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, row.attempts - 1))
-    const nextAttemptAt = now + delay
-    const expired = row.expires_at !== null && (row.expires_at <= now || row.expires_at <= nextAttemptAt)
-    const exhausted = row.attempts >= maxAttempts
-    const state: TriggerState = expired ? 'expired' : exhausted ? 'failed' : 'queued'
-    const failureReason = safeErrorText(error)
-    const reason = expired
-      ? `${failureReason}；重试退避超出事件 TTL，触发器终止`
-      : failureReason
-    const lastError = appendError(row.last_error, reason, row.attempts)
-    const result = this.#statements.get(`UPDATE triggers SET state = @state, next_attempt_at = @nextAttemptAt,
-      claimed_at = NULL, last_error = @lastError WHERE trigger_id = @triggerId AND state = 'claimed'`)
-      .run({ state, nextAttemptAt, lastError, triggerId })
-    if (Number(result.changes) !== 1) throw new Error(`触发器失败状态竞争：${triggerId}`)
-    const updated = this.get(triggerId)
-    if (updated === undefined) throw new Error(`触发器更新后消失：${triggerId}`)
-    return updated
+    return this.db.transaction(() => {
+      const row = this.#statements.get(`SELECT * FROM triggers WHERE trigger_id = ? AND state = 'claimed'`).get(triggerId) as
+        | TriggerRow
+        | undefined
+      if (row === undefined) throw new Error(`只能重试 claimed 触发：${triggerId}`)
+      const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** Math.max(0, row.attempts - 1))
+      const nextAttemptAt = now + delay
+      const expired = row.expires_at !== null && (row.expires_at <= now || row.expires_at <= nextAttemptAt)
+      const exhausted = row.attempts >= maxAttempts
+      const state: TriggerState = expired ? 'expired' : exhausted ? 'failed' : 'queued'
+      const failureReason = safeErrorText(error)
+      const reason = expired
+        ? `${failureReason}；重试退避超出事件 TTL，触发器终止`
+        : failureReason
+      const lastError = appendError(row.last_error, reason, row.attempts)
+      const result = this.#statements.get(`UPDATE triggers SET state = @state, next_attempt_at = @nextAttemptAt,
+        claimed_at = NULL, last_error = @lastError WHERE trigger_id = @triggerId AND state = 'claimed'`)
+        .run({ state, nextAttemptAt, lastError, triggerId })
+      if (Number(result.changes) !== 1) throw new Error(`触发器失败状态竞争：${triggerId}`)
+      const updated = this.get(triggerId)
+      if (updated === undefined) throw new Error(`触发器更新后消失：${triggerId}`)
+      if (state === 'failed' || state === 'expired') this.#failAssociatedDecisionRuns(updated, lastError, now)
+      return updated
+    })()
   }
 
   /** 启动恢复：进程上次持有的 claimed 行重新排队；过期项在同一操作中终结。 */
@@ -371,9 +416,11 @@ export class TriggerQueue {
           SET state = @state, next_attempt_at = @nextAttemptAt, claimed_at = NULL, last_error = @lastError
           WHERE trigger_id = @triggerId AND state = 'claimed'`)
           .run({ state, nextAttemptAt: now, lastError, triggerId: row.trigger_id })
-        if (Number(result.changes) === 1) recovered.push({
-          ...toTrigger(row), state, nextAttemptAt: now, claimedAt: null, lastError,
-        })
+        if (Number(result.changes) === 1) {
+          const trigger = { ...toTrigger(row), state, nextAttemptAt: now, claimedAt: null, lastError }
+          if (state === 'failed' || state === 'expired') this.#failAssociatedDecisionRuns(trigger, lastError, now)
+          recovered.push(trigger)
+        }
       }
       return recovered
     })()

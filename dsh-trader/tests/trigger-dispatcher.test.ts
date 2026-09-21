@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
 import { BudgetLedger } from '../src/cost-ledger.js'
 import { migrate } from '../src/db/schema.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
+import { DecisionRunStore } from '../src/agents/decision-run-store.js'
+import { freezeDecisionContext } from '../src/agents/decision-context.js'
 import { DecisionJournal } from '../src/exec/journal.js'
 import { PlanStore } from '../src/plan/store.js'
 import type { PmStore } from '../src/predictions/store.js'
@@ -45,6 +48,30 @@ function dispatch(run: Parameters<typeof dispatchNextTrigger>[0]['run'], extra: 
     queue, journal, clock, budget, symbols: [SYMBOL], timeframes: ['15m', '1h', '4h'],
     dailyBudgetUsd: 1, run, ...extra,
   })
+}
+
+function startDecisionRun(triggerId: string, source: 'W2' | 'W3'): string {
+  const context = freezeDecisionContext({
+    symbol: SYMBOL, primaryTimeframe: '1h', asOf: NOW,
+    sections: {
+      mandate: { asOf: NOW, source: 'test', missing: [], value: {} },
+      market: { asOf: NOW, source: 'test', missing: [], value: {} },
+      derivatives: { asOf: NOW, source: 'test', missing: [], value: {} },
+      benchmark: { asOf: NOW, source: 'test', missing: [], value: {} },
+      portfolio: { asOf: NOW, source: 'test', missing: [], value: {} },
+      activePlan: { asOf: NOW, source: 'test', missing: [], value: null },
+      history: { asOf: NOW, source: 'test', missing: [], value: {} },
+      lessons: { asOf: NOW, source: 'test', missing: [], value: [] },
+      predictions: { asOf: null, source: 'test', missing: ['disabled'], value: null },
+    },
+  })
+  const stored = new DecisionContextStore(db).record(context).record
+  const runId = `run-${triggerId}`
+  new DecisionRunStore(db).start({
+    runId, contextId: stored.contextId, contextHash: stored.contextHash,
+    symbol: SYMBOL, primaryTimeframe: '1h', triggerSource: `${source}:${triggerId}`, createdAt: NOW,
+  })
+  return runId
 }
 
 describe('durable W2/W3 trigger dispatcher', () => {
@@ -95,6 +122,44 @@ describe('durable W2/W3 trigger dispatcher', () => {
     const completed = await dispatch(async ({ trigger: item }) => ({ runId: `run-${item.attempts}`, status: 'review' }))
     expect(completed).toMatchObject({ kind: 'processed', runId: 'run-2' })
     expect(queue.get('retry-me')?.state).toBe('done')
+  })
+
+  it.each([
+    { source: 'W2' as const, purpose: 'commitment' as const, disposition: 'judgment' as const },
+    { source: 'W3' as const, purpose: 'novelty' as const, disposition: 'novelty' as const },
+  ])('$source retries exhausted terminally fail the associated running decision run', async ({ source, purpose, disposition }) => {
+    const triggerId = `retry-exhausted-${source.toLowerCase()}`
+    const runId = startDecisionRun(triggerId, source)
+    queue.enqueue(trigger({ triggerId, dedupKey: triggerId, purpose, disposition }))
+    const retryPolicy = { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 }
+
+    const first = await dispatch(async () => ({ runId, retryable: true, reason: 'provider timeout first' }), { retryPolicy })
+    expect(first.kind).toBe('retry')
+    expect(new DecisionRunStore(db).get(runId)?.status).toBe('running')
+
+    clock.advanceTo(NOW + 1)
+    const last = await dispatch(async () => ({ runId, retryable: true, reason: 'provider timeout exhausted' }), { retryPolicy })
+    expect(last).toMatchObject({ kind: 'failed', runId })
+    expect(queue.get(triggerId)).toMatchObject({ state: 'failed', attempts: 2 })
+    const failedRun = new DecisionRunStore(db).get(runId)
+    expect(failedRun).toMatchObject({ status: 'failed', finishedAt: NOW + 1 })
+    expect(failedRun?.final).toMatchObject({
+      workerFailure: { triggerId, reason: expect.stringContaining('provider timeout exhausted') },
+    })
+  })
+
+  it('restart recovery at the retry ceiling also terminally fails its running decision run', () => {
+    const triggerId = 'retry-exhausted-on-restart'
+    const runId = startDecisionRun(triggerId, 'W2')
+    queue.enqueue(trigger({ triggerId, dedupKey: triggerId }))
+    expect(queue.claim(NOW, 1, 1)).toHaveLength(1)
+
+    const recovered = queue.recoverClaims(NOW + 1, 1)
+    expect(recovered).toMatchObject([{ state: 'failed', attempts: 1 }])
+    expect(new DecisionRunStore(db).get(runId)).toMatchObject({
+      status: 'failed', finishedAt: NOW + 1,
+      final: { workerFailure: { triggerId, reason: expect.stringContaining('最大尝试次数') } },
+    })
   })
 
   it('expires events and rejects PM-only aliases without guessing a tradable symbol', async () => {

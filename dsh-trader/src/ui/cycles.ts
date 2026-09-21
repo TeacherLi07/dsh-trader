@@ -8,6 +8,7 @@
 
 import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
+import type { SettlementKind, SettlementValuationBasis } from '../exec/journal.js'
 
 export type CycleSettlement = 'awaiting' | 'settled'
 
@@ -81,13 +82,18 @@ export interface CycleOutcome {
   readonly entryPrice: number
   readonly exitPrice: number
   readonly realizedGrossPct: number
-  readonly realizedNetPct: number
-  readonly benchmarkPct: number
-  readonly alphaPct: number
+  readonly realizedNetPct: number | null
+  readonly benchmarkPct: number | null
+  readonly alphaPct: number | null
   readonly mfePct: number
   readonly maePct: number
   readonly stopHit: boolean
-  readonly feesQuote: number
+  readonly feesQuote: number | null
+  readonly fundingFeeQuote: number | null
+  readonly fundingSource: string | null
+  readonly settlementKind: SettlementKind
+  readonly valuationBasis: SettlementValuationBasis
+  readonly attributedQty: number | null
   readonly evidenceRefs: unknown
 }
 
@@ -199,13 +205,18 @@ interface OutcomeRow {
   entry_price: number
   exit_price: number
   realized_gross_pct: number
-  realized_net_pct: number
-  benchmark_pct: number
-  alpha_pct: number
+  realized_net_pct: number | null
+  benchmark_pct: number | null
+  alpha_pct: number | null
   mfe_pct: number
   mae_pct: number
   stop_hit: number
-  fees_quote: number
+  fees_quote: number | null
+  funding_fee_quote: number | null
+  funding_source: string | null
+  settlement_kind: SettlementKind
+  valuation_basis: SettlementValuationBasis
+  attributed_qty: number | null
   evidence_refs_json: string
 }
 
@@ -364,7 +375,8 @@ function readOutcome(statements: Statements, cycleId: string): CycleOutcome | nu
     .get(
       `SELECT outcome_id, settled_at, horizon_ms, entry_price, exit_price, realized_gross_pct,
               realized_net_pct, benchmark_pct, alpha_pct, mfe_pct, mae_pct, stop_hit,
-              fees_quote, evidence_refs_json
+              fees_quote, funding_fee_quote, funding_source, settlement_kind, valuation_basis,
+              attributed_qty, evidence_refs_json
        FROM outcomes WHERE decision_id = ?`,
     )
     .get(cycleId) as OutcomeRow | undefined
@@ -383,6 +395,11 @@ function readOutcome(statements: Statements, cycleId: string): CycleOutcome | nu
     maePct: row.mae_pct,
     stopHit: row.stop_hit === 1,
     feesQuote: row.fees_quote,
+    fundingFeeQuote: row.funding_fee_quote,
+    fundingSource: row.funding_source,
+    settlementKind: row.settlement_kind,
+    valuationBasis: row.valuation_basis,
+    attributedQty: row.attributed_qty,
     evidenceRefs: parseJson(row.evidence_refs_json),
   }
 }

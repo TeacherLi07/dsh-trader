@@ -2,7 +2,7 @@
  * 结算与反思（plan §7.9 / T1.4）。
  *
  * 四条硬性设计：
- *   1. **交易级**结算：用**实际成交**（fills）取入场，按实际仓位算，扣手续费与滑点 ——
+ *   1. **交易级**结算：用**实际成交**（fills）取入场，按归因数量计算 gross 与可核验成本 ——
  *      不是"5 根 bar 的收盘到收盘"那种弱代理；基准用 BTC/ETH，**不是 SPY**；
  *   2. **独立扫描全部 pending**：不依赖"下次恰好重跑同一标的"，一次性标的也不会悬空；
  *   3. **反思闸门是机械的**：只在外部结算之后写、每条反思必须带**证据指针**、有 TTL 与字数上限；
@@ -14,7 +14,14 @@
 import type { Clock } from '../clock.js'
 import type { BarArchive } from '../market/archive.js'
 import { fingerprint } from '../util/canonical.js'
-import type { DecisionJournal, FillView, OutcomeRecord, PendingSettlement } from '../exec/journal.js'
+import type {
+  DecisionJournal,
+  FillView,
+  OutcomeRecord,
+  PendingSettlement,
+  SettlementKind,
+  SettlementValuationBasis,
+} from '../exec/journal.js'
 
 const MIN_HORIZON_MS = 4 * 3_600_000
 const MAX_HORIZON_MS = 24 * 3_600_000
@@ -46,6 +53,26 @@ export function reflectorRoute(routing: { readonly deep: unknown; readonly quick
 
 export type { FillView }
 
+export interface FundingCost {
+  /** 正数为支付、负数为收入；必须来自明确核验的资金费记录。 */
+  readonly amountQuote: number
+  readonly source: string
+}
+
+export interface FundingCostRequest {
+  readonly decision: PendingSettlement
+  readonly from: number
+  readonly until: number
+  readonly quantity: number | null
+  readonly direction: 1 | -1
+  /** 相关历史入场/出场成交；多次减仓的资金费归因需据此重建区间敞口。 */
+  readonly fills: readonly FillView[]
+}
+
+export type FundingCostResolver = (
+  request: FundingCostRequest,
+) => FundingCost | null | Promise<FundingCost | null>
+
 export interface SettlementInputs {
   readonly decision: PendingSettlement
   readonly fills: readonly FillView[]
@@ -55,45 +82,69 @@ export interface SettlementInputs {
   readonly benchmarkBars: readonly { readonly openTime: number; readonly close: number }[]
   /** 已确认的真实出场成交；缺失时才使用 horizon mark。 */
   readonly exitPrice?: number
+  /** 已归因的成交数量与手续费；close/reduce 会按实际平仓量分摊原始入场费。 */
+  readonly attributedQty?: number | null
+  readonly attributedFeesQuote?: number | null
+  /** 多次部分出场与 horizon residual 混合时，按 quote PnL/初始名义计算的总收益率。 */
+  readonly grossPctOverride?: number
+  /** 默认由是否传入 exitPrice 推导；混合实际减仓与剩余 mark 时显式标记 horizon_mark。 */
+  readonly valuationBasis?: SettlementValuationBasis
+  /** 未取得资金费时不传；结果中的 net 保持 unknown，而非按零成本处理。 */
+  readonly fundingCost?: FundingCost | null
 }
 
 export interface SettlementComputation {
   readonly exitPrice: number
   readonly realizedGrossPct: number
-  readonly realizedNetPct: number
-  readonly benchmarkPct: number
-  readonly alphaPct: number
+  readonly realizedNetPct: number | null
+  readonly benchmarkPct: number | null
+  readonly alphaPct: number | null
   readonly mfePct: number
   readonly maePct: number
   readonly stopHit: boolean
-  readonly feesQuote: number
+  readonly feesQuote: number | null
+  readonly fundingFeeQuote: number | null
+  readonly fundingSource: string | null
+  readonly settlementKind: SettlementKind
+  readonly valuationBasis: SettlementValuationBasis
+  readonly attributedQty: number | null
   readonly evidenceRefs: readonly string[]
 }
 
 /**
- * 纯函数：由实际成交 + 持有窗口内的 bar 算出交易级净额。
- * `slippageBps` 按**入场与出场各一次**计（这是我们对执行成本的显式假设，不是实测）。
+ * 成交价是权威成交值；paper 撮合已经把滑点写进 fill.price，结算不能再次扣估算值。
+ * options 保留旧调用形状，但 slippageBps 不再用于覆盖真实成交或 horizon mark。
  */
 export function computeSettlement(
   inputs: SettlementInputs,
-  options: { readonly slippageBps: number },
+  _options: { readonly slippageBps: number },
 ): SettlementComputation {
   const { decision, fills, entryPrice, direction, bars, benchmarkBars } = inputs
-
-  if (fills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) {
-    throw new Error('成交手续费未知，不能按 0 结算')
+  const feesQuote = inputs.attributedFeesQuote !== undefined
+    ? inputs.attributedFeesQuote
+    : fills.every((fill) => fill.fee !== null && Number.isFinite(fill.fee))
+      ? fills.reduce((sum, fill) => sum + (fill.fee as number), 0)
+      : null
+  const attributedQty = inputs.attributedQty !== undefined
+    ? inputs.attributedQty
+    : fills.length > 0
+      ? fills.reduce((sum, fill) => sum + Math.abs(fill.qty), 0)
+      : null
+  const notional = attributedQty !== null && Number.isFinite(attributedQty) && attributedQty > 0
+    ? entryPrice * attributedQty
+    : null
+  const feesPct = feesQuote === null || notional === null ? null : notional > 0 ? (feesQuote / notional) * 100 : null
+  const fundingCost = inputs.fundingCost ?? null
+  if (fundingCost !== null && (!Number.isFinite(fundingCost.amountQuote) || fundingCost.source.trim() === '')) {
+    throw new Error('资金费必须包含有限金额和非空来源')
   }
-  const feesQuote = fills.reduce((sum, fill) => sum + (fill.fee as number), 0)
-  // 仓位规模取**首笔（入场腿）**的数量，而不是所有成交之和：
-  // 保护单成交现在也会归属到同一条决策，求和会把两条腿叠加成 2× 仓位。
-  const qty = fills.length > 0 ? Math.abs((fills[0] as FillView).qty) : 0
-  const notional = entryPrice * (qty > 0 ? qty : 1)
-  const feesPct = notional > 0 ? (feesQuote / notional) * 100 : 0
-  const slippagePct = 2 * (options.slippageBps / 10_000) * 100
+  const fundingPct = fundingCost === null || notional === null ? null : (fundingCost.amountQuote / notional) * 100
 
   const exitPrice = inputs.exitPrice ?? (bars.length > 0 ? (bars[bars.length - 1] as { close: number }).close : entryPrice)
-  const grossPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 * direction : 0
-  const netPct = grossPct - feesPct - slippagePct
+  const calculatedGrossPct = entryPrice > 0 ? ((exitPrice - entryPrice) / entryPrice) * 100 * direction : 0
+  const grossPct = inputs.grossPctOverride ?? calculatedGrossPct
+  if (!Number.isFinite(grossPct)) throw new Error('结算 grossPct 非有限数')
+  const netPct = feesPct === null || fundingPct === null ? null : grossPct - feesPct - fundingPct
 
   let mfePct = 0
   let maePct = 0
@@ -109,11 +160,27 @@ export function computeSettlement(
     }
   }
 
-  const firstBenchmark = benchmarkBars.length > 0 ? (benchmarkBars[0] as { close: number }).close : 0
-  const lastBenchmark =
-    benchmarkBars.length > 0 ? (benchmarkBars[benchmarkBars.length - 1] as { close: number }).close : 0
-  const benchmarkPct =
-    firstBenchmark > 0 ? ((lastBenchmark - firstBenchmark) / firstBenchmark) * 100 : 0
+  const firstBenchmarkBar = benchmarkBars[0]
+  const lastBenchmarkBar = benchmarkBars[benchmarkBars.length - 1]
+  const benchmarkCoversWindow = benchmarkBars.length >= 2 && bars.length >= 2 &&
+    firstBenchmarkBar?.openTime === (bars[0] as { openTime: number }).openTime &&
+    lastBenchmarkBar?.openTime === (bars[bars.length - 1] as { openTime: number }).openTime
+  const firstBenchmark = benchmarkCoversWindow ? (firstBenchmarkBar as { close: number }).close : null
+  const lastBenchmark = benchmarkCoversWindow
+    ? (benchmarkBars[benchmarkBars.length - 1] as { close: number }).close
+    : null
+  const benchmarkPct = firstBenchmark !== null && lastBenchmark !== null &&
+      Number.isFinite(firstBenchmark) && Number.isFinite(lastBenchmark) && firstBenchmark > 0 && lastBenchmark > 0
+    ? ((lastBenchmark - firstBenchmark) / firstBenchmark) * 100
+    : null
+  const valuationBasis: SettlementValuationBasis = inputs.valuationBasis ??
+    (inputs.exitPrice === undefined ? 'horizon_mark' : 'actual_exit_fills')
+  const isPaperSimulation = fills.some((fill) => fill.venue === 'paper')
+  const settlementKind: SettlementKind = isPaperSimulation
+    ? 'paper_simulation'
+    : valuationBasis === 'actual_exit_fills'
+      ? 'realized'
+      : 'horizon_mark'
 
   const evidenceRefs = [
     `decision:${decision.decisionId}`,
@@ -122,9 +189,13 @@ export function computeSettlement(
       ? [`bar:${decision.symbol}:${(bars[0] as { openTime: number }).openTime}`,
          `bar:${decision.symbol}:${(bars[bars.length - 1] as { openTime: number }).openTime}`]
       : []),
-    ...(benchmarkBars.length > 0
-      ? [`bar:benchmark:${(benchmarkBars[benchmarkBars.length - 1] as { openTime: number }).openTime}`]
+    ...(benchmarkPct !== null
+      ? [
+          `bar:benchmark:${(benchmarkBars[0] as { openTime: number }).openTime}`,
+          `bar:benchmark:${(benchmarkBars[benchmarkBars.length - 1] as { openTime: number }).openTime}`,
+        ]
       : ['benchmark:unavailable']),
+    ...(fundingCost === null ? ['funding:unavailable'] : [`funding:${fundingCost.source}`]),
   ]
 
   return {
@@ -132,11 +203,16 @@ export function computeSettlement(
     realizedGrossPct: grossPct,
     realizedNetPct: netPct,
     benchmarkPct,
-    alphaPct: netPct - benchmarkPct,
+    alphaPct: netPct === null || benchmarkPct === null ? null : netPct - benchmarkPct,
     mfePct,
     maePct,
     stopHit,
     feesQuote,
+    fundingFeeQuote: fundingCost?.amountQuote ?? null,
+    fundingSource: fundingCost?.source ?? null,
+    settlementKind,
+    valuationBasis,
+    attributedQty,
     evidenceRefs,
   }
 }
@@ -164,6 +240,198 @@ export function reconstructPosition(
     }
   }
   return { qty, avgPrice }
+}
+
+interface PositionAccounting {
+  readonly qty: number
+  readonly avgPrice: number
+  /** 当前剩余仓位对应的入场手续费；null 表示历史成本有缺口。 */
+  readonly entryFeesQuote: number | null
+  readonly openedAt: number | null
+}
+
+/** 同时重建均价、未平仓入场费和仓位起点，供部分减仓按实际数量分摊成本。 */
+function reconstructPositionAccounting(fills: readonly FillView[]): PositionAccounting {
+  let qty = 0
+  let avgPrice = 0
+  let entryFeesQuote: number | null = 0
+  let openedAt: number | null = null
+
+  for (const fill of fills) {
+    const size = Math.abs(fill.qty)
+    if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
+      throw new Error(`成交数量或价格无效：${fill.fillId}`)
+    }
+    const side = fill.side.toLowerCase()
+    if (side !== 'buy' && side !== 'sell') throw new Error(`成交方向无效：${fill.fillId}`)
+    if (fill.fee !== null && !Number.isFinite(fill.fee)) throw new Error(`成交手续费无效：${fill.fillId}`)
+    const signed = side === 'sell' ? -size : size
+
+    if (qty === 0 || Math.sign(qty) === Math.sign(signed)) {
+      const previousSize = Math.abs(qty)
+      const next = qty + signed
+      avgPrice = next === 0 ? 0 : (avgPrice * previousSize + fill.price * size) / Math.abs(next)
+      qty = next
+      entryFeesQuote = entryFeesQuote === null || fill.fee === null ? null : entryFeesQuote + fill.fee
+      openedAt = openedAt === null ? fill.ts : Math.min(openedAt, fill.ts)
+      continue
+    }
+
+    const previousSize = Math.abs(qty)
+    const closedSize = Math.min(previousSize, size)
+    const remainingSize = previousSize - closedSize
+    const next = qty + signed
+    if (remainingSize > 0) {
+      qty = Math.sign(qty) * remainingSize
+      if (entryFeesQuote !== null) entryFeesQuote *= remainingSize / previousSize
+      continue
+    }
+
+    if (next === 0) {
+      qty = 0
+      avgPrice = 0
+      entryFeesQuote = 0
+      openedAt = null
+      continue
+    }
+
+    // 单笔反向成交超过旧仓位时，旧仓完全平掉，超出部分才构成新仓。
+    const openedSize = Math.abs(next)
+    qty = next
+    avgPrice = fill.price
+    entryFeesQuote = fill.fee === null ? null : fill.fee * (openedSize / size)
+    openedAt = fill.ts
+  }
+
+  return { qty, avgPrice, entryFeesQuote, openedAt }
+}
+
+function weightedFillPrice(fills: readonly FillView[], expectedSide?: 'buy' | 'sell'): {
+  readonly qty: number
+  readonly price: number
+} {
+  if (fills.length === 0) throw new Error('没有可归因的成交')
+  const firstSide = fills[0]?.side.toLowerCase()
+  if (firstSide !== 'buy' && firstSide !== 'sell') throw new Error('成交方向缺失或无效')
+  const side = expectedSide ?? firstSide
+  let qty = 0
+  let notional = 0
+  for (const fill of fills) {
+    if (fill.side.toLowerCase() !== side) throw new Error('同一决策的成交方向不一致，拒绝净额归因')
+    const size = Math.abs(fill.qty)
+    if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
+      throw new Error(`成交数量或价格无效：${fill.fillId}`)
+    }
+    qty += size
+    notional += size * fill.price
+  }
+  if (expectedSide !== undefined && side !== expectedSide) throw new Error('平仓成交方向与持仓方向冲突')
+  return { qty, price: notional / qty }
+}
+
+function knownFees(fills: readonly FillView[]): number | null {
+  if (fills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) return null
+  return fills.reduce((sum, fill) => sum + (fill.fee as number), 0)
+}
+
+interface OpenDecisionAccounting {
+  readonly direction: 1 | -1
+  readonly entryPrice: number
+  readonly attributedQty: number
+  readonly attributedFeesQuote: number | null
+  readonly positionQty: number
+  readonly positionAvgPrice: number
+  readonly realizedGrossQuote: number
+  readonly pathStart: number
+  readonly horizonEnd: number
+  readonly evidenceFills: readonly FillView[]
+}
+
+/** 将开仓与其 reduce-only 保护腿按时序合并，避免把保护单成交误当成第二次入场。 */
+function accountOpenDecisionFills(
+  previousFills: readonly FillView[],
+  decisionFills: readonly FillView[],
+  horizonMs: number,
+): OpenDecisionAccounting {
+  const entryFills = decisionFills.filter((fill) => fill.reduceOnly !== true)
+  if (entryFills.length === 0) throw new Error('开仓决策缺少非 reduce-only 入场成交')
+  const entry = weightedFillPrice(entryFills)
+  const firstSide = entryFills[0]?.side.toLowerCase()
+  if (firstSide !== 'buy' && firstSide !== 'sell') throw new Error('开仓成交方向缺失或无效')
+  const direction: 1 | -1 = firstSide === 'buy' ? 1 : -1
+  const before = reconstructPositionAccounting(previousFills)
+  if (before.qty !== 0 && Math.sign(before.qty) !== direction) {
+    throw new Error('开仓决策与成交前持仓方向相反，拒绝混合归因')
+  }
+
+  let positionQty = before.qty
+  let positionAvgPrice = before.avgPrice
+  let realizedGrossQuote = 0
+  let totalQty = Math.abs(before.qty)
+  let totalNotional = totalQty * before.avgPrice
+  let feesQuote = before.entryFeesQuote
+  let openedAt = before.openedAt
+  const ordered = [...decisionFills].sort((left, right) =>
+    left.ts - right.ts || Number(left.reduceOnly === true) - Number(right.reduceOnly === true) ||
+    left.fillId.localeCompare(right.fillId))
+
+  for (const fill of ordered) {
+    const size = Math.abs(fill.qty)
+    if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
+      throw new Error(`成交数量或价格无效：${fill.fillId}`)
+    }
+    const side = fill.side.toLowerCase()
+    if (side !== 'buy' && side !== 'sell') throw new Error(`成交方向无效：${fill.fillId}`)
+    if (fill.fee !== null && !Number.isFinite(fill.fee)) throw new Error(`成交手续费无效：${fill.fillId}`)
+    const signed = side === 'buy' ? size : -size
+
+    if (fill.reduceOnly === true) {
+      if (positionQty === 0 || Math.sign(signed) === Math.sign(positionQty) || Math.sign(positionQty) !== direction) {
+        throw new Error(`reduce-only 成交不能关闭当前归因仓位：${fill.fillId}`)
+      }
+      if (size > Math.abs(positionQty) + 1e-10) {
+        throw new Error(`保护成交量超过当前归因仓位：${size} > ${Math.abs(positionQty)}`)
+      }
+      realizedGrossQuote += (fill.price - positionAvgPrice) * Math.min(size, Math.abs(positionQty)) * direction
+      positionQty += signed
+      if (feesQuote !== null) feesQuote = fill.fee === null ? null : feesQuote + fill.fee
+      if (Math.abs(positionQty) <= 1e-10) {
+        positionQty = 0
+        positionAvgPrice = 0
+        openedAt = null
+      }
+      continue
+    }
+
+    if (Math.sign(signed) !== direction || (positionQty !== 0 && Math.sign(positionQty) !== direction)) {
+      throw new Error(`开仓成交方向不一致：${fill.fillId}`)
+    }
+    const nextQty = positionQty + signed
+    const oldSize = Math.abs(positionQty)
+    positionAvgPrice = nextQty === 0
+      ? 0
+      : (positionAvgPrice * oldSize + fill.price * size) / Math.abs(nextQty)
+    positionQty = nextQty
+    totalQty += size
+    totalNotional += size * fill.price
+    openedAt = openedAt === null ? fill.ts : Math.min(openedAt, fill.ts)
+    if (feesQuote !== null) feesQuote = fill.fee === null ? null : feesQuote + fill.fee
+  }
+
+  if (totalQty <= 0 || totalNotional <= 0) throw new Error('开仓决策无有效归因名义')
+  const firstEntryAt = Math.min(...entryFills.map((fill) => fill.ts))
+  return {
+    direction,
+    entryPrice: totalNotional / totalQty,
+    attributedQty: totalQty,
+    attributedFeesQuote: feesQuote,
+    positionQty,
+    positionAvgPrice,
+    realizedGrossQuote,
+    pathStart: before.openedAt ?? firstEntryAt,
+    horizonEnd: firstEntryAt + horizonMs,
+    evidenceFills: [...previousFills, ...decisionFills],
+  }
 }
 
 // ── 反思闸门 ─────────────────────────────────────────────────────────────────
@@ -256,7 +524,10 @@ export interface SettlementDeps {
   /** 结算视界：决策后多久结算。 */
   readonly horizonMs?: number
   readonly benchmarkSymbol: string
+  /** 旧配置保留供组合根兼容；成交价已含撮合/交易执行滑点，结算不重复扣估算值。 */
   readonly slippageBps: number
+  /** 不接资金费数据时返回/保持 null；不能用默认 0 伪造净收益。 */
+  readonly resolveFundingCost?: FundingCostResolver
   readonly reflector?: Reflector
   readonly gates?: ReflectionGateConfig
 }
@@ -299,45 +570,64 @@ export class SettlementScheduler {
 
     for (const decision of pending) {
       try {
+        // 旧版本曾把 outcome 与 decisions.outcome_id 分两次写；先修复该 crash gap，
+        // 避免数据源暂时不可用时已存在的结算仍永久留在 pending。
+        if (this.deps.journal.repairOutcomeAssociation(decision.decisionId)) {
+          skipped += 1
+          continue
+        }
+
         const fills = this.deps.journal.fillsForDecision(decision.decisionId)
-        const entry = fills.length > 0 ? (fills[0] as FillView) : undefined
-
-        if (fills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) {
+        // reflection_due_at 只应由终态成交设置；若成交明细缺失，拒绝构造“无仓位”的收益样本。
+        if (fills.length === 0) {
           deferredIds.push(decision.decisionId)
           continue
         }
-
-        const horizonEnd = decision.decidedAt + horizonMs
-        // `until` 是**开区间**：`open_time < horizonEnd` ⇒ 只取在 horizon 内收盘的 bar。
-        // 旧实现写 `horizonEnd + timeframeMs`，会多算一根"在结算时点之后才收盘"的 bar，
-        // 把未来价格算进 exitPrice / MFE / MAE（实测 exitPrice 取自未来 bar）。
-        const bars = this.deps.bars.closedBars(decision.symbol, this.deps.timeframe, {
-          since: decision.decidedAt,
-          until: horizonEnd,
-        })
-
-        // 数据可用性闸门：没有成交**也没有**行情 ⇒ 没有价格基准。
-        // 有成交但没有 bar ⇒ 算不出出场价。两种都不许"编"一个结算，
-        // 保持 pending 等下一轮重试（行情回补完成后自然能结算）。
-        if (bars.length === 0 && entry === undefined) {
-          deferredIds.push(decision.decisionId)
-          continue
-        }
-        if (bars.length === 0) {
-          deferredIds.push(decision.decisionId)
-          continue
-        }
-
         const isExit = decision.action === 'reduce' || decision.action === 'close'
+        let decisionFills = fills
+        if (!isExit) {
+          const entryFills = fills.filter((fill) => fill.reduceOnly !== true)
+          if (entryFills.length === 0) {
+            deferredIds.push(decision.decisionId)
+            continue
+          }
+          // 开仓的 horizon 从首笔实际成交起算；视界之后才成交的保护腿不能改写该 outcome。
+          const horizonEnd = Math.min(...entryFills.map((fill) => fill.ts)) + horizonMs
+          decisionFills = fills.filter((fill) => fill.ts <= horizonEnd)
+        }
+        if (decisionFills.some((fill) => fill.fee === null || !Number.isFinite(fill.fee))) {
+          deferredIds.push(decision.decisionId)
+          continue
+        }
+
         let direction: 1 | -1
         let entryPrice: number
+        let attributedQty: number | null
+        let attributedFeesQuote: number | null
+        let exitPrice: number | undefined
+        let grossPctOverride: number | undefined
+        let valuationBasis: SettlementValuationBasis | undefined
+        let openAccounting: OpenDecisionAccounting | undefined
+        let evidenceFills: readonly FillView[] = decisionFills
+        let pathStart: number
+        let pathEnd: number
+        let fundingFrom = decision.decidedAt
+        let fundingUntil: number
+
         if (isExit) {
+          if (decisionFills.length === 0) {
+            deferredIds.push(decision.decisionId)
+            continue
+          }
           // ★ 平/减仓必须对齐**真实入场**：用该标的在此次成交之前的全部成交重建持仓。
-          // 旧实现把平仓成交当入场 → 一笔 +20% 的回合被记成 ~0%（净额只剩成本）。
-          const before = entry?.ts ?? decision.decidedAt
-          const position = reconstructPosition(
-            this.deps.journal.fillsForSymbolBefore(decision.symbol, before),
-          )
+          // 平仓是部分成交时，入场费按实际退出量占当前仓位的比例分摊。
+          const venue = (decisionFills[0] as FillView).venue
+          if (decisionFills.some((fill) => fill.venue !== venue)) {
+            throw new Error('同一决策跨执行场所成交，拒绝混合账户归因')
+          }
+          const before = Math.min(...decisionFills.map((fill) => fill.ts))
+          const previousFills = this.deps.journal.fillsForSymbolBefore(decision.symbol, before, venue)
+          const position = reconstructPositionAccounting(previousFills)
           if (position.qty === 0) {
             // 找不到入场成交 ⇒ 缺数据，推迟而不是编造一个 0 收益的交易（plan §12 #20）
             deferredIds.push(decision.decisionId)
@@ -345,29 +635,119 @@ export class SettlementScheduler {
           }
           direction = position.qty > 0 ? 1 : -1
           entryPrice = position.avgPrice
+          const expectedExitSide = direction === 1 ? 'sell' : 'buy'
+          const exit = weightedFillPrice(decisionFills, expectedExitSide)
+          if (exit.qty > Math.abs(position.qty) + 1e-10) {
+            throw new Error(`平仓成交量超过成交前持仓：${exit.qty} > ${Math.abs(position.qty)}`)
+          }
+          exitPrice = exit.price
+          attributedQty = exit.qty
+          const exitFees = knownFees(decisionFills)
+          const allocatedEntryFees = position.entryFeesQuote === null
+            ? null
+            : position.entryFeesQuote * (exit.qty / Math.abs(position.qty))
+          attributedFeesQuote = exitFees === null || allocatedEntryFees === null
+            ? null
+            : exitFees + allocatedEntryFees
+          evidenceFills = [...previousFills, ...decisionFills]
+          pathStart = position.openedAt ?? before
+          pathEnd = Math.max(...decisionFills.map((fill) => fill.ts))
+          fundingFrom = pathStart
+          fundingUntil = pathEnd
         } else {
-          direction = entry?.side === 'sell' ? -1 : 1
-          entryPrice = entry?.price ?? (bars[0] as { close: number }).close
+          const entryFills = decisionFills.filter((fill) => fill.reduceOnly !== true)
+          const protectiveFills = decisionFills.filter((fill) => fill.reduceOnly === true)
+          const venue = (entryFills[0] as FillView).venue
+          if (decisionFills.some((fill) => fill.venue !== venue)) {
+            throw new Error('同一决策跨执行场所成交，拒绝混合账户归因')
+          }
+          if (protectiveFills.length === 0) {
+            const entry = weightedFillPrice(entryFills)
+            direction = (entryFills[0] as FillView).side.toLowerCase() === 'sell' ? -1 : 1
+            entryPrice = entry.price
+            attributedQty = entry.qty
+            attributedFeesQuote = knownFees(entryFills)
+            pathStart = Math.min(...entryFills.map((fill) => fill.ts))
+            pathEnd = pathStart + horizonMs
+            fundingFrom = pathStart
+            fundingUntil = pathEnd
+          } else {
+            const before = Math.min(...entryFills.map((fill) => fill.ts))
+            const previousFills = this.deps.journal.fillsForSymbolBefore(decision.symbol, before, venue)
+            const accounting = accountOpenDecisionFills(previousFills, decisionFills, horizonMs)
+            openAccounting = accounting
+            direction = accounting.direction
+            entryPrice = accounting.entryPrice
+            attributedQty = accounting.attributedQty
+            attributedFeesQuote = accounting.attributedFeesQuote
+            evidenceFills = accounting.evidenceFills
+            pathStart = accounting.pathStart
+            pathEnd = accounting.positionQty === 0
+              ? Math.max(...protectiveFills.map((fill) => fill.ts))
+              : accounting.horizonEnd
+            fundingFrom = pathStart
+            fundingUntil = pathEnd
+            valuationBasis = accounting.positionQty === 0 ? 'actual_exit_fills' : 'horizon_mark'
+          }
         }
-        const benchmarkBars = this.deps.bars.closedBars(
-          this.deps.benchmarkSymbol,
-          this.deps.timeframe,
-          { since: decision.decidedAt, until: horizonEnd },
-        )
 
-        const exitFill =
-          (isExit || fills.length > 1) && fills.length > 0
-            ? fills[fills.length - 1]
-            : undefined
+        const timeframeMs = BAR_MS_BY_TIMEFRAME[this.deps.timeframe]
+        if (timeframeMs === undefined) throw new Error(`未知结算时间框架：${this.deps.timeframe}`)
+        // 只用完全落在“实际持仓开始 → 出场/视界结束”内的已收盘 bar；出场后行情不能参与 MFE/MAE/止损或基准。
+        const loadPathBars = (symbol: string) => this.deps.bars.closedBars(symbol, this.deps.timeframe, {
+          since: pathStart,
+          until: pathEnd,
+        }).filter((bar) => bar.openTime >= pathStart &&
+          bar.closeTime === bar.openTime + timeframeMs && bar.closeTime <= pathEnd)
+        const bars = loadPathBars(decision.symbol)
+        // 没有完整持仓路径 bar 时保留 pending；不能拿出场后的 bar 补齐路径指标。
+        if (bars.length === 0) {
+          deferredIds.push(decision.decisionId)
+          continue
+        }
+        if (openAccounting !== undefined) {
+          const totalNotional = entryPrice * (attributedQty ?? 0)
+          if (totalNotional <= 0) throw new Error('保护成交归因名义无效')
+          if (openAccounting.positionQty === 0) {
+            const exit = weightedFillPrice(
+              decisionFills.filter((fill) => fill.reduceOnly === true),
+              direction === 1 ? 'sell' : 'buy',
+            )
+            exitPrice = exit.price
+            valuationBasis = 'actual_exit_fills'
+            grossPctOverride = (openAccounting.realizedGrossQuote / totalNotional) * 100
+          } else {
+            const markPrice = (bars[bars.length - 1] as { close: number }).close
+            const totalGrossQuote = openAccounting.realizedGrossQuote +
+              openAccounting.positionQty * (markPrice - openAccounting.positionAvgPrice)
+            exitPrice = markPrice
+            valuationBasis = 'horizon_mark'
+            grossPctOverride = (totalGrossQuote / totalNotional) * 100
+          }
+        }
+        const benchmarkBars = loadPathBars(this.deps.benchmarkSymbol)
+        const fundingCost = await this.deps.resolveFundingCost?.({
+          decision,
+          from: fundingFrom,
+          until: fundingUntil,
+          quantity: attributedQty,
+          direction,
+          fills: evidenceFills,
+        }) ?? null
         const computation = computeSettlement(
           {
             decision,
-            fills,
+            fills: evidenceFills,
             entryPrice,
             direction,
             bars,
             benchmarkBars,
-            ...(exitFill === undefined ? {} : { exitPrice: exitFill.price }),
+            ...(exitPrice === undefined ? {} : { exitPrice }),
+            attributedQty,
+            attributedFeesQuote,
+            ...(grossPctOverride === undefined ? {} : { grossPctOverride }),
+            ...(valuationBasis === undefined ? {} : { valuationBasis }),
+            fundingCost,
           },
           { slippageBps: this.deps.slippageBps },
         )
@@ -382,15 +762,22 @@ export class SettlementScheduler {
           ...computation,
         }
 
-        const inserted = this.deps.journal.recordOutcome(outcome)
+        // 未平仓 mark、paper simulation 或成本/基准不全的结果都不能生成 lesson。
+        const canReflect = this.deps.reflector !== undefined &&
+          computation.settlementKind === 'realized' &&
+          computation.realizedNetPct !== null &&
+          computation.benchmarkPct !== null
+        const inserted = this.deps.journal.recordOutcomeAndLink(
+          outcome,
+          canReflect ? 'reflection_configured' : 'settlement_only',
+        )
         if (!inserted) {
           skipped += 1
           continue
         }
-        this.deps.journal.markDecisionOutcome(decision.decisionId, outcome.outcomeId)
         settled += 1
 
-        if (this.deps.reflector === undefined) continue
+        if (!canReflect || this.deps.reflector === undefined) continue
         const candidate = await this.deps.reflector({
           decision: {
             decisionId: decision.decisionId,

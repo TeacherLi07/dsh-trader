@@ -15,9 +15,9 @@
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
  * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
  * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
- * 有界重试、退避和重启恢复。旧 context snapshot/token 只在迁移入口清理。
+ * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型。
  */
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 CREATE INDEX IF NOT EXISTS decisions_pending_settlement
   ON decisions (reflection_due_at) WHERE outcome_id IS NULL;
 
--- 结算结果（plan §7.9）：**交易级**净额，一条决策至多一次结算
+-- 结算结果（plan §7）：未知成本/基准保留 NULL，且不混淆真实成交、视界估值和 paper simulation
 CREATE TABLE IF NOT EXISTS outcomes (
   outcome_id TEXT PRIMARY KEY,
   decision_id TEXT NOT NULL UNIQUE REFERENCES decisions (decision_id),
@@ -195,14 +195,22 @@ CREATE TABLE IF NOT EXISTS outcomes (
   entry_price REAL NOT NULL,
   exit_price REAL NOT NULL,
   realized_gross_pct REAL NOT NULL,
-  realized_net_pct REAL NOT NULL,
-  benchmark_pct REAL NOT NULL,
-  alpha_pct REAL NOT NULL,
+  realized_net_pct REAL,
+  benchmark_pct REAL,
+  alpha_pct REAL,
   mfe_pct REAL NOT NULL,
   mae_pct REAL NOT NULL,
   stop_hit INTEGER NOT NULL DEFAULT 0 CHECK (stop_hit IN (0, 1)),
-  fees_quote REAL NOT NULL DEFAULT 0,
-  evidence_refs_json TEXT NOT NULL
+  fees_quote REAL,
+  -- 正数为支付、负数为收入；NULL 表示区间资金费未被核验，不能伪装成零
+  funding_fee_quote REAL,
+  funding_source TEXT,
+  settlement_kind TEXT NOT NULL CHECK (settlement_kind IN ('realized', 'horizon_mark', 'paper_simulation', 'legacy_unknown')),
+  valuation_basis TEXT NOT NULL CHECK (valuation_basis IN ('actual_exit_fills', 'horizon_mark', 'legacy_unknown')),
+  attributed_qty REAL CHECK (attributed_qty IS NULL OR attributed_qty > 0),
+  evidence_refs_json TEXT NOT NULL,
+  CHECK ((funding_fee_quote IS NULL AND funding_source IS NULL) OR
+         (funding_fee_quote IS NOT NULL AND funding_source IS NOT NULL AND length(trim(funding_source)) > 0))
 );
 
 -- 唯一闸门：只有通过硬闸的意图才会写入这里
@@ -440,6 +448,7 @@ export function migrate(db: SqliteLike): void {
   if (fromVersion < 4 || needsV4Repair(db)) migrateToV4(db)
   if (fromVersion < 5 || needsV5Repair(db)) migrateToV5(db)
   if (fromVersion < 7 || needsV7Repair(db)) migrateToV7(db)
+  if (fromVersion < 8 || needsV8Repair(db)) migrateToV8(db)
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
 
@@ -635,6 +644,90 @@ function migrateToV7(db: SqliteLike): void {
     ON triggers (state, next_attempt_at, created_at, trigger_id);`)
 }
 
+/** v8 让结算结果保留成本/基准未知状态，并为历史算法不明的 outcome 标记 legacy_unknown。 */
+function migrateToV8(db: SqliteLike): void {
+  if (db.prepare === undefined || !needsV8Repair(db)) return
+
+  const has = (column: string): boolean => hasColumn(db, 'outcomes', column)
+  const existingOr = (column: string, fallback: string): string => (has(column) ? column : fallback)
+  // v7 只保存了 benchmark 的最后一个 bar，且缺数时可能把 0 当结果；无法证明两端
+  // 时间窗与标的行情对齐。只有已包含 v8 成本/估值合同的半迁移表才可保留可核验基准。
+  const hasV8SettlementContract = has('funding_fee_quote') && has('funding_source') &&
+    has('settlement_kind') && has('valuation_basis') && has('evidence_refs_json')
+  const benchmark = has('benchmark_pct') && hasV8SettlementContract
+    ? `CASE WHEN evidence_refs_json LIKE '%benchmark:unavailable%' OR
+         (length(evidence_refs_json) - length(replace(evidence_refs_json, 'bar:benchmark:', ''))) <
+           2 * length('bar:benchmark:') THEN NULL ELSE benchmark_pct END`
+    : 'NULL'
+  // v7 没有资金费字段；即便旧计算给出了 net，也不能把未采集的资金费默认为 0。
+  const realizedNet = has('funding_fee_quote') && has('funding_source')
+    ? `CASE WHEN funding_fee_quote IS NULL OR funding_source IS NULL THEN NULL ELSE ${existingOr('realized_net_pct', 'NULL')} END`
+    : 'NULL'
+  const alpha = has('alpha_pct')
+    ? `CASE WHEN (${benchmark}) IS NULL OR (${realizedNet}) IS NULL THEN NULL ELSE alpha_pct END`
+    : 'NULL'
+
+  withMigrationTransaction(db, () => {
+    db.exec(`
+      CREATE TABLE outcomes_v8 (
+        outcome_id TEXT PRIMARY KEY,
+        decision_id TEXT NOT NULL UNIQUE REFERENCES decisions (decision_id),
+        symbol TEXT NOT NULL,
+        settled_at INTEGER NOT NULL,
+        horizon_ms INTEGER NOT NULL,
+        entry_price REAL NOT NULL,
+        exit_price REAL NOT NULL,
+        realized_gross_pct REAL NOT NULL,
+        realized_net_pct REAL,
+        benchmark_pct REAL,
+        alpha_pct REAL,
+        mfe_pct REAL NOT NULL,
+        mae_pct REAL NOT NULL,
+        stop_hit INTEGER NOT NULL DEFAULT 0 CHECK (stop_hit IN (0, 1)),
+        fees_quote REAL,
+        funding_fee_quote REAL,
+        funding_source TEXT,
+        settlement_kind TEXT NOT NULL CHECK (settlement_kind IN ('realized', 'horizon_mark', 'paper_simulation', 'legacy_unknown')),
+        valuation_basis TEXT NOT NULL CHECK (valuation_basis IN ('actual_exit_fills', 'horizon_mark', 'legacy_unknown')),
+        attributed_qty REAL CHECK (attributed_qty IS NULL OR attributed_qty > 0),
+        evidence_refs_json TEXT NOT NULL,
+        CHECK ((funding_fee_quote IS NULL AND funding_source IS NULL) OR
+               (funding_fee_quote IS NOT NULL AND funding_source IS NOT NULL AND length(trim(funding_source)) > 0))
+      );
+      INSERT INTO outcomes_v8
+        (outcome_id, decision_id, symbol, settled_at, horizon_ms, entry_price, exit_price,
+         realized_gross_pct, realized_net_pct, benchmark_pct, alpha_pct, mfe_pct, mae_pct,
+         stop_hit, fees_quote, funding_fee_quote, funding_source, settlement_kind,
+         valuation_basis, attributed_qty, evidence_refs_json)
+      SELECT outcome_id, decision_id, symbol, settled_at, horizon_ms, entry_price, exit_price,
+         ${existingOr('realized_gross_pct', '0')}, ${realizedNet},
+         ${benchmark}, ${alpha}, ${existingOr('mfe_pct', '0')}, ${existingOr('mae_pct', '0')},
+         ${existingOr('stop_hit', '0')}, ${existingOr('fees_quote', '0')},
+         ${existingOr('funding_fee_quote', 'NULL')}, ${existingOr('funding_source', 'NULL')},
+         ${existingOr('settlement_kind', "'legacy_unknown'")},
+         ${existingOr('valuation_basis', "'legacy_unknown'")},
+         ${existingOr('attributed_qty', 'NULL')}, ${existingOr('evidence_refs_json', "'[]'")}
+      FROM outcomes;
+      DROP TABLE outcomes;
+      ALTER TABLE outcomes_v8 RENAME TO outcomes;
+    `)
+  })
+}
+
+function needsV8Repair(db: SqliteLike): boolean {
+  const rows = tableInfo(db, 'outcomes')
+  const nullable = new Set([
+    'realized_net_pct', 'benchmark_pct', 'alpha_pct', 'fees_quote',
+    'funding_fee_quote', 'funding_source', 'attributed_qty',
+  ])
+  return (
+    ['realized_net_pct', 'benchmark_pct', 'alpha_pct', 'fees_quote', 'funding_fee_quote', 'funding_source',
+      'settlement_kind', 'valuation_basis', 'attributed_qty']
+      .some((column) => !rows.some((row) => row.name === column)) ||
+    rows.some((row) => nullable.has(String(row.name)) && row.notnull === 1)
+  )
+}
+
 function needsV7Repair(db: SqliteLike): boolean {
   const columns = ['attempts', 'next_attempt_at', 'claimed_at', 'last_error']
   if (columns.some((column) => !hasColumn(db, 'triggers', column))) return true
@@ -644,12 +737,13 @@ function needsV7Repair(db: SqliteLike): boolean {
   return typeof row?.sql !== 'string' || !row.sql.includes("'failed'")
 }
 
-function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknown; dflt_value?: unknown }[] {
+function tableInfo(db: SqliteLike, table: string): { name?: unknown; pk?: unknown; dflt_value?: unknown; notnull?: unknown }[] {
   if (db.prepare === undefined) return []
   return db.prepare(`PRAGMA table_info(${table})`).all() as {
     name?: unknown
     pk?: unknown
     dflt_value?: unknown
+    notnull?: unknown
   }[]
 }
 
