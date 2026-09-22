@@ -176,9 +176,9 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
 | 触发 | `triggers`, `supervisor_window_cursors`, `supervisor_windows` | 去重、限流、带退避的有界重试、事件过期、重启恢复 |
 | 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger` | 审计 append-only；限额与成本版本化 |
-| 预测市场 | `pm_markets`, `pm_series`, `pm_quotes`, `pm_watches` | PIT、只读、别名有期限且有上限 |
+| 预测市场 | `pm_markets`, `pm_market_versions`, `pm_series`, `pm_quotes`, `pm_watches` | 当前投影可更新；历史市场元数据 append-only 并按本机 `available_at` 回放；概率序列与盘口分别同时约束 source event time 和本机可用时间；只读、别名有期限且有上限 |
 
-当前 schema 为 v8。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v10。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
 必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
@@ -189,6 +189,12 @@ v8 扩展 `outcomes`：`realized_net_pct`、`benchmark_pct`、`alpha_pct` 与 `f
 资金费金额与来源必须同时为空或同时可核验；`settlement_kind` 区分真实成交、视界估值、paper 与历史未知，
 `valuation_basis` 区分实际出场成交与视界 mark，`attributed_qty` 记录结算归因数量。v7 历史净额不再视作
 含完整资金费的净额，旧 benchmark 仅有单点或缺少标记时也迁移为 NULL，避免把未知伪装成零收益。
+
+v9 增加 `pm_market_versions`：`pm_markets` 仍是当前 API 投影；历史查询只选 `available_at <= asOf` 的最新元数据版本，且再应用源 `created_at` 存在门控；同一毫秒内的修订以单调 `version_seq` 定序。PM 历史序列必须同时满足 `ts <= asOf` 与 `observed_at <= asOf`。旧库无法还原元数据变更史，迁移只把原 `pm_markets` 最后状态从 `max(observed_at, first_seen_at)` 起登记为一个 `legacy-v8` 版本；更早时点不推断、不回填。重复 dedup key 在 watch 冷却与额度记账前短路，不消耗 watch 配额；watch 治理拒绝仍按原有 cooldown 审计键落库。
+
+v10 为 `pm_quotes` 增加 nullable `available_at`，保留 `(token_id, observed_at)` 唯一键；盘口 PIT 必须同时满足 source `observed_at <= asOf` 与本机 `available_at <= asOf`，`ageMs` 仍按 source 时间计算。旧 quote 的接收时刻不可还原，迁移保持 `available_at = NULL` 并隐藏；只有同一 source key 再次真实读到时，才用注入时钟首次补填 availability，不改写旧 quote 内容或伪造历史时间。PM snapshot/context 同时呈现 `quoteObservedAt` 与 `quoteAvailableAt`（context 的 `observedAt`/`availableAt` 也保留明确映射），prediction section 的 `asOf` 采用本机 availability。
+
+已处理 bar 若被源修订，当前实现会在同一事务中撤销受影响的处理游标、失效特征投影并追加 PIT 空值标记；`MarketFeed` 持久隔离该后缀，避免重启后把历史 bar 送进含规则/订单副作用的统一回调。旧 DecisionContext 不变，新 context 对受影响特征 fail-closed。**当前没有 feature-only 重建与显式推进处理游标的运维命令**；解除隔离前必须人工完成并核验该流程，不能靠重启恢复。
 
 R3 补足运行语义：run 必须绑定候选/提示词/模型版本与触发身份，不能只凭 context hash 合并不同
 实验；终结工件不可重写，重试按已持久化阶段恢复。状态为 running/failed 或 eligibility 未计算的
@@ -320,7 +326,7 @@ refs、regime、TTL 和适用范围，且不能修改 prompt、配置、DSL、�
 cache token、耗时和成本；反思成本回指来源决策。调用前按剩余额度与有界输出预算准入，完成后
 按真实 usage 结算，不能只在超支后记账。缺价目或 usage 时 `cost_known=false`，不能按 0 计，
 停止新增敞口判断并记录原因。日预算超限也停止 W1/W2/W3 的新增敞口判断；已有持仓的 P0
-减险与机械保护不受影响。报价、判断等待、推理和下单延迟分别记录，用于回放执行时点。
+减险与机械保护不受影响。provider I/O 前追加持久 reservation；流中断、异常或缺少明确 finish 都按费用未决处理，不能自动重发。即使 run 已终结为 REVIEW，未决 reservation 仍会跨重启阻断后续模型调用。报价、判断等待、推理和下单延迟分别记录，用于回放执行时点。
 
 生产为 Docker 单进程；容器负责 restart，进程内不启动第二个 watchdog。UI 只读。
 
@@ -445,6 +451,8 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 **静态对照状态**：single/critique 付费对照已由负责人明确取消，相关 outcome/Critic 指标不产生结论；若未来重新启用该实验，必须先冻结指标阈值、PIT manifest、预算与新的预注册协议。当前选择 critique 不得表述为相对 single 已验证更优。
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
+
+**未决运行的恢复入口缺口**：bar 修订隔离与模型调用未决 reservation 都会 fail-closed，但仓库当前没有对应的 feature-only 修复/游标确认命令，也没有用 provider usage/billing 证据核销未决 reservation 的审计流程。它们不能由运维直接删标记或盲目重试；启用长期无人值守运行前，需要补齐经核验、幂等且可审计的恢复入口。
 
 其中真实模型调用也是 R5 的必要输入；路由、额度或价目不可用时，允许先完成离线检查，但必须
 报告 R5 对应部分阻塞，不能用假模型替代。进入 live 前 arm、交易标的与风险限额仍需显式配置。

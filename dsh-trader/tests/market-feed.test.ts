@@ -2,7 +2,12 @@ import Database from 'better-sqlite3'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ReplayClock } from '../src/clock.js'
 import { migrate } from '../src/db/schema.js'
+import { canonicalDecisionContext, freezeDecisionContext } from '../src/agents/decision-context.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
+import { DEFAULT_DECISION_CONTEXT_CONFIG } from '../src/agents/context-config.js'
+import { marketSlice } from '../src/agents/context-market.js'
 import { BarArchive } from '../src/market/archive.js'
+import { FeatureArchive } from '../src/market/feature-archive.js'
 import {
   DEFAULT_BACKOFF,
   MarketFeed,
@@ -10,9 +15,11 @@ import {
   type FeedErrorInfo,
   type MarketFeedOptions,
 } from '../src/market/feed.js'
+import { FEATURE_WARMUP_BARS, FeaturePipeline } from '../src/market/features.js'
+import { MarketObservationStore } from '../src/market/observations.js'
 import { MarketSourceError, type MarketDataSource } from '../src/market/types.js'
 import { TokenBucket } from '../src/market/ratelimit.js'
-import { FakeSource, series } from './helpers/market.js'
+import { FakeSource, randomSeries, series } from './helpers/market.js'
 
 const TF = '1h'
 const HOUR = 3_600_000
@@ -121,6 +128,108 @@ describe('MarketFeed', () => {
     // 第 1 根被重试，第 2 根没有被首轮失败吞掉
     expect(seen).toEqual([NOW - 3 * HOUR, NOW - 3 * HOUR, NOW - 2 * HOUR])
     expect(archive.unprocessedClosedBars(SYMBOL, TF)).toEqual([])
+  })
+
+  it('已处理历史发生修订时撤销游标并封锁陈旧特征，旧 PIT context 保持原样', async () => {
+    const history = randomSeries(NOW - 70 * HOUR, 70)
+    const firstAvailableAt = NOW + 100
+    const correctionAvailableAt = firstAvailableAt + 5_000
+    const clock = new ReplayClock(firstAvailableAt)
+    const featureArchive = new FeatureArchive(db)
+    const observations = new MarketObservationStore(db)
+    const pipeline = new FeaturePipeline(featureArchive)
+    const ruleSnapshots: { readonly openTime: number; readonly close: number }[] = []
+    const correctedRaw = {
+      ...history[10]!,
+      open: history[10]!.open + 0.5,
+      high: history[10]!.high + 1,
+      close: history[10]!.close + 0.75,
+    }
+    const source = new FakeSource({ pages: [history, [correctedRaw]] })
+    const feed = makeFeed(source, clock, {
+      onClosedCandle: (candle, availableAt) => {
+        const snapshot = pipeline.onClosedCandle(candle, undefined, availableAt)
+        ruleSnapshots.push({ openTime: snapshot.openTime, close: snapshot.values.close })
+      },
+    })
+
+    const first = await feed.pollOnce()
+    expect(first).toEqual({ fetched: history.length, written: history.length, emitted: history.length, failures: 0 })
+    expect(ruleSnapshots.length).toBeGreaterThan(0)
+    expect(archive.unprocessedClosedBars(SYMBOL, TF)).toEqual([])
+
+    const oldMarket = marketSlice(observations, SYMBOL, TF, firstAvailableAt, DEFAULT_DECISION_CONTEXT_CONFIG)
+    expect(oldMarket.features['close']?.status).toBe('ok')
+    expect(oldMarket.features['close']?.value).not.toBeNull()
+    const section = (value: unknown) => ({ asOf: firstAvailableAt, source: 'market-test', missing: [], value })
+    const context = freezeDecisionContext({
+      symbol: SYMBOL,
+      primaryTimeframe: '1h',
+      asOf: firstAvailableAt,
+      sections: {
+        mandate: section({ mode: 'paper' }),
+        market: section({ timeframes: { [TF]: oldMarket } }),
+        derivatives: section({}),
+        benchmark: section({}),
+        portfolio: section({}),
+        activePlan: section({}),
+        history: section({}),
+        lessons: section({}),
+        predictions: section({}),
+      },
+    })
+    const contexts = new DecisionContextStore(db)
+    const storedContext = contexts.record(context, { createdAt: firstAvailableAt }).record
+    const frozenCanonical = canonicalDecisionContext(context)
+    const beforeRules = ruleSnapshots.length
+
+    clock.advanceTo(correctionAvailableAt)
+    const revised = await feed.pollOnce()
+
+    expect(revised).toEqual({ fetched: 1, written: 1, emitted: 0, failures: 1 })
+    expect(ruleSnapshots).toHaveLength(beforeRules) // 修订 bar 失败，后续规则/执行回调没有被调用
+    const pending = archive.unprocessedClosedBars(SYMBOL, TF)
+    expect(pending.length).toBeGreaterThan(0)
+    expect(pending[0]?.openTime).toBe(history[10]!.openTime)
+    expect(featureArchive.latest(SYMBOL, TF)?.openTime).toBe(history[9]!.openTime)
+
+    const stillHistorical = marketSlice(observations, SYMBOL, TF, firstAvailableAt, DEFAULT_DECISION_CONTEXT_CONFIG)
+    expect(stillHistorical).toEqual(oldMarket)
+    expect(contexts.get(storedContext.contextId)?.canonicalJson).toBe(frozenCanonical)
+
+    const currentMarket = marketSlice(observations, SYMBOL, TF, correctionAvailableAt, DEFAULT_DECISION_CONTEXT_CONFIG)
+    expect(currentMarket.features['close']?.value).toBeNull()
+    expect(currentMarket.features['close']?.status).not.toBe('ok')
+    expect(currentMarket.missing).toContain('1h.close:invalid')
+
+    // 模拟插件重启：从剩余 processed 历史 warm-up 后，Feed 仍必须在统一 callback 前拦截。
+    const restartedArchive = new BarArchive(db)
+    const restartedFeatureArchive = new FeatureArchive(db)
+    const restartedPipeline = new FeaturePipeline(restartedFeatureArchive)
+    restartedPipeline.warmUp(
+      restartedArchive.recentProcessedClosedBars(SYMBOL, TF, FEATURE_WARMUP_BARS),
+      restartedFeatureArchive.recent(SYMBOL, TF, FEATURE_WARMUP_BARS),
+    )
+    const replayedRules: number[] = []
+    const replayedPlanOrders: number[] = []
+    const restartedFeed = new MarketFeed({
+      source: new FakeSource({ pages: [[correctedRaw]] }),
+      archive: restartedArchive,
+      clock,
+      symbols: [SYMBOL],
+      timeframes: [TF],
+      pollMs: 60_000,
+      onClosedCandle: (candle, availableAt) => {
+        const snapshot = restartedPipeline.onClosedCandle(candle, undefined, availableAt)
+        replayedRules.push(snapshot.openTime)
+        replayedPlanOrders.push(snapshot.openTime) // 对应插件同一回调尾部的 liveEngine/计划执行段
+      },
+    })
+    const afterRestart = await restartedFeed.pollOnce()
+    expect(afterRestart).toEqual({ fetched: 1, written: 1, emitted: 0, failures: 1 })
+    expect(replayedRules).toEqual([])
+    expect(replayedPlanOrders).toEqual([])
+    expect(restartedArchive.unprocessedClosedBars(SYMBOL, TF)[0]?.openTime).toBe(history[10]!.openTime)
   })
 
   it('never lets a failing source break the loop; it counts and backs off', async () => {

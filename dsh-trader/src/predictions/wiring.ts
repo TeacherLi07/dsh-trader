@@ -53,6 +53,20 @@ export class PmSignalRouter {
     const routed: PmRoutedSignal[] = []
     for (const signal of signals) {
       const wake: 'W3' | 'none' = signal.purpose === 'novelty' ? 'W3' : 'none'
+      // 必须先查全局唯一键：重复项不是一次新的 watch fire，不能推进 cooldown/trigger_count。
+      // submit() 仍会复查去重，作为队列写入侧的最终唯一性保障。
+      if (this.options.queue.has(signal.dedupKey)) {
+        routed.push({
+          ruleId: signal.ruleId,
+          alias: signal.alias,
+          severity: signal.severity,
+          wake: 'none',
+          disposition: { kind: 'duplicate' },
+          persisted: false,
+          watchAllowed: true,
+        })
+        continue
+      }
       // watch 治理只对**已登记关注**的信号生效。`pm_new_market` 的信号 alias 是市场 slug，
       // 没有对应的 watch —— 若也去 `recordWatchFire(slug)`，它会永远返回 false，
       // 结果是"白名单新市场"永远被静默压掉（实测）。这类信号由 governor 的 novelty 限流把关。
@@ -65,7 +79,9 @@ export class PmSignalRouter {
         const until = lastFiredAt + (watch?.cooldownMs ?? 0)
         this.options.queue.enqueue({
           triggerId: `pm-suppressed:${signal.dedupKey}`,
-          dedupKey: `pm-suppressed:${signal.dedupKey}`,
+          // 必须与 route() 前置 queue.has(signal.dedupKey) 使用同一唯一键，
+          // 否则重复的治理拒绝会再次进入 watch 治理；审计身份由 triggerId/payload 保留。
+          dedupKey: signal.dedupKey,
           symbol: `pm:${signal.alias}`,
           ruleId: signal.ruleId,
           purpose: signal.purpose === 'novelty' ? 'novelty' : 'info',

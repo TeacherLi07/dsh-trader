@@ -21,6 +21,7 @@ import {
   pmAllowedPaths,
   pmFeatureValues,
   type PmAliasSnapshot,
+  type PmQuoteRow,
   type WatchSpec,
 } from '../src/predictions/store.js'
 
@@ -83,6 +84,14 @@ function watch(over: Partial<WatchSpec> = {}): WatchSpec {
   }
 }
 
+/** 单测默认在 NOW 收到 fixture；延迟/历史可见性用例显式覆盖 availableAt。 */
+function recordQuote(
+  quote: Omit<PmQuoteRow, 'availableAt'> & { readonly availableAt?: number },
+  target: PmStore = store,
+): boolean {
+  return target.recordQuote({ ...quote, availableAt: quote.availableAt ?? NOW })
+}
+
 describe('PmStore：存在门控与结算门控（plan §10 专项 ①）', () => {
   it('市场未创建即不可见', () => {
     store.upsertMarket(market(), NOW)
@@ -104,9 +113,9 @@ describe('PmStore：存在门控与结算门控（plan §10 专项 ①）', () =
     )
     expect(store.marketByConditionId('0xcond1')?.resolvedAt).toBe(NOW)
 
-    // NOW 之前：市场**存在**（createdAt 早于它）但结算不可见
+    // 该市场在 NOW 才首次被本机观察；仅凭更早的源 createdAt 不能倒灌进历史。
     const before = store.marketViewAt('0xcond1', NOW - HOUR)
-    expect(before).toEqual({ visible: true, resolved: false, winningOutcome: undefined })
+    expect(before).toEqual({ visible: false, reason: 'not_created_yet' })
     // NOW 及以后：可见
     expect(store.marketViewAt('0xcond1', NOW)).toEqual({
       visible: true,
@@ -123,6 +132,49 @@ describe('PmStore：存在门控与结算门控（plan §10 专项 ①）', () =
     const row = store.marketByConditionId('0xcond1')
     expect(row?.winningOutcome).toBe('Yes')
     expect(row?.resolvedAt).toBe(NOW)
+  })
+
+  it('市场历史快照按本机可见时间选版本，当前投影仍保留最新 metadata', () => {
+    store.upsertMarket(market({ question: 'first version', liquidity: 10_000 }), NOW)
+    expect(store.marketsVisibleAt(NOW - 1)).toHaveLength(0)
+    expect(store.marketsVisibleAt(NOW)).toHaveLength(1)
+
+    store.upsertMarket(market({ question: 'first version', liquidity: 10_000 }), NOW + 30 * 60_000)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM pm_market_versions').get() as { n: number }).n).toBe(1)
+    expect(store.marketsVisibleAt(NOW + 30 * 60_000)[0]?.observedAt).toBe(NOW + 30 * 60_000)
+
+    store.upsertMarket(market({ question: 'later revision', liquidity: 20_000 }), NOW + HOUR)
+
+    const betweenVersions = store.marketsVisibleAt(NOW + HOUR - 1)
+    expect(betweenVersions).toHaveLength(1)
+    expect(betweenVersions[0]).toMatchObject({ question: 'first version', liquidity: 10_000 })
+    expect(store.marketViewAt('0xcond1', NOW + HOUR - 1)).toMatchObject({ visible: true, resolved: false })
+
+    expect(store.marketsVisibleAt(NOW + HOUR)[0]).toMatchObject({
+      question: 'later revision',
+      liquidity: 20_000,
+    })
+    expect(store.marketByConditionId('0xcond1')).toMatchObject({
+      question: 'later revision',
+      liquidity: 20_000,
+    })
+
+    // 毫秒时间戳相同仍由 version_seq 保留先后，A→B→A 不能被唯一键吞掉最后一次修订。
+    store.upsertMarket(market({ conditionId: '0xsame-ms', question: 'A' }), NOW)
+    store.upsertMarket(market({ conditionId: '0xsame-ms', question: 'B' }), NOW)
+    store.upsertMarket(market({ conditionId: '0xsame-ms', question: 'A' }), NOW)
+    expect(store.marketsVisibleAt(NOW).find((row) => row.conditionId === '0xsame-ms')?.question).toBe('A')
+    expect((db.prepare('SELECT COUNT(*) AS n FROM pm_market_versions WHERE condition_id = ?')
+      .get('0xsame-ms') as { n: number }).n).toBe(3)
+  })
+
+  it('当前市场投影与 append-only 版本在同一 SQLite 事务提交', () => {
+    db.exec(`CREATE TRIGGER reject_market_version_fixture
+      BEFORE INSERT ON pm_market_versions BEGIN
+        SELECT RAISE(ABORT, 'fixture version failure');
+      END`)
+    expect(() => store.upsertMarket(market({ conditionId: '0xatomic' }), NOW)).toThrow(/fixture version failure/)
+    expect(store.marketByConditionId('0xatomic')).toBeUndefined()
   })
 })
 
@@ -150,7 +202,7 @@ describe('PmStore：negRisk 只校验不归一化（plan §12 #12）', () => {
         NOW,
       )
       if (quotedIndexes.includes(index)) {
-        store.recordQuote({ tokenId, observedAt: NOW, mid, spread: 0.01, liquidity: 50_000 })
+        recordQuote({ tokenId, observedAt: NOW, mid, spread: 0.01, liquidity: 50_000 })
       }
     }
   }
@@ -289,6 +341,26 @@ describe('PmStore：序列门控与毫秒整数（plan §10 专项 ②）', () =
     expect(store.snapshotAt(NOW)[0]?.change24h).toBeNull()
   })
 
+  it('PIT 同时过滤旧事件的未来获知时间，并保留当时已获知的非空样本', () => {
+    store.recordSeries('pit-token', [{ ts: NOW - 3 * HOUR, price: 0.2 }], {
+      source: 'fixture',
+      observedAt: NOW - HOUR,
+    })
+    store.recordSeries('pit-token', [{ ts: NOW - 2 * HOUR, price: 0.4 }], {
+      source: 'fixture',
+      observedAt: NOW,
+    })
+    store.recordSeries('pit-token', [{ ts: NOW + HOUR, price: 0.9 }], {
+      source: 'fixture',
+      observedAt: NOW,
+    })
+
+    const asOf = NOW - 30 * 60_000
+    const visible = store.seriesAsOf('pit-token', asOf)
+    expect(visible.length).toBeGreaterThan(0)
+    expect(visible).toEqual([{ ts: NOW - 3 * HOUR, price: 0.2 }])
+  })
+
   it('重复写入同一 (token, ts) 幂等', () => {
     const batch = [{ ts: NOW, price: 0.4 }]
     expect(store.recordSeries('111', batch, { source: 'x', observedAt: NOW })).toBe(1)
@@ -320,7 +392,7 @@ describe('PmStore：序列门控与毫秒整数（plan §10 专项 ②）', () =
 describe('PmStore：别名与 DSL（plan §10 专项 ⑧）', () => {
   it('未注册 alias 的 when 一律 UNCOVERED，零静默 false', () => {
     store.registerWatch(watch(), NOW)
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.35, spread: 0.02, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.35, spread: 0.02, liquidity: 50_000 })
     const values = pmFeatureValues(store.snapshotAt(NOW))
 
     const registered = evaluateWhen('pm.fed_sep_cut.prob < 0.30', createDslContext(values))
@@ -350,30 +422,40 @@ describe('PmStore：别名与 DSL（plan §10 专项 ⑧）', () => {
   it('工具返回与告警 payload 用同一个快照函数 ⇒ 估计量不可能漂移（专项 ③）', () => {
     store.registerWatch(watch(), NOW)
     // 只有 last_trade_price（没有 mid）⇒ 估计量应退化并如实标注
-    store.recordQuote({ tokenId: '111', observedAt: NOW, lastTradePrice: 0.33, spread: 0.02, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW, lastTradePrice: 0.33, spread: 0.02, liquidity: 50_000 })
     const toolSide = store.snapshotAt(NOW)
     const alertSide = store.snapshotAt(NOW)
     expect(toolSide).toEqual(alertSide)
     expect(toolSide[0]?.probability).toEqual({ ok: true, value: 0.33, estimator: 'last_trade_price' })
 
     // 有 mid 时用 mid，两处一起变
-    store.recordQuote({ tokenId: '111', observedAt: NOW + 1, mid: 0.36, lastTradePrice: 0.33, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW + 1, mid: 0.36, lastTradePrice: 0.33, liquidity: 50_000 })
     expect(store.snapshotAt(NOW + 1)[0]?.probability).toEqual({ ok: true, value: 0.36, estimator: 'mid' })
   })
 
   it('流动性门槛：薄市场/宽价差即便有 mid 也不通过', () => {
     store.registerWatch(watch(), NOW)
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.4, spread: 0.05, liquidity: 200 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.4, spread: 0.05, liquidity: 200 })
     expect(store.snapshotAt(NOW)[0]?.liquidity.pass).toBe(false)
-    store.recordQuote({ tokenId: '111', observedAt: NOW + 1, mid: 0.4, spread: 0.02, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW + 1, mid: 0.4, spread: 0.02, liquidity: 50_000 })
     expect(store.snapshotAt(NOW + 1)[0]?.liquidity.pass).toBe(true)
   })
 
   it('盘口也是 PIT 的：看不到未来的盘口快照', () => {
     store.registerWatch(watch(), NOW)
-    store.recordQuote({ tokenId: '111', observedAt: NOW + HOUR, mid: 0.9, spread: 0.01, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW + HOUR, mid: 0.9, spread: 0.01, liquidity: 50_000 })
     expect(store.latestQuoteAsOf('111', NOW)).toBeUndefined()
     expect(store.snapshotAt(NOW)[0]?.probability.ok).toBe(false)
+  })
+
+  it('盘口 source/availability/asOf 都必须是非负安全毫秒整数', () => {
+    expect(() => store.recordQuote({
+      tokenId: 'fractional-source', observedAt: NOW + 0.5, availableAt: NOW, mid: 0.4,
+    })).toThrow(/source observedAt/)
+    expect(() => store.recordQuote({
+      tokenId: 'fractional-availability', observedAt: NOW, availableAt: NOW + 0.5, mid: 0.4,
+    })).toThrow(/availableAt/)
+    expect(() => store.latestQuoteAsOf('111', NOW + 0.5)).toThrow(/asOf/)
   })
 })
 
@@ -483,6 +565,103 @@ describe('PmPoller：注入时钟、降级不上抛（plan §10 专项 ⑥）', 
     expect(snapshot?.probability).toEqual({ ok: true, value: 0.4, estimator: 'mid' })
     expect(snapshot?.liquidity).toEqual({ pass: true })
     expect(snapshot?.liquidityQuote).toBe(50_000)
+  })
+
+  it('网络等待后的 metadata 与历史序列以实际响应可用时刻记账', async () => {
+    store.registerWatch(watch(), NOW)
+    const clock = new ReplayClock(NOW)
+    const delayed = clients({
+      gamma: {
+        markets: async () => {
+          clock.advanceTo(NOW + 100)
+          return { items: [market()] }
+        },
+      },
+      dataApi: {
+        pricesHistory: async () => {
+          clock.advanceTo(NOW + 200)
+          return [{ ts: NOW, price: 0.4 }]
+        },
+      },
+    })
+    const poller = new PmPoller({ clients: delayed, store, clock })
+    const result = await poller.runOnce(NOW)
+
+    expect(result.asOf).toBe(NOW + 200)
+    expect(store.marketByConditionId('0xcond1')?.observedAt).toBe(NOW + 100)
+    expect(store.marketsVisibleAt(NOW + 50)).toHaveLength(0)
+    expect(store.seriesAsOf('111', NOW + 150)).toEqual([])
+    expect(store.seriesAsOf('111', NOW + 200)).toEqual([{ ts: NOW, price: 0.4 }])
+  })
+
+  it('盘口 source time 与本机收到时刻分离：延迟 100ms 前隐藏，收到后 ageMs 仍按 source time', async () => {
+    store.registerWatch(watch(), NOW)
+    type Book = NonNullable<Awaited<ReturnType<PmPollerClients['clob']['book']>>>
+    let releaseBook!: (value: Book | null) => void
+    let signalBookStarted!: () => void
+    const bookStarted = new Promise<void>((resolve) => { signalBookStarted = resolve })
+    const deferredBook = new Promise<Book | null>((resolve) => { releaseBook = resolve })
+    const clock = new ReplayClock(NOW)
+    const delayed = clients({
+      clob: {
+        book: () => {
+          signalBookStarted()
+          return deferredBook
+        },
+      },
+      dataApi: { pricesHistory: () => Promise.resolve([]) },
+    })
+    const poller = new PmPoller({ clients: delayed, store, clock })
+    const running = poller.runOnce(NOW)
+    await bookStarted
+
+    clock.advanceTo(NOW + 50)
+    expect(store.latestQuoteAsOf('111', NOW + 50)).toBeUndefined()
+    clock.advanceTo(NOW + 100)
+    releaseBook({
+      bids: [{ price: 0.395, size: 100 }],
+      asks: [{ price: 0.405, size: 100 }],
+      tickSize: 0.01,
+      minOrderSize: 5,
+      negRisk: false,
+      observedAt: NOW,
+      hash: 'delayed-book',
+    })
+    const result = await running
+
+    expect(result.asOf).toBe(NOW + 100)
+    expect(store.latestQuoteAsOf('111', NOW + 50)).toBeUndefined()
+    expect(store.latestQuoteAsOf('111', NOW + 100)).toMatchObject({
+      observedAt: NOW,
+      availableAt: NOW + 100,
+    })
+    expect(result.snapshots).toHaveLength(1)
+    expect(result.snapshots[0]).toMatchObject({
+      quoteObservedAt: NOW,
+      quoteAvailableAt: NOW + 100,
+      ageMs: 100,
+    })
+  })
+
+  it('盘口缺失/零 source timestamp 不回退为请求开始时间', async () => {
+    store.registerWatch(watch(), NOW)
+    const poller = new PmPoller({
+      clients: clients({ clob: { book: async () => ({
+        bids: [{ price: 0.395, size: 100 }],
+        asks: [{ price: 0.405, size: 100 }],
+        tickSize: 0.01,
+        minOrderSize: 5,
+        negRisk: false,
+        observedAt: 0,
+        hash: 'missing-source-time',
+      }) } }),
+      store,
+      clock: new ReplayClock(NOW),
+    })
+    const result = await poller.runOnce(NOW)
+    expect(result.quotesWritten).toBe(0)
+    expect(result.errors).toContain('book 111: invalid source timestamp')
+    expect(store.latestQuoteAsOf('111', NOW)).toBeUndefined()
   })
 
   it('取数失败 ⇒ 只发 info/warning 告警，绝不抛异常；主循环照常', async () => {
@@ -633,7 +812,7 @@ describe('PmPoller：注入时钟、降级不上抛（plan §10 专项 ⑥）', 
 describe('PmStore readonly snapshot contract', () => {
   it('exposes one canonical PIT alias snapshot for both queued signals and DecisionContext', () => {
     store.registerWatch(watch(), NOW)
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
     const snapshots = store.snapshotAt(NOW)
     expect(snapshots).toHaveLength(1)
     expect(snapshots[0]?.probability).toEqual({ ok: true, value: 0.42, estimator: 'mid' })
@@ -653,7 +832,7 @@ describe('pm 规则族（plan §4.4 表 / T1.10，专项 ④）', () => {
     readonly winningOutcome?: string | null
   } = {}): readonly PmAliasSnapshot[] {
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
-    store.recordQuote({
+    recordQuote({
       tokenId: '111',
       observedAt: NOW,
       ...(over.mid === undefined ? {} : { mid: over.mid }),
@@ -731,9 +910,9 @@ describe('pm 规则族（plan §4.4 表 / T1.10，专项 ④）', () => {
   it('成交额飙升相对自身中位数判定', () => {
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
     for (let index = 1; index <= 3; index += 1) {
-      store.recordQuote({ tokenId: '111', observedAt: NOW - index * HOUR, mid: 0.5, spread: 0.01, liquidity: 50_000, volume24h: 1_000 })
+      recordQuote({ tokenId: '111', observedAt: NOW - index * HOUR, mid: 0.5, spread: 0.01, liquidity: 50_000, volume24h: 1_000 })
     }
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.5, spread: 0.01, liquidity: 50_000, volume24h: 20_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.5, spread: 0.01, liquidity: 50_000, volume24h: 20_000 })
     const signals = evaluatePmRules({ now: NOW, snapshots: store.snapshotAt(NOW) }, CFG)
     const spike = signals.find((signal) => signal.ruleId === 'pm_volume_spike')
     expect(spike?.purpose).toBe('info')
@@ -769,7 +948,7 @@ describe('pm 规则族（plan §4.4 表 / T1.10，专项 ④）', () => {
     expect(() => assertPmRuleConfig(long)).not.toThrow()
     // 1h 没动、24h 动了 ⇒ 只有 24h 窗口会发信号
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'] }), NOW)
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.42, spread: 0.01, liquidity: 50_000 })
     store.recordSeries(
       '111',
       [
@@ -877,7 +1056,11 @@ describe('PmSignalRouter：pm 信号走同一套触发治理（T1.10）', () => 
     expect(routed[0]?.watchAllowed).toBe(false)
     expect(routed[0]?.wake).toBe('none')
     expect(routed[0]?.persisted).toBe(true)
-    expect(queue.has('pm-suppressed:pm:k2')).toBe(true)
+    expect(queue.has('pm:k2')).toBe(true)
+    expect(queue.get('pm-suppressed:pm:k2')).toMatchObject({
+      dedupKey: 'pm:k2',
+      payload: { suppressedBy: 'watch_governance' },
+    })
   })
 
   it('同一 dedupKey 第二次是 duplicate，不重复落库', () => {
@@ -888,6 +1071,72 @@ describe('PmSignalRouter：pm 信号走同一套触发治理（T1.10）', () => 
     expect(first[0]?.disposition).toEqual({ kind: 'novelty' })
     expect(second[0]?.disposition).toEqual({ kind: 'duplicate' })
     expect(second[0]?.persisted).toBe(false)
+  })
+
+  it('同键重复在 watch 额度治理之前去重，不消耗额度或冷却', () => {
+    store.registerWatch(watch({ alias: 's1', tokenIds: ['111'], cooldownMs: 1, maxTriggers: 2 }), NOW)
+    const { router, clock, queue } = buildWiring()
+    const event = signal({ dedupKey: 'pm:same', payload: { cooldownMs: 1 } })
+
+    const first = router.route([event], NOW)[0]
+    clock.advanceTo(NOW + 10)
+    const duplicate = router.route([event], NOW + 10)[0]
+    expect(first?.disposition.kind).toBe('novelty')
+    expect(duplicate?.disposition.kind).toBe('duplicate')
+    expect(duplicate?.persisted).toBe(false)
+    expect(store.watchByAlias('s1')).toMatchObject({ triggerCount: 1, state: 'active', lastFiredAt: NOW })
+
+    clock.advanceTo(NOW + 20)
+    const next = router.route([signal({ dedupKey: 'pm:next', payload: { cooldownMs: 1 } })], NOW + 20)[0]
+    expect(next?.watchAllowed).toBe(true)
+    expect(next?.disposition.kind).toBe('novelty')
+    expect(store.watchByAlias('s1')).toMatchObject({ triggerCount: 2, state: 'expired' })
+
+    clock.advanceTo(NOW + 30)
+    const suppressed = router.route(
+      [signal({ dedupKey: 'pm:over-limit', payload: { cooldownMs: 1 } })],
+      NOW + 30,
+    )[0]
+    expect(suppressed?.disposition.kind).toBe('cooldown')
+    expect(suppressed?.persisted).toBe(true)
+    expect(queue.get('pm-suppressed:pm:over-limit')).toMatchObject({
+      dedupKey: 'pm:over-limit',
+      state: 'done',
+      disposition: 'cooldown',
+      payload: { suppressedBy: 'watch_governance' },
+    })
+    expect(queue.has('pm:over-limit')).toBe(true)
+    expect(queue.has('pm-suppressed:pm:over-limit')).toBe(false)
+
+    const afterSuppression = store.watchByAlias('s1')
+    expect(afterSuppression).toMatchObject({ triggerCount: 2, state: 'expired', lastFiredAt: NOW + 20 })
+    const replay = router.route(
+      [signal({ dedupKey: 'pm:over-limit', payload: { cooldownMs: 1 } })],
+      NOW + 40,
+    )[0]
+    expect(replay?.disposition).toEqual({ kind: 'duplicate' })
+    expect(replay?.persisted).toBe(false)
+    expect(store.watchByAlias('s1')).toMatchObject({
+      triggerCount: afterSuppression?.triggerCount,
+      lastFiredAt: afterSuppression?.lastFiredAt,
+      state: 'expired',
+    })
+    expect(
+      (db.prepare('SELECT COUNT(*) AS n FROM triggers WHERE dedup_key = ?').get('pm:over-limit') as { n: number }).n,
+    ).toBe(1)
+
+    const anotherKey = router.route(
+      [signal({ dedupKey: 'pm:another-over-limit', payload: { cooldownMs: 1 } })],
+      NOW + 50,
+    )[0]
+    expect(anotherKey?.disposition.kind).toBe('cooldown')
+    expect(anotherKey?.persisted).toBe(true)
+    expect(queue.has('pm:another-over-limit')).toBe(true)
+    expect(store.watchByAlias('s1')).toMatchObject({
+      triggerCount: afterSuppression?.triggerCount,
+      lastFiredAt: afterSuppression?.lastFiredAt,
+      state: 'expired',
+    })
   })
 
   it('novelty 与行情 novelty 共享同一份预算（数据库层面统计）', () => {
@@ -978,7 +1227,7 @@ describe('PmStore 审计修复：watch 上限、别名冲突、元数据流动�
     store.registerWatch(watch({ alias: 's1', tokenIds: ['111'], expiresAt: NOW + DAY }), NOW)
     store.upsertMarket(market({ liquidity: 50_000 }), NOW)
     // 盘口端点不返回 liquidity：只写价差
-    store.recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.4, spread: 0.01 })
+    recordQuote({ tokenId: '111', observedAt: NOW, mid: 0.4, spread: 0.01 })
     const snapshot = store.snapshotAt(NOW)[0]
     expect(snapshot?.liquidity.pass).toBe(true)
     expect(snapshot?.liquidityQuote).toBe(50_000)
@@ -989,7 +1238,7 @@ describe('PmStore 审计修复：watch 上限、别名冲突、元数据流动�
     migrate(fresh)
     const bare = new PmStore(fresh, { liquidity: LIQUIDITY })
     bare.registerWatch(watch({ alias: 'zz', tokenIds: ['999'], expiresAt: NOW + DAY }), NOW)
-    bare.recordQuote({ tokenId: '999', observedAt: NOW, mid: 0.4, spread: 0.01 })
+    recordQuote({ tokenId: '999', observedAt: NOW, mid: 0.4, spread: 0.01 }, bare)
     expect(bare.snapshotAt(NOW)[0]?.liquidity.pass).toBe(false)
     fresh.close()
   })
@@ -1047,7 +1296,8 @@ describe('pm 规则族审计修复：新市场也必须过流动性硬门槛', (
     const suppressed = router.route([{ ...signal, alias: 's1', dedupKey: 'pm:k9' }], NOW + 60_000)
     expect(suppressed[0]?.disposition).toMatchObject({ kind: 'cooldown' })
     expect(queue.get('pm:k9')).toBeUndefined()
-    expect(queue.has('pm-suppressed:pm:k9')).toBe(true)
+    expect(queue.has('pm:k9')).toBe(true)
+    expect(queue.get('pm-suppressed:pm:k9')).toMatchObject({ dedupKey: 'pm:k9' })
   })
 })
 

@@ -8,6 +8,7 @@
 import type Database from 'better-sqlite3'
 import { Statements } from '../db/statements.js'
 import type { Candle } from './types.js'
+import { FeatureArchive } from './feature-archive.js'
 import { MarketObservationStore } from './observations.js'
 
 export interface UpsertMeta {
@@ -41,6 +42,15 @@ interface BarRow {
   closed: number
 }
 
+interface ExistingBarRow {
+  close_time: number
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
 function toCandle(row: BarRow): Candle {
   return {
     symbol: row.symbol,
@@ -59,14 +69,21 @@ function toCandle(row: BarRow): Candle {
 export class BarArchive {
   readonly #statements: Statements
   readonly #observations: MarketObservationStore
+  readonly #features: FeatureArchive
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
     this.#observations = new MarketObservationStore(db)
+    this.#features = new FeatureArchive(db)
   }
 
   /** 已收盘且抓取时可见的 bar 才能写入；整个批次一个事务。晚到回补保留真实 availableAt。 */
   upsertClosed(candles: readonly Candle[], meta: UpsertMeta): UpsertResult {
+    const existing = this.#statements.get(`
+      SELECT close_time, open, high, low, close, volume
+      FROM bars
+      WHERE symbol = ? AND timeframe = ? AND open_time = ? AND closed = 1
+    `)
     const statement = this.#statements.get(`
       INSERT INTO bars (
         symbol, timeframe, open_time, close_time, open, high, low, close, volume, closed, source, fetched_at
@@ -84,11 +101,44 @@ export class BarArchive {
     let rejectedOpen = 0
 
     const run = this.db.transaction((rows: readonly Candle[]) => {
+      const invalidateProcessing = this.#statements.get(`
+        DELETE FROM bar_processing
+        WHERE symbol = ? AND timeframe = ? AND open_time >= ?
+      `)
       for (const candle of rows) {
         if (!candle.closed || candle.closeTime > meta.fetchedAt) {
           rejectedOpen += 1
           continue
         }
+
+        const previous = existing.get(candle.symbol, candle.timeframe, candle.openTime) as
+          | ExistingBarRow
+          | undefined
+        const revised = previous !== undefined && (
+          previous.close_time !== candle.closeTime ||
+          previous.open !== candle.open ||
+          previous.high !== candle.high ||
+          previous.low !== candle.low ||
+          previous.close !== candle.close ||
+          previous.volume !== candle.volume
+        )
+        if (revised) {
+          // 一个输入历史点变化会影响它之后的全部增量指标；先撤销整个受影响后缀，
+          // 并在同一事务里遮蔽旧特征，避免进程在归档提交与回调失败之间崩溃时暴露旧投影。
+          invalidateProcessing.run(candle.symbol, candle.timeframe, candle.openTime)
+          const boundary = this.#statements
+            .get(`SELECT MAX(close_time) AS last_close FROM bars
+              WHERE symbol = ? AND timeframe = ? AND closed = 1 AND open_time >= ?`)
+            .get(candle.symbol, candle.timeframe, candle.openTime) as { last_close: number | null }
+          this.#features.invalidateFrom(
+            candle.symbol,
+            candle.timeframe,
+            candle.openTime,
+            meta.fetchedAt,
+            boundary.last_close ?? candle.closeTime,
+          )
+        }
+
         statement.run({
           symbol: candle.symbol,
           timeframe: candle.timeframe,
@@ -184,6 +234,11 @@ export class BarArchive {
       )
       .all(symbol, timeframe, limit) as BarRow[]
     return rows.map(toCandle)
+  }
+
+  /** 该待处理 bar 是否命中持久特征恢复标记；feed 必须在统一下游回调前检查。 */
+  requiresFeatureRecovery(candle: Pick<Candle, 'symbol' | 'timeframe' | 'closeTime'>): boolean {
+    return this.#features.hasRecoveryMarker(candle)
   }
 
   /** 标记一根 bar 的全部下游处理成功；重复标记幂等。 */

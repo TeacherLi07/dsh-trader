@@ -179,6 +179,19 @@ describe('FeaturePipeline', () => {
     expect(pipeline.engineCount()).toBe(1)
   })
 
+  it('pipeline 对同值末根重复投递幂等，不会多推进指标状态', () => {
+    const bars = candles(3)
+    const pipeline = new FeaturePipeline(archive)
+    const reference = new FeatureEngine()
+
+    const first = pipeline.onClosedCandle(bars[0]!, undefined, bars[0]!.closeTime)
+    expect(pipeline.onClosedCandle({ ...bars[0]! }, undefined, bars[0]!.closeTime)).toBe(first)
+    const actualNext = pipeline.onClosedCandle(bars[1]!, undefined, bars[1]!.closeTime)
+    reference.onClosedCandle(bars[0]!)
+    expect(actualNext).toEqual(reference.onClosedCandle(bars[1]!))
+    expect(archive.count(SYMBOL, TF)).toBe(2)
+  })
+
   it('keeps independent state per symbol and timeframe', () => {
     const pipeline = new FeaturePipeline(archive)
     for (const candle of candles(3)) pipeline.onClosedCandle(candle)

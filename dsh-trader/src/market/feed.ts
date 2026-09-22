@@ -192,6 +192,12 @@ export class MarketFeed {
             // 处理队列包含之前回调失败的 bar，因此回调抛错后不会把批内后续 bar 永久吞掉。
             const pending = archive.unprocessedClosedBars(symbol, timeframe, processingBatchLimit)
             for (const candle of pending) {
+              if (archive.requiresFeatureRecovery(candle)) {
+                throw new MarketSourceError(
+                  'other',
+                  `历史 bar ${candle.openTime} 处于持久特征恢复隔离状态；禁止自动重放规则/订单回调，需运维完成 feature-only 重建并显式确认处理游标`,
+                )
+              }
               await onClosedCandle(candle, clock.now())
               archive.markProcessed(candle, clock.now())
               emitted += 1

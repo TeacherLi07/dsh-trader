@@ -154,8 +154,11 @@ export interface StateProjectionInput {
   readonly rebuilding: boolean
   readonly asOf: number
   readonly account: AccountSnapshot | null
+  readonly accountObservedAt: number | null
   readonly positions: readonly PositionSnapshot[] | null
+  readonly positionsObservedAt: number | null
   readonly openOrders: readonly OrderAck[] | null
+  readonly openOrdersObservedAt: number | null
   readonly staleAfterMs: number
   readonly error?: string
 }
@@ -171,14 +174,13 @@ export interface StateProjection {
 
 /** 当前状态面最小投影；后续周期投影可在此边界旁独立增加，不侵入执行链。 */
 export function projectState(input: StateProjectionInput): StateProjection {
-  const accountObservedAt = input.account?.observedAt ?? null
   return {
     mode: input.mode,
     venue: input.venue,
     halted: input.halted,
     account: classifyExchangeReading({
       value: input.account,
-      observedAt: accountObservedAt,
+      observedAt: input.accountObservedAt,
       asOf: input.asOf,
       staleAfterMs: input.staleAfterMs,
       rebuilding: input.rebuilding,
@@ -186,7 +188,7 @@ export function projectState(input: StateProjectionInput): StateProjection {
     }),
     positions: classifyExchangeReading({
       value: input.positions,
-      observedAt: accountObservedAt,
+      observedAt: input.positionsObservedAt,
       asOf: input.asOf,
       staleAfterMs: input.staleAfterMs,
       rebuilding: input.rebuilding,
@@ -194,7 +196,7 @@ export function projectState(input: StateProjectionInput): StateProjection {
     }),
     openOrders: classifyExchangeReading({
       value: input.openOrders,
-      observedAt: accountObservedAt,
+      observedAt: input.openOrdersObservedAt,
       asOf: input.asOf,
       staleAfterMs: input.staleAfterMs,
       rebuilding: input.rebuilding,

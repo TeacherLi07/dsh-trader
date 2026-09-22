@@ -263,7 +263,15 @@ async function executeActionUnlocked(args: ExecuteActionArgs): Promise<ExecuteAc
   }
   if (action.action === 'cancel_all') {
     if (actionExpired()) return denyExpired()
-    const scope = action.scope === 'all' ? undefined : args.symbol
+    // 全局撤单被计划合同明确设为 fail-closed：不能把取消某标的的意图扩展成账户级副作用。
+    // 保留 action 便于审计；只有显式 symbol scope 才能进入 broker。
+    if (action.scope !== 'symbol') {
+      const reason = '全局撤单当前禁用；只允许限定到当前标的的 cancel_all'
+      record(false, { rationale: reason })
+      auditDenied(args, decisionId, reason, now)
+      return { executed: false, denied: true, reason, decisionId }
+    }
+    const scope = args.symbol
     // 第一遍只撤普通单；保护单只有在交易所确认目标范围为空仓后才允许撤。
     try {
       await args.broker.cancelAll(scope)

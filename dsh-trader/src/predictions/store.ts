@@ -18,7 +18,7 @@ import {
   estimateProbability,
   liquidityGate,
   marketAsOf,
-  seriesAsOf,
+  PmTimeError,
   type LiquidityGateConfig,
   type LiquidityVerdict,
   type MarketView,
@@ -53,7 +53,10 @@ export interface PmMarketRow {
 
 export interface PmQuoteRow {
   readonly tokenId: string
+  /** 上游毫秒 source event time；决定 ageMs 与事件时间 PIT。 */
   readonly observedAt: number
+  /** 本机完成响应读取的毫秒时刻；NULL 的旧记录保持不可见。 */
+  readonly availableAt: number
   readonly bestBid?: number
   readonly bestAsk?: number
   readonly mid?: number
@@ -132,6 +135,28 @@ function watchContentHash(spec: WatchSpec, cooldownMs: number, maxTriggers: numb
   )}`
 }
 
+/** 版本只由可改变事实决定；重复轮询产生的 last_seen/observed_at 不应无限堆积版本行。 */
+function marketVersionFingerprint(market: PmMarketRow): string {
+  return fingerprint({
+    conditionId: market.conditionId,
+    marketId: market.marketId,
+    slug: market.slug,
+    question: market.question,
+    outcomes: market.outcomes,
+    tokenIds: market.tokenIds,
+    events: market.events,
+    negRisk: market.negRisk,
+    createdAt: market.createdAt,
+    endDate: market.endDate,
+    closed: market.closed,
+    resolvedAt: market.resolvedAt,
+    winningOutcome: market.winningOutcome,
+    liquidity: market.liquidity,
+    volume24h: market.volume24h,
+    firstSeenAt: market.firstSeenAt,
+  })
+}
+
 // ── 存储 ─────────────────────────────────────────────────────────────────────
 
 export interface PmStoreOptions {
@@ -176,9 +201,8 @@ export class PmStore {
     const existing = this.marketByConditionId(market.conditionId)
     const resolvedAt =
       market.lifecycle.resolved && market.lifecycle.winningOutcome !== null ? now : existing?.resolvedAt ?? null
-    this.#statements
-      .get(
-        `INSERT INTO pm_markets
+    const upsert = this.#statements.get(`
+        INSERT INTO pm_markets
            (condition_id, market_id, slug, question, event_id, event_slug, tags_json,
             outcomes_json, token_ids_json, neg_risk,
             created_at, end_date, closed, resolved_at, winning_outcome, liquidity_num, volume24h,
@@ -195,9 +219,23 @@ export class PmStore {
            observed_at = excluded.observed_at,
            -- 结算信息一旦写下就不再回退成 NULL（历史不可改写）
            resolved_at = COALESCE(excluded.resolved_at, pm_markets.resolved_at),
-           winning_outcome = COALESCE(excluded.winning_outcome, pm_markets.winning_outcome)`,
+           winning_outcome = COALESCE(excluded.winning_outcome, pm_markets.winning_outcome)
+    `)
+    const insertVersion = this.#statements.get(`
+      INSERT INTO pm_market_versions (
+        condition_id, available_at, market_id, slug, question, event_id, event_slug, tags_json,
+        outcomes_json, token_ids_json, neg_risk, created_at, start_date, end_date, closed,
+        resolved_at, winning_outcome, liquidity_num, volume24h, first_seen_at, last_seen_at,
+        observed_at, revision_fingerprint
       )
-      .run({
+      SELECT condition_id, @availableAt, market_id, slug, question, event_id, event_slug, tags_json,
+        outcomes_json, token_ids_json, neg_risk, created_at, start_date, end_date, closed,
+        resolved_at, winning_outcome, liquidity_num, volume24h, first_seen_at, last_seen_at,
+        observed_at, @revisionFingerprint
+      FROM pm_markets WHERE condition_id = @conditionId
+    `)
+    this.db.transaction(() => {
+      upsert.run({
         conditionId: market.conditionId,
         marketId: market.id,
         slug: market.slug,
@@ -219,6 +257,13 @@ export class PmStore {
         lastSeenAt: now,
         observedAt: now,
       })
+      const current = this.marketByConditionId(market.conditionId)
+      if (current === undefined) throw new Error(`市场 upsert 后读取失败：${market.conditionId}`)
+      const revisionFingerprint = marketVersionFingerprint(current)
+      const previous = this.#latestMarketVersion(market.conditionId)
+      if (previous !== undefined && marketVersionFingerprint(previous) === revisionFingerprint) return
+      insertVersion.run({ conditionId: market.conditionId, availableAt: now, revisionFingerprint })
+    })()
   }
 
   marketByConditionId(conditionId: string): PmMarketRow | undefined {
@@ -235,20 +280,14 @@ export class PmStore {
     return row === undefined ? undefined : toMarketRow(row)
   }
 
-  /**
-   * 市场清单：**只返回 `0 < created_at <= now` 的市场**（存在门控）。
-   * `created_at = 0` 是"源没给创建时间"的退化值，不能当成"远古就存在"（fail-closed）。
-   */
+  /** 市场清单按本机可用时间选最新版本，再用源 created_at 做事件存在门控。 */
   marketsVisibleAt(now: number, limit = 200): readonly PmMarketRow[] {
-    const rows = this.#statements
-      .get('SELECT * FROM pm_markets WHERE created_at > 0 AND created_at <= ? ORDER BY created_at DESC LIMIT ?')
-      .all(now, limit) as Record<string, unknown>[]
-    return rows.map(toMarketRow)
+    return this.#marketsAsOf(now, limit)
   }
 
   /** 存在 + 结算门控的对外视图。 */
   marketViewAt(conditionId: string, now: number): MarketView {
-    const market = this.marketByConditionId(conditionId)
+    const market = this.#latestMarketVersion(conditionId, now)
     if (market === undefined) return { visible: false, reason: 'not_created_yet' }
     return marketAsOf(
       {
@@ -268,6 +307,43 @@ export class PmStore {
       .get('SELECT * FROM pm_markets WHERE first_seen_at >= ? ORDER BY first_seen_at DESC LIMIT ?')
       .all(since, limit) as Record<string, unknown>[]
     return rows.map(toMarketRow)
+  }
+
+  #latestMarketVersion(conditionId: string, asOf?: number): PmMarketRow | undefined {
+    const row = this.#statements
+      .get(`SELECT * FROM pm_market_versions
+        WHERE condition_id = ? AND available_at <= COALESCE(?, 9223372036854775807)
+        ORDER BY available_at DESC, version_seq DESC LIMIT 1`)
+      .get(conditionId, asOf ?? null) as Record<string, unknown> | undefined
+    return row === undefined ? undefined : toMarketRow(row)
+  }
+
+  #marketsAsOf(now: number, limit: number): readonly PmMarketRow[] {
+    const rows = this.#statements.get(`SELECT * FROM (
+        SELECT v.*, ROW_NUMBER() OVER (
+          PARTITION BY condition_id ORDER BY available_at DESC, version_seq DESC
+        ) AS revision
+        FROM pm_market_versions v WHERE available_at <= ?
+      ) WHERE revision = 1 AND created_at > 0 AND created_at <= ?
+      ORDER BY created_at DESC, condition_id ASC LIMIT ?`)
+      .all(now, now, limit) as Record<string, unknown>[]
+    const currentRows = this.#statements
+      .get('SELECT * FROM pm_markets WHERE observed_at <= ?')
+      .all(now) as Record<string, unknown>[]
+    const currentByCondition = new Map(currentRows.map((row) => {
+      const current = toMarketRow(row)
+      return [current.conditionId, current] as const
+    }))
+    return rows.map((row) => {
+      const version = toMarketRow(row)
+      // 当前投影仍是当前视图的权威出口；只借用它的 volatile seen 时间，若该投影本身
+      // 已在 asOf 之后更新，则必须退回 append-only 版本，不能把未来元数据倒灌进回放。
+      const current = currentByCondition.get(version.conditionId)
+      return current !== undefined && current.observedAt >= version.observedAt && current.observedAt <= now &&
+        marketVersionFingerprint(current) === marketVersionFingerprint(version)
+        ? current
+        : version
+    })
   }
 
   // ── 序列（序列门控）────────────────────────────────────────────────────────
@@ -302,7 +378,7 @@ export class PmStore {
     return insert()
   }
 
-  /** 全量序列（升序）。热路径读完后必须过 `seriesUpTo`。 */
+  /** 全量序列（升序）；保留当前视图 API，回放必须使用 `seriesAsOf`。 */
   series(tokenId: string): readonly PmSeriesPoint[] {
     return (
       this.#statements
@@ -311,24 +387,40 @@ export class PmStore {
     ).map((row) => ({ ts: row.ts, price: row.price }))
   }
 
-  /** PIT 序列：`ts <= now` —— 回放**不得**看到未来点。 */
+  /** PIT 同时约束源事件时间与本机获知时间；回补的旧点不能倒灌到早期回放。 */
   seriesAsOf(tokenId: string, now: number): readonly PmSeriesPoint[] {
-    return seriesAsOf(this.series(tokenId), now)
+    if (!Number.isFinite(now)) throw new PmTimeError(`now 非法：${now}`)
+    const rows = this.#statements
+      .get(`SELECT ts, price FROM pm_series
+        WHERE token_id = ? AND ts <= ? AND observed_at <= ? ORDER BY ts ASC`)
+      .all(tokenId, now, now) as { ts: number; price: number }[]
+    return rows.map((row) => ({ ts: row.ts, price: row.price }))
   }
 
   // ── 盘口 ───────────────────────────────────────────────────────────────────
 
   recordQuote(quote: PmQuoteRow): boolean {
-    const result = this.#statements
-      .get(
-        `INSERT INTO pm_quotes
-           (token_id, observed_at, best_bid, best_ask, mid, spread, last_trade_price, volume24h, liquidity)
-         VALUES (@tokenId, @observedAt, @bestBid, @bestAsk, @mid, @spread, @lastTradePrice, @volume24h, @liquidity)
-         ON CONFLICT (token_id, observed_at) DO NOTHING`,
-      )
-      .run({
+    if (!Number.isSafeInteger(quote.observedAt) || quote.observedAt < 0) {
+      throw new PmTimeError(`quote source observedAt 非法：${quote.observedAt}`)
+    }
+    if (!Number.isSafeInteger(quote.availableAt) || quote.availableAt < 0) {
+      throw new PmTimeError(`quote local availableAt 非法：${quote.availableAt}`)
+    }
+    const insert = this.#statements.get(
+      `INSERT INTO pm_quotes
+         (token_id, observed_at, available_at, best_bid, best_ask, mid, spread, last_trade_price, volume24h, liquidity)
+       VALUES (@tokenId, @observedAt, @availableAt, @bestBid, @bestAsk, @mid, @spread, @lastTradePrice, @volume24h, @liquidity)
+       ON CONFLICT (token_id, observed_at) DO NOTHING`,
+    )
+    const restoreLegacyAvailability = this.#statements.get(
+      `UPDATE pm_quotes SET available_at = @availableAt
+       WHERE token_id = @tokenId AND observed_at = @observedAt AND available_at IS NULL`,
+    )
+    return this.db.transaction(() => {
+      const inserted = insert.run({
         tokenId: quote.tokenId,
         observedAt: quote.observedAt,
+        availableAt: quote.availableAt,
         bestBid: quote.bestBid ?? null,
         bestAsk: quote.bestAsk ?? null,
         mid: quote.mid ?? null,
@@ -337,16 +429,26 @@ export class PmStore {
         volume24h: quote.volume24h ?? null,
         liquidity: quote.liquidity ?? null,
       })
-    return Number(result.changes) > 0
+      // 旧 `(token_id, observed_at)` 冲突行只补首次真实重读时刻，不改写旧盘口内容。
+      const restored = restoreLegacyAvailability.run({
+        tokenId: quote.tokenId,
+        observedAt: quote.observedAt,
+        availableAt: quote.availableAt,
+      })
+      return Number(inserted.changes) > 0 || Number(restored.changes) > 0
+    })()
   }
 
-  /** 最近一条 `observed_at <= now` 的盘口（PIT：不返回未来的盘口）。 */
+  /** 最近一条 source event 与本机可用时刻都不晚于 asOf 的盘口；NULL availability fail-closed 隐藏。 */
   latestQuoteAsOf(tokenId: string, now: number): PmQuoteRow | undefined {
+    if (!Number.isSafeInteger(now) || now < 0) throw new PmTimeError(`quote asOf 非法：${now}`)
     const row = this.#statements
       .get(
-        'SELECT * FROM pm_quotes WHERE token_id = ? AND observed_at <= ? ORDER BY observed_at DESC LIMIT 1',
+        `SELECT * FROM pm_quotes
+         WHERE token_id = ? AND observed_at <= ? AND available_at IS NOT NULL AND available_at <= ?
+         ORDER BY observed_at DESC LIMIT 1`,
       )
-      .get(tokenId, now) as Record<string, unknown> | undefined
+      .get(tokenId, now, now) as Record<string, unknown> | undefined
     return row === undefined ? undefined : toQuoteRow(row)
   }
 
@@ -556,15 +658,25 @@ export class PmStore {
    */
   snapshotAt(now: number): readonly PmAliasSnapshot[] {
     const snapshots: PmAliasSnapshot[] = []
+    const markets = this.marketsVisibleAt(now)
     for (const watch of this.activeWatches(now)) {
       for (const tokenId of watch.tokenIds) {
-        snapshots.push(this.aliasSnapshot(watch, tokenId, now))
+        snapshots.push(this.#aliasSnapshot(watch, tokenId, now, markets))
       }
     }
     return snapshots
   }
 
   aliasSnapshot(watch: WatchRow, tokenId: string, now: number): PmAliasSnapshot {
+    return this.#aliasSnapshot(watch, tokenId, now, this.marketsVisibleAt(now))
+  }
+
+  #aliasSnapshot(
+    watch: WatchRow,
+    tokenId: string,
+    now: number,
+    markets: readonly PmMarketRow[],
+  ): PmAliasSnapshot {
     const quote = this.latestQuoteAsOf(tokenId, now)
     const probability: ProbabilityEstimate =
       quote === undefined
@@ -575,7 +687,7 @@ export class PmStore {
           })
     const series = this.seriesAsOf(tokenId, now)
 
-    const market = this.marketsVisibleAt(now).find((row) => row.tokenIds.includes(tokenId))
+    const market = markets.find((row) => row.tokenIds.includes(tokenId))
     const marketView =
       market === undefined ? undefined : this.marketViewAt(market.conditionId, now)
     const negRisk = this.#negRiskState(tokenId, now)
@@ -620,6 +732,7 @@ export class PmStore {
       /** 关注的近 7 日 volume24h 中位数 —— `pm_volume_spike` 的基准。 */
       volumeMedian: this.#volumeMedian(tokenId, now),
       quoteObservedAt: quote?.observedAt ?? null,
+      quoteAvailableAt: quote?.availableAt ?? null,
       questions: market?.question ?? null,
       resolved: marketView?.visible === true ? marketView.resolved : false,
       winningOutcome: marketView?.visible === true ? marketView.winningOutcome ?? null : null,
@@ -689,12 +802,14 @@ export class PmStore {
   }
 
   #negRiskGroups(now: number): ReadonlyMap<string, readonly string[]> {
-    const rows = this.#statements
-      .get(
-        `SELECT event_id, token_ids_json FROM pm_markets
-         WHERE event_id IS NOT NULL AND neg_risk = 1 AND created_at > 0 AND created_at <= ?`,
-      )
-      .all(now) as { event_id: string; token_ids_json: string }[]
+    const rows = this.#statements.get(`SELECT event_id, token_ids_json FROM (
+        SELECT v.*, ROW_NUMBER() OVER (
+          PARTITION BY condition_id ORDER BY available_at DESC, version_seq DESC
+        ) AS revision
+        FROM pm_market_versions v
+        WHERE available_at <= ? AND created_at > 0 AND created_at <= ?
+      ) WHERE revision = 1 AND event_id IS NOT NULL AND neg_risk = 1`)
+      .all(now, now) as { event_id: string; token_ids_json: string }[]
     const groups = new Map<string, Set<string>>()
     for (const row of rows) {
       const eventId = String(row.event_id)
@@ -711,10 +826,11 @@ export class PmStore {
     const rows = this.#statements
       .get(
         `SELECT volume24h FROM pm_quotes
-         WHERE token_id = ? AND observed_at <= ? AND observed_at >= ? AND volume24h IS NOT NULL
+         WHERE token_id = ? AND observed_at <= ? AND available_at IS NOT NULL AND available_at <= ?
+           AND observed_at >= ? AND volume24h IS NOT NULL
          ORDER BY volume24h ASC`,
       )
-      .all(tokenId, now, now - 7 * 24 * 3_600_000) as { volume24h: number }[]
+      .all(tokenId, now, now, now - 7 * 24 * 3_600_000) as { volume24h: number }[]
     if (rows.length < 3) return null
     const middle = Math.floor(rows.length / 2)
     const value =
@@ -746,6 +862,7 @@ export interface PmAliasSnapshot {
   readonly absChangeMean: number | null
   readonly volumeMedian: number | null
   readonly quoteObservedAt: number | null
+  readonly quoteAvailableAt: number | null
   readonly questions: string | null
   readonly resolved: boolean
   readonly winningOutcome: string | null
@@ -888,9 +1005,18 @@ function toMarketRow(row: Record<string, unknown>): PmMarketRow {
 function toQuoteRow(row: Record<string, unknown>): PmQuoteRow {
   const numeric = (value: unknown): number | undefined =>
     value === null || value === undefined ? undefined : Number(value)
+  const observedAt = Number(row.observed_at)
+  if (!Number.isSafeInteger(observedAt) || observedAt < 0) {
+    throw new PmTimeError('PIT quote 缺少有效 source observed_at')
+  }
+  const availableAt = numeric(row.available_at)
+  if (availableAt === undefined || !Number.isSafeInteger(availableAt) || availableAt < 0) {
+    throw new PmTimeError('PIT quote 缺少有效 available_at')
+  }
   return {
     tokenId: String(row.token_id),
-    observedAt: Number(row.observed_at),
+    observedAt,
+    availableAt,
     ...(numeric(row.best_bid) === undefined ? {} : { bestBid: numeric(row.best_bid) }),
     ...(numeric(row.best_ask) === undefined ? {} : { bestAsk: numeric(row.best_ask) }),
     ...(numeric(row.mid) === undefined ? {} : { mid: numeric(row.mid) }),

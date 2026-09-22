@@ -56,6 +56,23 @@ describe('BarArchive', () => {
     expect(stored[0]?.close).toBe(123)
   })
 
+  it('同值重放保留处理游标，真实修订只撤销自身及后续游标', () => {
+    const batch = candles([raw(NOW - 3 * HOUR), raw(NOW - 2 * HOUR), raw(NOW - HOUR)])
+    archive.upsertClosed(batch, META)
+    for (const candle of batch) archive.markProcessed(candle, NOW)
+
+    archive.upsertClosed(batch, { ...META, fetchedAt: NOW + 1_000, source: 'later-fetch' })
+    expect(archive.unprocessedClosedBars('BTC/USDT', TF)).toEqual([])
+
+    const revised = { ...batch[1]!, high: batch[1]!.high + 1, close: batch[1]!.close + 1 }
+    archive.upsertClosed([revised], { ...META, fetchedAt: NOW + 2_000, source: 'correction' })
+    expect(archive.unprocessedClosedBars('BTC/USDT', TF).map((candle) => candle.openTime)).toEqual([
+      batch[1]!.openTime,
+      batch[2]!.openTime,
+    ])
+    expect(archive.requiresFeatureRecovery(revised)).toBe(true)
+  })
+
   it('returns closed bars ascending within [since, until) and honours the limit', () => {
     archive.upsertClosed(
       candles([raw(NOW - 5 * HOUR), raw(NOW - 4 * HOUR), raw(NOW - 3 * HOUR), raw(NOW - 2 * HOUR)]),

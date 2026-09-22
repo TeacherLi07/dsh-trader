@@ -16,6 +16,7 @@ import { dispatchNextTrigger, resolvePredictionTriggerTarget } from '../supervis
 import { DEFAULT_TRIGGER_LIMITS, type TriggerLimits } from '../trigger/engine.js'
 import { TriggerQueue } from '../trigger/queue.js'
 import { getPmRuntime } from '../predictions/runtime.js'
+import { redactDecisionErrorText } from '../agents/decision-redaction.js'
 import { getExecPorts } from './exec.js'
 import { runDecisionRuntime } from '../agents/decision-runtime.js'
 import type { DecisionStrategy } from '../agents/decision-workflow.js'
@@ -104,9 +105,30 @@ function triggerLimitsOf(input: Partial<TriggerLimits> | undefined): TriggerLimi
   return limits
 }
 
+interface SupervisorTimerConfig {
+  readonly heartbeatMs: number
+  readonly windowScanMs: number
+  readonly wakeTimeoutMs: number
+}
+
+const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+function timerConfigOf(config: SupervisorConfig): SupervisorTimerConfig {
+  const heartbeatMs = config.heartbeatMs ?? 15_000
+  const windowScanMs = config.windowScanMs ?? 60_000
+  const wakeTimeoutMs = config.wakeTimeoutMs ?? 300_000
+  for (const [name, value] of Object.entries({ heartbeatMs, windowScanMs, wakeTimeoutMs })) {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > MAX_TIMER_DELAY_MS) {
+      throw new Error(`${name} 必须是 1..${MAX_TIMER_DELAY_MS} 的安全整数毫秒值`)
+    }
+  }
+  return { heartbeatMs, windowScanMs, wakeTimeoutMs }
+}
+
 export function apply(ctx: Context, config: SupervisorConfig): void {
   const strategy = resolveDecisionStrategy(config.decisionStrategy)
   const route = routeOf(config)
+  const { heartbeatMs, windowScanMs, wakeTimeoutMs } = timerConfigOf(config)
   if (config.dailyBudgetUsd !== undefined && (!Number.isFinite(config.dailyBudgetUsd) || config.dailyBudgetUsd <= 0)) {
     throw new Error('dailyBudgetUsd 必须为正数；未配置时 fail-closed 禁止调用模型')
   }
@@ -116,18 +138,28 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
   const planWindowMs = config.planWindowMs ?? 4 * 3_600_000
   if (!Number.isSafeInteger(planWindowMs) || planWindowMs <= 0) throw new Error('planWindowMs 必须是正整数')
   const wakeLimits = triggerLimitsOf(config.wakeLimits)
+  const specs = config.windows ?? DEFAULT_WINDOWS
+  for (const spec of specs) {
+    const errors = validateWindowSpec(spec)
+    if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
+  }
+
+  let busy = false
+  let currentAbort: AbortController | undefined
+  let stopHeartbeat: (() => void) | undefined
+  let stopWindows: (() => void) | undefined
+  // 先登记清理，再安装周期任务；后续初始化/第二个 interval 失败时也能释放已创建的任务。
+  ctx.effect(() => () => {
+    currentAbort?.abort()
+    stopHeartbeat?.()
+    stopWindows?.()
+  }, 'trade.supervisor.close')
 
   const logger = ctx.logger('trade-supervisor')
   const clock = systemClock()
   const database = getDatabase()
   const journal = new DecisionJournal(database)
   const heartbeat = new HeartbeatStore(new Statements(database), (event) => journal.appendAudit(event))
-  const heartbeatMs = config.heartbeatMs ?? 15_000
-  const specs = config.windows ?? DEFAULT_WINDOWS
-  for (const spec of specs) {
-    const errors = validateWindowSpec(spec)
-    if (errors.length > 0) throw new Error(`W1 窗口配置非法：${errors.join('；')}`)
-  }
 
   if (config.dailyBudgetUsd === undefined) {
     journal.appendAudit({
@@ -172,15 +204,10 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
 
   heartbeat.beat(clock.now())
   checkPriceTableAge()
-  const stopHeartbeat = clock.setInterval(() => {
+  stopHeartbeat = clock.setInterval(() => {
     heartbeat.beat(clock.now())
     checkPriceTableAge()
   }, heartbeatMs)
-
-  let busy = false
-  let currentAbort: AbortController | undefined
-  const wakeTimeoutMs = config.wakeTimeoutMs ?? 300_000
-  if (!Number.isSafeInteger(wakeTimeoutMs) || wakeTimeoutMs <= 0) throw new Error('wakeTimeoutMs 必须是正整数')
 
   const model = { stream: (options: Parameters<typeof ctx.llm.stream>[0]) => ctx.llm.stream(options) }
   const decisionConfig = (ports: TradePorts) => ({
@@ -190,7 +217,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     ...(config.dailyTokenCap === undefined ? {} : { dailyTokenCap: config.dailyTokenCap }),
     planWindowMs,
   })
-  const runDecision = (
+  const runDecision = async (
     ports: TradePorts,
     trigger: {
       readonly source: 'W1' | 'W2' | 'W3'
@@ -203,7 +230,15 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     symbol: string,
     timeframe: string,
     signal: AbortSignal,
-  ) => runDecisionRuntime({ ports, model, config: decisionConfig(ports), trigger, symbol, timeframe, signal })
+  ) => {
+    try {
+      const result = await runDecisionRuntime({ ports, model, config: decisionConfig(ports), trigger, symbol, timeframe, signal })
+      return result.reason === undefined ? result : { ...result, reason: safeError(result.reason) }
+    } catch (error) {
+      // W2/W3 的 dispatcher 会把 run 拒绝原因写入队列和审计；在它接收前先清理完整错误文本。
+      throw new Error(safeError(error))
+    }
+  }
 
   const expireQueuedTriggers = (now: number): void => {
     for (const trigger of triggerQueue.expire(now)) {
@@ -326,8 +361,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     }
   }
 
-  const windowScanMs = config.windowScanMs ?? 60_000
-  const stopWindows = clock.setInterval(() => {
+  stopWindows = clock.setInterval(() => {
     const now = clock.now()
     windowQueue.enqueueDue([...specs], now)
     expireQueuedTriggers(now)
@@ -336,15 +370,9 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     if (fire !== undefined) void driveWindow(fire)
     else if (triggerQueue.queuedCount() > 0) void driveTrigger()
   }, windowScanMs)
-
-  ctx.effect(() => () => {
-    currentAbort?.abort()
-    stopHeartbeat()
-    stopWindows()
-  }, 'trade.supervisor.close')
 }
 
-function safeError(error: unknown): string {
+export function safeError(error: unknown): string {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)
+  return redactDecisionErrorText(raw).slice(0, 1_000)
 }

@@ -82,22 +82,27 @@ export async function readTradeState(
   staleAfterMs: number,
   startupOverride?: StartupProjection | null,
 ): Promise<TradeStateHttpBody> {
-  const startup = startupOverride === undefined
+  const unavailableStartup = startupOverride === undefined
     ? ports === undefined
       ? null
       : readStartupState(ports.db, ports.clock.now())
     : startupOverride
   if (ports === undefined) {
-    return { ok: false, rebuilding: true, error: '交易组合根尚未就绪，状态仍在重建中', startup }
+    return { ok: false, rebuilding: true, error: '交易组合根尚未就绪，状态仍在重建中', startup: unavailableStartup }
   }
 
-  const asOf = ports.clock.now()
   try {
-    const [account, positions, openOrders] = await Promise.all([
-      ports.broker.getAccount(),
-      ports.broker.getPositions(),
-      ports.broker.getOpenOrders(),
+    const [accountRead, positionsRead, openOrdersRead] = await Promise.all([
+      ports.broker.getAccount().then((value) => ({ value, observedAt: ports.clock.now() })),
+      ports.broker.getPositions().then((value) => ({ value, observedAt: ports.clock.now() })),
+      ports.broker.getOpenOrders().then((value) => ({ value, observedAt: ports.clock.now() })),
     ])
+    const { value: account } = accountRead
+    const { value: positions } = positionsRead
+    const { value: openOrders } = openOrdersRead
+    // 总 asOf 在整组请求结束后冻结；各项 freshness 保留各自成功完成时点，
+    // 空数组也是一次成功查询，不能借用 account 的更新时间。
+    const asOf = ports.clock.now()
     const heartbeat = new HeartbeatStore(new Statements(ports.db)).read()
     return {
       ok: true,
@@ -109,14 +114,17 @@ export async function readTradeState(
         rebuilding: false,
         asOf,
         account,
+        accountObservedAt: accountRead.observedAt,
         positions,
+        positionsObservedAt: positionsRead.observedAt,
         openOrders,
+        openOrdersObservedAt: openOrdersRead.observedAt,
         staleAfterMs,
       }),
-      startup: startupOverride === undefined ? readStartupState(ports.db, asOf) : startup,
+      startup: startupOverride === undefined ? readStartupState(ports.db, asOf) : startupOverride,
     }
   } catch (error) {
-    return { ok: false, rebuilding: true, error: String(error), startup }
+    return { ok: false, rebuilding: true, error: String(error), startup: unavailableStartup }
   }
 }
 

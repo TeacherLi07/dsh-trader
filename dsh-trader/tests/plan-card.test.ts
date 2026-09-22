@@ -125,7 +125,7 @@ describe('plan card v0', () => {
     expect(validatePlanCard(card).ok).toBe(false)
   })
 
-  it('编译并静态检查 when：语法错/固定未知路径拒绝，动态 pm alias 保留运行时校验', () => {
+  it('编译并静态检查 when：语法错/未知路径/PM 动态路径均拒绝', () => {
     const syntax = validCard()
     syntax.invalidation = [{ ...syntax.invalidation[0]!, when: 'bar.close >' }]
     expect(validatePlanCard(syntax).ok).toBe(false)
@@ -134,9 +134,18 @@ describe('plan card v0', () => {
     unknown.invalidation = [{ ...unknown.invalidation[0]!, when: 'news.headline > 1' }]
     expect(validatePlanCard(unknown).ok).toBe(false)
 
-    const dynamic = validCard()
-    dynamic.invalidation = [{ ...dynamic.invalidation[0]!, when: 'pm.future_event.prob < 0.3' }]
-    expect(validatePlanCard(dynamic).ok).toBe(true)
+    const pmInvalidation = validCard()
+    pmInvalidation.invalidation = [{ ...pmInvalidation.invalidation[0]!, when: 'pm.future_event.prob < 0.3' }]
+    const invalidationResult = validatePlanCard(pmInvalidation)
+    expect(invalidationResult.ok).toBe(false)
+    if (!invalidationResult.ok) {
+      expect(invalidationResult.errors.join('\n')).toContain('尚未进入机械 DSL 执行上下文')
+      expect(invalidationResult.errors.join('\n')).toContain('独立开仓 gate 尚未验收')
+    }
+
+    const pmCommitment = validCard()
+    pmCommitment.commitments = [{ ...pmCommitment.commitments[0]!, when: 'pm.future_event.prob > 0.7' }]
+    expect(validatePlanCard(pmCommitment).ok).toBe(false)
   })
 
   it('hashes deterministically regardless of key order, and changes with content', () => {

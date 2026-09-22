@@ -193,4 +193,28 @@ describe('DecisionEnvelope R3 validation', () => {
     expect(result?.ok).toBe(true)
     if (result?.ok) expect(result.card.commitments[0]?.then).toMatchObject({ action: 'open', riskFraction: 0.5 })
   })
+
+  it('refuses to materialize a PM-conditioned plan card before PM DSL context and independent open gate exist', () => {
+    const frozen = context({ predictionAvailable: true })
+    const parsed = parseDecisionEnvelopeCandidate(candidate({
+      immediateAction: undefined,
+      plan: {
+        thesis: '依赖 PM 概率的未来承诺', confidence: 0.7, keyLevels: [], noTrade: false, forbidden: [],
+        invalidation: [{ id: 'inv', tf: '1h', when: 'bar.close < 90', then: { action: 'close' } }],
+        commitments: [{ id: 'open', seq: 1, tf: '1h', when: 'pm.future_event.prob > 0.7', then: openAction }],
+      },
+    }), frozen)
+    expect(parsed.ok).toBe(true)
+    if (!parsed.ok) return
+
+    const envelope = bindDecisionEnvelope(parsed.candidate, { runId: 'run-pm-plan', context: frozen })
+    const result = materializeDecisionPlan(envelope, {
+      planId: 'pc-pm-blocked', createdAt: AS_OF, windowEndsAt: AS_OF + 3_600_000,
+    })
+    expect(result).toMatchObject({ ok: false })
+    if (result !== undefined && !result.ok) {
+      expect(result.errors.join('\n')).toContain('尚未进入机械 DSL 执行上下文')
+      expect(result.errors.join('\n')).toContain('独立开仓 gate 尚未验收')
+    }
+  })
 })

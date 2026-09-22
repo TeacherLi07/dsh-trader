@@ -43,6 +43,7 @@ class FakeBroker implements Broker {
   orderCalls = 0
   protectiveCalls = 0
   spreadBps = 0
+  cancelAllCalls: { readonly symbol: string | undefined; readonly includeProtection: boolean }[] = []
 
   constructor(clock: ReplayClock) {
     this.paper = new PaperBroker({
@@ -90,6 +91,7 @@ class FakeBroker implements Broker {
   }
 
   cancelAll(symbol?: string, options?: { readonly includeProtection?: boolean }): Promise<void> {
+    this.cancelAllCalls.push({ symbol, includeProtection: options?.includeProtection === true })
     return this.paper.cancelAll(symbol, options)
   }
 
@@ -207,6 +209,52 @@ describe('live-engine：收盘 bar 驱动计划卡执行', () => {
     expect(auditRows.length).toBeGreaterThan(0)
     expect(auditRows.some((row) => row.payload_json.includes('点差'))).toBe(true)
     h.db.close()
+  })
+
+  it('已保存计划卡命中全局 cancel_all 时审计拒绝且不调用 broker', async () => {
+    const h = harness({
+      commitments: [{
+        id: 'global-cancel', seq: 1, tf: TF, when: 'bar.close == 100',
+        then: { action: 'cancel_all', scope: 'all' },
+      }],
+    })
+
+    try {
+      const result = await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+      expect(result.kind).toBe('denied')
+      expect(h.broker.cancelAllCalls).toEqual([])
+      const audit = h.db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'execute.denied'").get() as
+        { payload_json: string } | undefined
+      expect(audit).toBeDefined()
+      expect(audit?.payload_json).toContain('全局撤单当前禁用')
+      expect(h.journal.hasDecision(result.decisionId ?? '')).toBe(true)
+    } finally {
+      h.db.close()
+    }
+  })
+
+  it('symbol scope cancel_all 仍限定当前标的，并在有仓位时保留保护单', async () => {
+    const h = harness({
+      commitments: [{
+        id: 'symbol-cancel', seq: 1, tf: TF, when: 'bar.close == 100',
+        then: { action: 'cancel_all', scope: 'symbol' },
+      }],
+    })
+
+    try {
+      await h.broker.placeOrder({
+        intentId: 'seed-position', clientOrderId: 'seed-position', decisionId: 'seed-position',
+        symbol: SYMBOL, type: 'market', side: 'buy', qty: 0.1, notionalUsd: 10,
+      })
+      await h.broker.placeProtective({ symbol: SYMBOL, clientOrderId: 'seed-stop', stopLossPrice: 90 })
+      const result = await createLiveEngine(h.deps).onClosedBar({ symbol: SYMBOL, timeframe: TF, barTs: START })
+      expect(result.kind).toBe('executed')
+      expect(h.broker.cancelAllCalls).toEqual([{ symbol: SYMBOL, includeProtection: false }])
+      expect((await h.broker.getPositions()).find((position) => position.symbol === SYMBOL)?.protectedStopPrice)
+        .toBe(90)
+    } finally {
+      h.db.close()
+    }
   })
 
   it('机械执行与工具共享敞口锁，并在锁内重读而非复用进入锁前的账户快照', async () => {

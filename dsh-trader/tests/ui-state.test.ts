@@ -109,8 +109,11 @@ describe('UI state projection', () => {
         spreadBps: 0,
         observedAt: AS_OF,
       },
+      accountObservedAt: AS_OF,
       positions: [],
+      positionsObservedAt: AS_OF,
       openOrders: [],
+      openOrdersObservedAt: AS_OF,
       staleAfterMs: 1_000,
     })
 
@@ -118,5 +121,38 @@ describe('UI state projection', () => {
     expect(state.positions.value).toBeNull()
     expect(state.openOrders.value).toBeNull()
     expect(state.account.credibility).toBe('unknown')
+  })
+
+  it('classifies each exchange query at its own completion time, including empty arrays', () => {
+    const state = projectState({
+      mode: 'paper',
+      venue: 'paper',
+      halted: false,
+      rebuilding: false,
+      asOf: AS_OF,
+      account: {
+        venue: 'paper',
+        equityQuote: 100,
+        totalExposureUsd: 0,
+        pendingExposureUsd: 0,
+        openOrders: 0,
+        leverage: 0,
+        dailyLossUsd: 0,
+        drawdownUsd: 0,
+        consecutiveLosses: 0,
+        spreadBps: 0,
+        observedAt: AS_OF - 2_000,
+      },
+      accountObservedAt: AS_OF - 2_000,
+      positions: [],
+      positionsObservedAt: AS_OF - 2_000,
+      openOrders: [],
+      openOrdersObservedAt: AS_OF - 100,
+      staleAfterMs: 1_000,
+    })
+
+    expect(state.account).toMatchObject({ asOf: AS_OF - 2_000, credibility: 'exchange-stale' })
+    expect(state.positions).toMatchObject({ value: [], asOf: AS_OF - 2_000, credibility: 'exchange-stale' })
+    expect(state.openOrders).toMatchObject({ value: [], asOf: AS_OF - 100, credibility: 'exchange-live' })
   })
 })

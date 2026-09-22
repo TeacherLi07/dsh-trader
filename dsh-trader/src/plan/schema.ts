@@ -281,14 +281,14 @@ export function validatePlanAction(value: unknown): readonly string[] {
   return errors
 }
 
-const DYNAMIC_PM_PATH = /^pm\.[a-z][a-z0-9_]{0,40}\.(prob|mid|spread|volume24h|change1h|change24h|ageMs)$/
-
 function validateWhenExpression(value: unknown, path: string, errors: string[]): void {
   if (typeof value !== 'string' || value.trim() === '') return
   try {
     parseExpression(value)
     for (const referenced of referencedPaths(value)) {
-      if (!(V0_ALLOWED_PATHS as readonly string[]).includes(referenced) && !DYNAMIC_PM_PATH.test(referenced)) {
+      if (referenced.startsWith('pm.')) {
+        errors.push(`${path} 引用了 PM 路径 ${referenced}；该能力尚未进入机械 DSL 执行上下文，且独立开仓 gate 尚未验收，禁止用于计划卡条件`)
+      } else if (!(V0_ALLOWED_PATHS as readonly string[]).includes(referenced)) {
         errors.push(`${path} 引用了未允许的路径：${referenced}`)
       }
     }

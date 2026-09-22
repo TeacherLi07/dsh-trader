@@ -97,6 +97,7 @@ export class PmPoller {
    */
   async runOnce(now = this.options.clock.now()): Promise<PmPollResult> {
     const { store, clients } = this.options
+    let resultAsOf = Math.max(now, this.options.clock.now())
     const alerts: PmPollerAlert[] = []
     const errors: string[] = []
     let marketsSeen = 0
@@ -124,7 +125,9 @@ export class PmPoller {
       })
       for (const item of page.items) {
         const asMarket = item as Parameters<PmStore['upsertMarket']>[0]
-        store.upsertMarket(asMarket, now)
+        const availableAt = this.options.clock.now()
+        resultAsOf = Math.max(resultAsOf, availableAt)
+        store.upsertMarket(asMarket, availableAt)
         marketsSeen += 1
         for (const tokenId of asMarket.clobTokenIds) {
           perToken[tokenId] = {
@@ -152,35 +155,42 @@ export class PmPoller {
           // 尚无盘口：正常状态，不告警、不降级
           continue
         }
-        const bestBid = book.bids.length > 0 ? maxPrice(book.bids) : undefined
-        const bestAsk = book.asks.length > 0 ? minPrice(book.asks) : undefined
-        const mid =
-          bestBid !== undefined && bestAsk !== undefined ? (bestBid + bestAsk) / 2 : undefined
-        const spread = bestBid !== undefined && bestAsk !== undefined ? bestAsk - bestBid : undefined
-        // 流动性与 24h 成交额来自 Gamma 元数据（盘口端点不返回）——
-        // 不写它们则 `liquidityGate` 永远因"缺少流动性数据"拒绝，
-        // novelty 告警会**因为错的理由**一条都不发（专项 ④ 会假通过）。
-        const meta = perToken[tokenId]
-        const wrote = store.recordQuote({
-          tokenId,
-          observedAt: book.observedAt > 0 ? book.observedAt : now,
-          ...(bestBid === undefined ? {} : { bestBid }),
-          ...(bestAsk === undefined ? {} : { bestAsk }),
-          ...(mid === undefined ? {} : { mid }),
-          ...(spread === undefined ? {} : { spread }),
-          ...(meta?.liquidity === null || meta?.liquidity === undefined
-            ? {}
-            : { liquidity: meta.liquidity }),
-          ...(meta?.volume24h === null || meta?.volume24h === undefined
-            ? {}
-            : { volume24h: meta.volume24h }),
-          // 概率的退化路径：没有盘口中间价时用元数据里的最新成交价
-          ...(meta?.lastTradePrice === null || meta?.lastTradePrice === undefined
-            ? {}
-            : { lastTradePrice: meta.lastTradePrice }),
-        })
-        if (wrote) quotesWritten += 1
-        tokensRefreshed += 1
+        const availableAt = this.options.clock.now()
+        resultAsOf = Math.max(resultAsOf, availableAt)
+        if (!Number.isFinite(book.observedAt) || book.observedAt <= 0) {
+          // 缺少可信 source event time 时不拿请求开始时间冒充；没有可核验时间的盘口不可入 PIT。
+          errors.push(`book ${tokenId}: invalid source timestamp`)
+        } else {
+          const bestBid = book.bids.length > 0 ? maxPrice(book.bids) : undefined
+          const bestAsk = book.asks.length > 0 ? minPrice(book.asks) : undefined
+          const mid =
+            bestBid !== undefined && bestAsk !== undefined ? (bestBid + bestAsk) / 2 : undefined
+          const spread = bestBid !== undefined && bestAsk !== undefined ? bestAsk - bestBid : undefined
+          // 流动性与 24h 成交额来自 Gamma 元数据（盘口端点不返回）。它们最多与本次
+          // quote 同时可见，不能借 source timestamp 倒灌到本机收到 book 之前。
+          const meta = perToken[tokenId]
+          const wrote = store.recordQuote({
+            tokenId,
+            observedAt: book.observedAt,
+            availableAt,
+            ...(bestBid === undefined ? {} : { bestBid }),
+            ...(bestAsk === undefined ? {} : { bestAsk }),
+            ...(mid === undefined ? {} : { mid }),
+            ...(spread === undefined ? {} : { spread }),
+            ...(meta?.liquidity === null || meta?.liquidity === undefined
+              ? {}
+              : { liquidity: meta.liquidity }),
+            ...(meta?.volume24h === null || meta?.volume24h === undefined
+              ? {}
+              : { volume24h: meta.volume24h }),
+            // 概率的退化路径：没有盘口中间价时用元数据里的最新成交价
+            ...(meta?.lastTradePrice === null || meta?.lastTradePrice === undefined
+              ? {}
+              : { lastTradePrice: meta.lastTradePrice }),
+          })
+          if (wrote) quotesWritten += 1
+          tokensRefreshed += 1
+        }
       } catch (error) {
         errors.push(`book ${tokenId}: ${String(error)}`)
       }
@@ -191,9 +201,11 @@ export class PmPoller {
           interval: this.options.historyInterval ?? '1d',
         })
         if (points.length > 0) {
+          const availableAt = this.options.clock.now()
+          resultAsOf = Math.max(resultAsOf, availableAt)
           seriesWritten += store.recordSeries(tokenId, points, {
             source: 'data-api.v2',
-            observedAt: now,
+            observedAt: availableAt,
           })
         }
       } catch (error) {
@@ -210,15 +222,16 @@ export class PmPoller {
       })
     }
 
+    resultAsOf = Math.max(resultAsOf, this.options.clock.now())
     return {
-      asOf: now,
+      asOf: resultAsOf,
       degraded,
       marketsSeen,
       tokensRefreshed,
       seriesWritten,
       quotesWritten,
       expiredWatches,
-      snapshots: store.snapshotAt(now),
+      snapshots: store.snapshotAt(resultAsOf),
       alerts,
       errors,
     }

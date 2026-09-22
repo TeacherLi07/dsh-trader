@@ -15,9 +15,9 @@
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
  * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
  * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
- * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型。
+ * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型；v9 为 PM 元数据保存按本机获知时间回放的 append-only 版本；v10 为 PM 盘口补本机可用时刻。
  */
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 10
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -361,6 +361,44 @@ CREATE TABLE IF NOT EXISTS pm_markets (
 CREATE INDEX IF NOT EXISTS pm_markets_slug ON pm_markets (slug);
 CREATE INDEX IF NOT EXISTS pm_markets_open ON pm_markets (closed, end_date);
 
+-- 当前 pm_markets 投影会被 upsert 覆盖；历史 PIT 必须读取当时本机已获知的元数据版本。
+CREATE TABLE IF NOT EXISTS pm_market_versions (
+  version_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  condition_id TEXT NOT NULL,
+  available_at INTEGER NOT NULL CHECK (available_at >= 0),
+  market_id TEXT,
+  slug TEXT NOT NULL,
+  question TEXT NOT NULL,
+  event_id TEXT,
+  event_slug TEXT,
+  tags_json TEXT,
+  outcomes_json TEXT NOT NULL,
+  token_ids_json TEXT NOT NULL,
+  neg_risk INTEGER NOT NULL CHECK (neg_risk IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  start_date INTEGER,
+  end_date INTEGER,
+  closed INTEGER NOT NULL CHECK (closed IN (0, 1)),
+  resolved_at INTEGER,
+  winning_outcome TEXT,
+  liquidity_num REAL,
+  volume24h REAL,
+  first_seen_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL,
+  observed_at INTEGER NOT NULL,
+  revision_fingerprint TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pm_market_versions_pit
+  ON pm_market_versions (condition_id, available_at DESC, version_seq DESC);
+CREATE TRIGGER IF NOT EXISTS pm_market_versions_no_update
+  BEFORE UPDATE ON pm_market_versions BEGIN
+    SELECT RAISE(ABORT, 'pm_market_versions is append-only');
+  END;
+CREATE TRIGGER IF NOT EXISTS pm_market_versions_no_delete
+  BEFORE DELETE ON pm_market_versions BEGIN
+    SELECT RAISE(ABORT, 'pm_market_versions is append-only');
+  END;
+
 -- 概率序列：PIT 回放的唯一合法来源（ts 为毫秒整数；源为秒，边界 ×1000）
 CREATE TABLE IF NOT EXISTS pm_series (
   token_id TEXT NOT NULL,
@@ -376,6 +414,8 @@ CREATE TABLE IF NOT EXISTS pm_series (
 CREATE TABLE IF NOT EXISTS pm_quotes (
   token_id TEXT NOT NULL,
   observed_at INTEGER NOT NULL,
+  -- 上游 source event time 与本机收到响应的时刻分开；旧行 NULL 代表接收时刻未知，PIT 隐藏。
+  available_at INTEGER CHECK (available_at IS NULL OR available_at >= 0),
   best_bid REAL, best_ask REAL, mid REAL, spread REAL,
   last_trade_price REAL, volume24h REAL, liquidity REAL,
   PRIMARY KEY (token_id, observed_at)
@@ -449,6 +489,8 @@ export function migrate(db: SqliteLike): void {
   if (fromVersion < 5 || needsV5Repair(db)) migrateToV5(db)
   if (fromVersion < 7 || needsV7Repair(db)) migrateToV7(db)
   if (fromVersion < 8 || needsV8Repair(db)) migrateToV8(db)
+  if (fromVersion < 9 || needsV9Repair(db)) migrateToV9(db)
+  if (fromVersion < 10 || needsV10Repair(db)) migrateToV10(db)
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
 
@@ -712,6 +754,69 @@ function migrateToV8(db: SqliteLike): void {
       ALTER TABLE outcomes_v8 RENAME TO outcomes;
     `)
   })
+}
+
+/**
+ * v9 为可变的 pm_markets 当前投影补历史版本。旧库只有最后状态可核验，因此只从
+ * max(observed_at, first_seen_at) 起暴露该状态；绝不把它回填成更早已知的历史。
+ */
+function migrateToV9(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+  withMigrationTransaction(db, () => {
+    db.exec(`
+      INSERT INTO pm_market_versions (
+        condition_id, available_at, market_id, slug, question, event_id, event_slug, tags_json,
+        outcomes_json, token_ids_json, neg_risk, created_at, start_date, end_date, closed,
+        resolved_at, winning_outcome, liquidity_num, volume24h, first_seen_at, last_seen_at,
+        observed_at, revision_fingerprint
+      )
+      SELECT condition_id,
+        CASE WHEN observed_at >= first_seen_at THEN observed_at ELSE first_seen_at END,
+        market_id, slug, question, event_id, event_slug, tags_json,
+        outcomes_json, token_ids_json, neg_risk, created_at, start_date, end_date, closed,
+        resolved_at, winning_outcome, liquidity_num, volume24h, first_seen_at, last_seen_at,
+        CASE WHEN observed_at >= first_seen_at THEN observed_at ELSE first_seen_at END,
+        'legacy-v8:' || condition_id || ':' || observed_at
+      FROM pm_markets
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pm_market_versions v WHERE v.condition_id = pm_markets.condition_id
+      ) AND 1;
+    `)
+  })
+}
+
+function needsV9Repair(db: SqliteLike): boolean {
+  const columns = [
+    'version_seq', 'condition_id', 'available_at', 'market_id', 'slug', 'question', 'event_id',
+    'event_slug', 'tags_json', 'outcomes_json', 'token_ids_json', 'neg_risk', 'created_at',
+    'start_date', 'end_date', 'closed', 'resolved_at', 'winning_outcome', 'liquidity_num',
+    'volume24h', 'first_seen_at', 'last_seen_at', 'observed_at', 'revision_fingerprint',
+  ]
+  if (columns.some((column) => !hasColumn(db, 'pm_market_versions', column))) return true
+  if (db.prepare === undefined) return false
+  return db.prepare(`SELECT 1 FROM pm_markets m
+    WHERE NOT EXISTS (
+      SELECT 1 FROM pm_market_versions v WHERE v.condition_id = m.condition_id
+    ) LIMIT 1`).all().length !== 0
+}
+
+/** v10 给 PM quote 增加本机可用时刻；旧行保持 NULL，不能推测历史接收时间。 */
+function migrateToV10(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+  withMigrationTransaction(db, () => {
+    if (!hasColumn(db, 'pm_quotes', 'available_at')) {
+      db.exec('ALTER TABLE pm_quotes ADD COLUMN available_at INTEGER CHECK (available_at IS NULL OR available_at >= 0);')
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS pm_quotes_pit
+      ON pm_quotes (token_id, available_at, observed_at DESC);`)
+  })
+}
+
+function needsV10Repair(db: SqliteLike): boolean {
+  if (!hasColumn(db, 'pm_quotes', 'available_at')) return true
+  if (db.prepare === undefined) return false
+  return db.prepare(`SELECT 1 FROM sqlite_master
+    WHERE type = 'index' AND name = 'pm_quotes_pit'`).all().length === 0
 }
 
 function needsV8Repair(db: SqliteLike): boolean {

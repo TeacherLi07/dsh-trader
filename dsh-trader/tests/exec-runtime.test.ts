@@ -8,6 +8,7 @@ import type { CcxtBalanceLike, CcxtMarketLike, CcxtOrderLike, CcxtPositionLike, 
 import type { AccountSnapshot, OrderRequest } from '../src/exec/broker.js'
 import { validateIntent } from '../src/exec/gate.js'
 import { DecisionJournal } from '../src/exec/journal.js'
+import { executeAction } from '../src/exec/execute-action.js'
 import { createExecRuntime, createRiskStateProvider } from '../src/exec/runtime.js'
 import type { ExecRuntimeConfig } from '../src/exec/ports.js'
 import { HeartbeatStore } from '../src/supervisor/heartbeat.js'
@@ -120,6 +121,63 @@ class FakeExchange implements CcxtProExchangeLike {
 
   async fetchTicker(): Promise<{ bid: number; ask: number }> {
     return { bid: 100, ask: 100.1 }
+  }
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>
+  readonly resolve: (value: T) => void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
+class DeferredPositionsExchange extends FakeExchange {
+  // 让 HTX 撤单复核不等待模拟的最终一致性计时器；取消仍经过同一 broker 流程。
+  override readonly has = { fetchOrder: true, fetchOpenOrders: false, fetchMyTrades: true }
+  #nextPositionRead: { readonly entered: Deferred<void>; readonly release: Deferred<void> } | undefined
+  #nextOpenOrdersRead: { readonly entered: Deferred<void>; readonly release: Deferred<void> } | undefined
+
+  blockNextPositionsRead(): { readonly entered: Promise<void>; readonly release: () => void } {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    this.#nextPositionRead = { entered, release }
+    return { entered: entered.promise, release: () => release.resolve() }
+  }
+
+  blockNextOpenOrdersRead(): { readonly entered: Promise<void>; readonly release: () => void } {
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    this.#nextOpenOrdersRead = { entered, release }
+    return { entered: entered.promise, release: () => release.resolve() }
+  }
+
+  override async fetchPositions(): Promise<readonly CcxtPositionLike[]> {
+    const blocked = this.#nextPositionRead
+    if (blocked !== undefined) {
+      this.#nextPositionRead = undefined
+      blocked.entered.resolve()
+      await blocked.release.promise
+    }
+    return this.positions
+  }
+
+  override async fetchOpenOrders(
+    symbol?: string,
+    since?: number,
+    limit?: number,
+    params?: Readonly<Record<string, unknown>>,
+  ): Promise<readonly CcxtOrderLike[]> {
+    const blocked = this.#nextOpenOrdersRead
+    if (blocked !== undefined) {
+      this.#nextOpenOrdersRead = undefined
+      blocked.entered.resolve()
+      await blocked.release.promise
+    }
+    return super.fetchOpenOrders(symbol, since, limit, params)
   }
 }
 
@@ -291,6 +349,34 @@ describe('ExecRuntime 组合根', () => {
     db.close()
   })
 
+  it('HTX live_auto 无论 spot 或永续符号都拒绝 spot accountType，且在构造交易所前失败', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    let exchangeCalls = 0
+    try {
+      for (const symbol of [SYMBOL, 'BTC/USDT']) {
+        await expect(createExecRuntime(
+          config({
+            mode: 'live_auto', liveArmed: true, venue: 'htx',
+            apiKey: 'key', apiSecret: 'secret', accountType: 'spot',
+            symbols: [symbol], benchmark: symbol,
+          }),
+          {
+            db,
+            clock,
+            createExchange: () => {
+              exchangeCalls += 1
+              return new FakeExchange()
+            },
+          },
+        )).rejects.toThrow(/HTX live_auto 固定使用 swap accountType/)
+        expect(exchangeCalls).toBe(0)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
   it('RiskStateProvider 随已结算亏损样本变化，不是常量 0', () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
@@ -370,6 +456,7 @@ describe('ExecRuntime 组合根', () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     const exchange = new FakeExchange()
+    exchange.markets = { 'ETH/USDT:USDT': { linear: true, swap: true, contractSize: 1 } }
     exchange.positions = [{ symbol: 'ETH/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
     const runtime = await createExecRuntime(
       config({
@@ -464,7 +551,7 @@ describe('ExecRuntime 组合根', () => {
       stopPrice: 90, reduceOnly: false, createdAt: NOW, exchangeOrderId: 'late-open-exchange',
     })
     const exchange = new FakeExchange()
-    exchange.markets = { [SYMBOL]: { linear: true, contractSize: 0.1, precision: { amount: 0.1 } } }
+    exchange.markets = { [SYMBOL]: { linear: true, swap: true, contractSize: 0.1, precision: { amount: 0.1 } } }
     exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2.5, entryPrice: 100, markPrice: 100 }]
     exchange.directOrder = {
       id: 'late-open-exchange', clientOrderId: 'late-open-client', symbol: SYMBOL,
@@ -483,6 +570,166 @@ describe('ExecRuntime 组合根', () => {
       const position = (await runtime.broker.getPositions()).find((item) => item.symbol === SYMBOL)
       expect(position).toMatchObject({ qty: 0.25, protectedStopPrice: 90 })
       expect(runtime.frozenSymbols().has(SYMBOL)).toBe(false)
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('迟到部分成交轮询持有共享账户锁直至落账并挂保护，排队开仓随后重读并被敞口闸拒绝', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const exchange = new DeferredPositionsExchange()
+    const otherSymbol = 'ETH/USDT:USDT'
+    exchange.markets = {
+      [SYMBOL]: { linear: true, swap: true, contractSize: 0.1, precision: { amount: 0.1 } },
+      [otherSymbol]: { linear: true, swap: true, contractSize: 0.1, precision: { amount: 0.1 } },
+    }
+    const runtime = await createExecRuntime(
+      config({
+        mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret',
+        symbols: [SYMBOL, otherSymbol], maxExposureUsd: 40, perOrderCapUsd: 1_000,
+      }),
+      { db, clock, createExchange: () => exchange },
+    )
+    const journal = runtime.getPorts().journal
+    journal.recordDecision({
+      decisionId: 'race-late-open-decision', symbol: SYMBOL, decidedAt: NOW,
+      contextHash: 'race-late-open-context', action: 'open', executed: false,
+    })
+    journal.recordIntent({
+      intentId: 'race-late-open-intent', clientOrderId: 'race-late-open-client',
+      decisionId: 'race-late-open-decision', venue: 'htx', symbol: SYMBOL,
+      state: 'acked', type: 'market', side: 'buy', qty: 1, stopPrice: 90,
+      reduceOnly: false, createdAt: NOW, exchangeOrderId: 'race-late-open-exchange',
+    })
+    exchange.directOrder = {
+      id: 'race-late-open-exchange', clientOrderId: 'race-late-open-client', symbol: SYMBOL,
+      type: 'market', side: 'buy', amount: 10, filled: 2.5, average: 100, status: 'partial',
+    }
+    exchange.openOrders = [exchange.directOrder]
+
+    try {
+      const hold = exchange.blockNextPositionsRead()
+      const reconciliation = runtime.reconcileOnce()
+      await hold.entered
+
+      const balanceReadsBeforeQueuedOpen = exchange.balanceParams.length
+      const freezeSymbol = runtime.getPorts().freezeSymbol
+      const competingOpen = executeAction({
+        journal,
+        broker: runtime.broker,
+        clock,
+        plan: { planId: 'race-other-symbol-plan' },
+        conditionId: 'open-other-symbol',
+        action: {
+          action: 'open', side: 'long', method: 'market',
+          stop: { method: 'structure', level: 90 }, riskFraction: 1,
+        },
+        symbol: otherSymbol,
+        barTs: NOW + 1,
+        referencePrice: 100,
+        atr: null,
+        riskPct: 0.005,
+        mode: 'live_auto',
+        liveArmed: true,
+        limits: { ...EXAMPLE_LIMITS, maxExposureUsd: 40, perOrderCapUsd: 1_000 },
+        reflectionHorizonMs: 4 * 3_600_000,
+        alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
+        frozenSymbols: runtime.frozenSymbols,
+        ...(freezeSymbol === undefined ? {} : { freezeSymbol }),
+      })
+
+      // 锁已由对账持有且停在保护前的持仓确认点；竞争开仓尚未读取账户。
+      expect(exchange.balanceParams).toHaveLength(balanceReadsBeforeQueuedOpen)
+      expect(exchange.createdOrders).toEqual([])
+
+      // 释放模拟的持仓快照延迟，成交量和保护单都必须在锁释放前收敛。
+      exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2.5, entryPrice: 100, markPrice: 100 }]
+      hold.release()
+      const [report, openResult] = await Promise.all([reconciliation, competingOpen])
+
+      expect(report.consistent).toBe(true)
+      expect(journal.fillsForDecision('race-late-open-decision')).toMatchObject([{ qty: 0.25, price: 100 }])
+      expect(exchange.createdOrders).toHaveLength(1)
+      expect(exchange.createdOrders[0]).toMatchObject({ type: 'stop', stopPrice: 90 })
+      expect(openResult).toMatchObject({ executed: false, denied: true })
+      expect(openResult.reason).toContain('超过上限 40')
+      expect(exchange.balanceParams).toHaveLength(balanceReadsBeforeQueuedOpen + 1)
+      expect((await runtime.broker.getPositions()).find((position) => position.symbol === SYMBOL))
+        .toMatchObject({ qty: 0.25, protectedStopPrice: 90 })
+    } finally {
+      await runtime.dispose()
+      db.close()
+    }
+  })
+
+  it('默认只读对账持锁完成快照与冻结，排队开仓重读冻结状态后拒绝', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    const exchange = new DeferredPositionsExchange()
+    const otherSymbol = 'ETH/USDT:USDT'
+    exchange.markets = {
+      [SYMBOL]: { linear: true, swap: true, contractSize: 0.1, precision: { amount: 0.1 } },
+      [otherSymbol]: { linear: true, swap: true, contractSize: 0.1, precision: { amount: 0.1 } },
+    }
+    const runtime = await createExecRuntime(
+      config({
+        mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret',
+        symbols: [SYMBOL, otherSymbol],
+      }),
+      { db, clock, createExchange: () => exchange },
+    )
+    const journal = runtime.getPorts().journal
+    exchange.openOrders = [{
+      id: 'unscoped-orphan-order', clientOrderId: 'unscoped-orphan-client',
+      type: 'limit', side: 'buy', amount: 1, remaining: 1, price: 100, status: 'open',
+    }]
+
+    try {
+      const hold = exchange.blockNextOpenOrdersRead()
+      const reconciliation = runtime.reconcileOnce()
+      await hold.entered
+
+      const balanceReadsBeforeQueuedOpen = exchange.balanceParams.length
+      const competingOpen = executeAction({
+        journal,
+        broker: runtime.broker,
+        clock,
+        plan: { planId: 'reconcile-freeze-other-symbol-plan' },
+        conditionId: 'open-during-readonly-reconcile',
+        action: {
+          action: 'open', side: 'long', method: 'market',
+          stop: { method: 'structure', level: 90 }, riskFraction: 1,
+        },
+        symbol: otherSymbol,
+        barTs: NOW + 2,
+        referencePrice: 100,
+        atr: null,
+        riskPct: 0.005,
+        mode: 'live_auto',
+        liveArmed: true,
+        limits: EXAMPLE_LIMITS,
+        reflectionHorizonMs: 4 * 3_600_000,
+        alreadyIntended: (clientOrderId) => journal.hasClientOrderId(clientOrderId),
+        frozenSymbols: runtime.frozenSymbols,
+      })
+
+      expect(exchange.balanceParams).toHaveLength(balanceReadsBeforeQueuedOpen)
+      expect(exchange.createOrderCalls).toBe(0)
+
+      hold.release()
+      const [report, openResult] = await Promise.all([reconciliation, competingOpen])
+
+      expect(report.actions).toContainEqual(expect.objectContaining({ kind: 'cancel_orphan' }))
+      expect(report.freezeTrading).toBe(true)
+      expect(runtime.frozenSymbols().has(otherSymbol)).toBe(true)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'reconcile_report'").get())
+        .toMatchObject({ n: 2 })
+      expect(openResult).toMatchObject({ executed: false, denied: true })
+      expect(openResult.reason).toContain('已被冻结')
+      expect(exchange.balanceParams).toHaveLength(balanceReadsBeforeQueuedOpen + 1)
+      expect(exchange.createOrderCalls).toBe(0)
     } finally {
       await runtime.dispose()
       db.close()
@@ -608,6 +855,10 @@ describe('ExecRuntime 组合根', () => {
       amount: 1,
       fee: { cost: 0.01 },
     }]
+    exchange.markets = {
+      [SYMBOL]: { linear: true, swap: true, contractSize: 1 },
+      'OTHER/USDT:USDT': { linear: true, swap: true, contractSize: 1 },
+    }
     exchange.positions = [{ symbol: 'OTHER/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
     try {
       const runtime = await createExecRuntime(
@@ -676,6 +927,7 @@ describe('ExecRuntime 组合根', () => {
     const clock = new ReplayClock(NOW)
     const symbols = [SYMBOL, 'ETH/USDT:USDT']
     const exchange = new FakeExchange()
+    exchange.markets = { 'DOGE/USDT:USDT': { linear: true, swap: true, contractSize: 1 } }
     exchange.positions = [{ symbol: 'DOGE/USDT:USDT', contracts: 1, entryPrice: 100, markPrice: 100 }]
     const runtime = await createExecRuntime(
       config({

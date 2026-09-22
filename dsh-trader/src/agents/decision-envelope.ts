@@ -2,6 +2,8 @@
 
 import type { DecisionContext } from './decision-context.js'
 import { computeSize, stopPriceFor } from '../exec/sizing.js'
+import { createDslContext, referencedPaths } from '../plan/evaluate.js'
+import { compileExpression, type Primitive } from '../plan/dsl.js'
 import {
   ACTION_KINDS,
   computeContentHash,
@@ -163,6 +165,185 @@ export const DECISION_ENVELOPE_SCHEMA_VERSION = fingerprint(DECISION_ENVELOPE_TO
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function recordAt(root: unknown, ...keys: readonly string[]): Record<string, unknown> | undefined {
+  let value = root
+  for (const key of keys) {
+    if (!isRecord(value)) return undefined
+    value = value[key]
+  }
+  return isRecord(value) ? value : undefined
+}
+
+function visibleDslBar(
+  context: DecisionContext,
+  timeframe: string,
+  previous: boolean,
+): Record<string, unknown> | undefined {
+  const slice = recordAt(context.sections.market.value, 'timeframes', timeframe)
+  const bars = slice?.['bars']
+  if (!Array.isArray(bars) || slice?.['status'] === 'stale') return undefined
+  const index = bars.length - (previous ? 2 : 1)
+  const selected = bars[index]
+  if (!isRecord(selected)) return undefined
+  const openTime = finiteNumber(selected['openTime'])
+  const closeTime = finiteNumber(selected['closeTime'])
+  const availableAt = finiteNumber(selected['availableAt'])
+  if (openTime === undefined || closeTime === undefined || availableAt === undefined ||
+      !Number.isSafeInteger(openTime) || !Number.isSafeInteger(closeTime) || !Number.isSafeInteger(availableAt) ||
+      openTime >= closeTime || closeTime > context.asOf || availableAt < closeTime || availableAt > context.asOf) return undefined
+  if (previous) {
+    const current = bars.at(-1)
+    if (!isRecord(current)) return undefined
+    const currentOpenTime = finiteNumber(current['openTime'])
+    if (currentOpenTime === undefined || currentOpenTime !== closeTime) return undefined
+  }
+  return selected
+}
+
+function availableFeature(
+  context: DecisionContext,
+  timeframe: string,
+  key: string,
+  previous = false,
+): Primitive | undefined {
+  const feature = recordAt(context.sections.market.value, 'timeframes', timeframe, 'features', key)
+  const fact = previous && feature !== undefined && isRecord(feature['previous'])
+    ? feature['previous'] : previous ? undefined : feature
+  const expectedBar = visibleDslBar(context, timeframe, previous)
+  if (fact === undefined || fact['status'] !== 'ok' || expectedBar === undefined) return undefined
+  const value = fact['value']
+  if (typeof value !== 'boolean' && (typeof value !== 'number' || !Number.isFinite(value))) return undefined
+  const asOf = finiteNumber(fact['asOf'])
+  const availableAt = finiteNumber(fact['availableAt'])
+  const expectedEventTime = finiteNumber(expectedBar['closeTime'])
+  if (asOf === undefined || availableAt === undefined || expectedEventTime === undefined ||
+      asOf !== expectedEventTime || availableAt < asOf || availableAt > context.asOf) return undefined
+  return value
+}
+
+function availableBarValue(
+  context: DecisionContext,
+  timeframe: string,
+  key: string,
+  previous = false,
+): Primitive | undefined {
+  const bar = visibleDslBar(context, timeframe, previous)
+  if (bar === undefined) return undefined
+  const value = bar[key]
+  return typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ? value : undefined
+}
+
+function decisionDslPathValue(context: DecisionContext, timeframe: string, path: string, previous = false): Primitive | undefined {
+  const barPaths: Readonly<Record<string, string>> = {
+    'bar.open': 'open', 'bar.high': 'high', 'bar.low': 'low', 'bar.close': 'close', 'bar.volume': 'volume',
+  }
+  const barKey = barPaths[path]
+  if (barKey !== undefined) return availableBarValue(context, timeframe, barKey, previous)
+  if (path === 'price.last') return availableBarValue(context, timeframe, 'close', previous)
+
+  const featurePaths: Readonly<Record<string, string>> = {
+    ema20: 'ema20', ema50: 'ema50', rsi14: 'rsi14', atr14: 'atr14', adx14: 'adx14',
+    vwap20: 'vwap20', zscore20: 'zscore20', volRealized20: 'volRealized20',
+    'funding.rate': 'fundingRate', 'oi.changePct': 'oiChangePct',
+    'liq.notional': 'liqNotional', 'basis.bps': 'basisBps',
+  }
+  const featureKey = featurePaths[path]
+  if (featureKey !== undefined) return availableFeature(context, timeframe, featureKey, previous)
+  if (previous) return undefined
+
+  if (path === 'equity.quote' || path.startsWith('position.')) {
+    const portfolio = context.sections.portfolio.value
+    if (!isRecord(portfolio)) return undefined
+    const missing = context.sections.portfolio.missing
+    if ((finiteNumber(portfolio['hiddenPositionCount']) ?? 0) > 0 ||
+        (finiteNumber(portfolio['hiddenOpenOrderCount']) ?? 0) > 0 ||
+        portfolio['positionsReadErrorType'] !== null || portfolio['openOrdersReadErrorType'] !== null) return undefined
+    if (missing.some((item) => item.startsWith('account.') || item.startsWith('positions.') || item.startsWith('openOrders.'))) return undefined
+    const account = isRecord(portfolio['account']) ? portfolio['account'] : undefined
+    if (account === undefined) return undefined
+    if (path === 'equity.quote') return finiteNumber(account['equityQuote'])
+    const positions = portfolio['positions']
+    if (!Array.isArray(positions)) return undefined
+    const position = positions.find((item) => isRecord(item) && item['symbol'] === context.symbol)
+    if (position === undefined) {
+      if (path === 'position.qty' || path === 'position.avgPrice' || path === 'position.unrealizedPnl') return 0
+      return undefined
+    }
+    if (!isRecord(position)) return undefined
+    if (path === 'position.qty') return finiteNumber(position['qty'])
+    if (path === 'position.avgPrice') return finiteNumber(position['avgPrice'])
+    if (path === 'position.unrealizedPnl') return finiteNumber(position['unrealizedPnlUsd'])
+    return undefined
+  }
+  if (path === 'plan.ageMs' || path === 'window.sinceMs') return 0
+
+  const pmMatch = /^pm\.([a-z][a-z0-9_]{0,40})\.(prob|mid|spread|volume24h|change1h|change24h|ageMs)$/.exec(path)
+  if (pmMatch !== null) {
+    const metric = pmMatch[2]
+    if (metric === undefined) return undefined
+    const predictions = context.sections.predictions.value
+    if (!isRecord(predictions) || predictions['state'] !== 'available' || !Array.isArray(predictions['items'])) return undefined
+    const item = predictions['items'].find((candidate) => isRecord(candidate) && candidate['alias'] === pmMatch[1])
+    if (!isRecord(item)) return undefined
+    const observedAt = finiteNumber(item['quoteObservedAt'])
+    const ageMs = finiteNumber(item['ageMs'])
+    const config = recordAt(context.sections.mandate.value, 'contextConfig')
+    const maxAge = finiteNumber(config?.['marketGraceMs'])
+    if (observedAt === undefined || observedAt > context.asOf || ageMs === undefined || maxAge === undefined || ageMs > maxAge) return undefined
+    if (metric === 'prob') {
+      const probability = item['probability']
+      return isRecord(probability) && probability['status'] === 'ok' ? finiteNumber(probability['value']) : undefined
+    }
+    return finiteNumber(metric === 'ageMs' ? item['ageMs'] : item[metric])
+  }
+  return undefined
+}
+
+function openPlanDependencyIssues(context: DecisionContext, envelope: DecisionEnvelopeCandidate): string[] {
+  const conditions = [
+    ...(envelope.plan?.commitments ?? []).filter((item) => actionHasOpen(item.then)),
+    ...(envelope.plan?.invalidation ?? []).filter((item) => actionHasOpen(item.then)),
+  ]
+  const issues: string[] = []
+  for (const condition of conditions) {
+    const label = `plan.${condition.id}`
+    try {
+      const compiled = compileExpression(condition.when)
+      const runtime = recordAt(context.sections.mandate.value, 'runtime')
+      const configuredTimeframes = runtime?.['timeframes']
+      if (Array.isArray(configuredTimeframes) && !configuredTimeframes.includes(condition.tf)) {
+        issues.push(`${label} timeframe 未配置：${condition.tf}`)
+      }
+      const paths = referencedPaths(condition.when)
+      const values: Record<string, Primitive> = {}
+      for (const path of paths) {
+        const value = decisionDslPathValue(context, condition.tf, path)
+        if (value === undefined) {
+          issues.push(`${label} DSL 依赖缺失/过期/未知：${path}`)
+        } else {
+          values[path] = value
+        }
+      }
+      const previousValues: Record<string, Primitive> = {}
+      const requiresPrevious = /\bcross(?:Above|Below)\s*\(/.test(condition.when)
+      for (const path of paths) {
+        const value = decisionDslPathValue(context, condition.tf, path, true)
+        if (value !== undefined) previousValues[path] = value
+        else if (requiresPrevious) issues.push(`${label} DSL 前值缺失/过期/未对齐：${path}`)
+      }
+      const evaluated = compiled(createDslContext(values, undefined, previousValues))
+      if (!evaluated.ok) issues.push(`${label} DSL 当前不可求值：${evaluated.reason}`)
+    } catch (error) {
+      issues.push(`${label} DSL 编译失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  return issues
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -331,8 +512,10 @@ export function evaluateDecisionEligibility(
   const openActions = [
     ...(actionHasOpen(envelope.immediateAction) ? [envelope.immediateAction] : []),
     ...(envelope.plan?.commitments.flatMap((item) => actionHasOpen(item.then) ? [item.then] : []) ?? []),
+    ...(envelope.plan?.invalidation.flatMap((item) => actionHasOpen(item.then) ? [item.then] : []) ?? []),
   ]
   if (openActions.length === 0) return { state: 'decision_only', reasons, validatedEvidencePaths: [] }
+  reasons.push(...openPlanDependencyIssues(context, envelope))
 
   const portfolio = isRecord(context.sections.portfolio.value) ? context.sections.portfolio.value : undefined
   const account = portfolio !== undefined && isRecord(portfolio['account']) ? portfolio['account'] : undefined
@@ -354,6 +537,25 @@ export function evaluateDecisionEligibility(
   const config = mandate !== undefined && isRecord(mandate['contextConfig']) ? mandate['contextConfig'] : undefined
   const maxAccountAgeMs = config !== undefined && typeof config['accountMaxAgeMs'] === 'number' ? config['accountMaxAgeMs'] : 0
   const maxSpecAgeMs = config !== undefined && typeof config['specMaxAgeMs'] === 'number' ? config['specMaxAgeMs'] : 0
+
+  if (portfolio !== undefined) {
+    if ((finiteNumber(portfolio['hiddenPositionCount']) ?? 0) > 0) reasons.push('portfolio contains hidden position snapshots')
+    if ((finiteNumber(portfolio['hiddenOpenOrderCount']) ?? 0) > 0) reasons.push('portfolio contains hidden open-order snapshots')
+    for (const [kind, field] of [['position', 'positions'], ['open order', 'openOrders']] as const) {
+      const rows = portfolio[field]
+      if (!Array.isArray(rows)) continue
+      for (const [index, item] of rows.entries()) {
+        if (!isRecord(item)) {
+          reasons.push(`portfolio ${kind}[${index}] snapshot invalid`)
+          continue
+        }
+        const observedAt = finiteNumber(item['observedAt'])
+        if (observedAt === undefined) reasons.push(`portfolio ${kind}[${index}] observedAt missing/invalid`)
+        else if (observedAt > now) reasons.push(`portfolio ${kind}[${index}] observedAt is in the future`)
+        else if (now - observedAt > maxAccountAgeMs) reasons.push(`portfolio ${kind}[${index}] snapshot stale`)
+      }
+    }
+  }
 
   if (account === undefined || !Number.isFinite(account['equityQuote']) || Number(account['equityQuote']) <= 0) reasons.push('portfolio.account.equityQuote unavailable')
   if (account === undefined || !Number.isFinite(account['pendingExposureUsd']) || Number(account['pendingExposureUsd']) < 0) reasons.push('portfolio.account.pendingExposureUsd unavailable')

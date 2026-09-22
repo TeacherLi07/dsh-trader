@@ -77,6 +77,48 @@ describe('FeatureArchive', () => {
     expect(archive.get(SYMBOL, TF, original.openTime)?.fingerprint).toBe('sha256:changed')
   })
 
+  it('历史修订失效当前后缀，但 PIT 只在真实可见时刻切到空值标记', () => {
+    const bars = normalizeCandles(randomSeries(START, 30), SYMBOL, TF, START + 30 * HOUR).candles
+    const engine = new FeatureEngine()
+    const observations = new MarketObservationStore(db)
+    for (const bar of bars) archive.upsert(engine.onClosedCandle(bar), bar.closeTime + 100)
+
+    const revisedBar = bars[5]!
+    const revisedSnapshot = archive.get(SYMBOL, TF, revisedBar.openTime)!
+    const historicalAsOf = bars[15]!.closeTime + 100
+    const correctionAvailableAt = bars.at(-1)!.closeTime + 1_000
+    const before = observations
+      .recent<FeatureSnapshot>('feature', SYMBOL, TF, historicalAsOf, 30)
+      .find((item) => item.eventTime === revisedSnapshot.closeTime)
+    expect(before).toBeDefined()
+
+    const invalidated = archive.invalidateFrom(
+      SYMBOL,
+      TF,
+      revisedBar.openTime,
+      correctionAvailableAt,
+    )
+
+    expect(invalidated).toBe(25)
+    expect(archive.get(SYMBOL, TF, revisedBar.openTime)).toBeUndefined()
+    expect(archive.latest(SYMBOL, TF)?.openTime).toBe(bars[4]!.openTime)
+
+    const stillHistorical = observations
+      .recent<FeatureSnapshot>('feature', SYMBOL, TF, historicalAsOf, 30)
+      .find((item) => item.eventTime === revisedSnapshot.closeTime)
+    expect(stillHistorical).toEqual(before)
+
+    const afterCorrection = observations
+      .recent<FeatureSnapshot & { readonly invalidated?: boolean }>(
+        'feature', SYMBOL, TF, correctionAvailableAt, 30,
+      )
+      .find((item) => item.eventTime === revisedSnapshot.closeTime)
+    expect(afterCorrection).toMatchObject({
+      availableAt: correctionAvailableAt,
+      value: { invalidated: true, recoveryRequired: true, values: { close: null, ema20: null } },
+    })
+  })
+
   it('scopes by symbol/timeframe and reports the latest bar', () => {
     const bars = normalizeCandles(randomSeries(START, 25), SYMBOL, TF, START + 25 * HOUR).candles
     const engine = new FeatureEngine()

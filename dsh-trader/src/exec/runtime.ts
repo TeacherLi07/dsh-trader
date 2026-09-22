@@ -273,6 +273,9 @@ function validateConfig(config: ExecRuntimeConfig, limits: RiskLimits | null): v
     if (typeof config.accountType !== 'string' || config.accountType.trim() === '') {
       throw new Error('实盘 accountType 必须显式提供')
     }
+    if (config.venue === 'htx' && config.accountType !== 'swap') {
+      throw new Error('HTX live_auto 固定使用 swap accountType；拒绝读取错误账户计算实盘风险')
+    }
   }
   finitePositive(config.paperInitialEquityQuote, 'paperInitialEquityQuote')
   finiteNonNegative(config.paperSlippageBps, 'paperSlippageBps')
@@ -515,10 +518,10 @@ export async function createExecRuntime(
     }
   }
 
-  const protectLateOpen = async (
+  const protectLateOpenUnlocked = async (
     intent: ReturnType<DecisionJournal['pollableIntents']>[number],
     ack?: OrderAck,
-  ): Promise<void> => withExposureLock(journal, async () => {
+  ): Promise<void> => {
     if (intent.reduceOnly) return
     if (intent.decisionId === null) {
       frozen.add(intent.symbol)
@@ -592,26 +595,22 @@ export async function createExecRuntime(
         ts: deps.clock.now(),
       })
     }
-  })
+  }
 
   const reconcileOperation = async (): Promise<ExecReconciliationReport> => {
     const ranAt = deps.clock.now()
     // HTX 市价/算法单可能先 ack 后成交；每轮对账先按 exchangeOrderId 查询，
     // 把 delayed fill 走同一 journal 状态机，避免只更新远端仓位却丢本地成交链。
-    if (broker.findOrderByExchangeOrderId !== undefined) {
+    const findOrderByExchangeOrderId = broker.findOrderByExchangeOrderId
+    if (findOrderByExchangeOrderId !== undefined) {
       for (const intent of journal.pollableIntents()) {
-        let ack: Awaited<ReturnType<NonNullable<Broker['findOrderByExchangeOrderId']>>> | undefined
-        try {
-          ack = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
-        } catch (error) {
-          if (intent.feePending) {
-            journal.appendAudit({ actor: 'system', kind: 'fill_fee_refresh_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
-          } else {
-            frozen.add(intent.symbol)
-            journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
-          }
-        }
         if (intent.feePending) {
+          let ack: Awaited<ReturnType<NonNullable<Broker['findOrderByExchangeOrderId']>>> | undefined
+          try {
+            ack = await findOrderByExchangeOrderId.call(broker, intent.exchangeOrderId, intent.symbol)
+          } catch (error) {
+            journal.appendAudit({ actor: 'system', kind: 'fill_fee_refresh_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+          }
           // 终态成交只因费用尚未回填而重试；不重复运行迟到开仓保护逻辑，避免旧决策给新仓位挂旧止损。
           if (ack?.fee !== undefined && ack.state === intent.state) {
             journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now())
@@ -624,83 +623,119 @@ export async function createExecRuntime(
           }
           continue
         }
+
+        // 开仓轮询与执行共享账户锁：必须把订单查询、必要的撤单/最终查询、成交落账和
+        // 持仓保护作为一个临界区，避免另一标的在“挂单已消失、仓位快照尚未更新”时过闸。
+        if (!intent.reduceOnly) {
+          await withExposureLock(journal, async () => {
+            let ack: Awaited<ReturnType<NonNullable<Broker['findOrderByExchangeOrderId']>>> | undefined
+            try {
+              ack = await findOrderByExchangeOrderId.call(broker, intent.exchangeOrderId, intent.symbol)
+            } catch (error) {
+              frozen.add(intent.symbol)
+              journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+            }
+            if (ack === undefined) {
+              journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+              frozen.add(intent.symbol)
+              journal.appendAudit({ actor: 'system', kind: 'order_lookup_missing', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, clientOrderId: intent.clientOrderId }, ts: deps.clock.now() })
+              await protectLateOpenUnlocked(intent)
+              return
+            }
+
+            if (broker.venue === 'htx' && ack.state === 'acked') {
+              let finalLookupMissing = false
+              try {
+                await broker.cancelOrder(intent.exchangeOrderId)
+              } catch (error) {
+                journal.appendAudit({ actor: 'system', kind: 'open_order_cancel_uncertain', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+              }
+              try {
+                const settled = await findOrderByExchangeOrderId.call(broker, intent.exchangeOrderId, intent.symbol)
+                if (settled !== undefined) ack = settled
+                else {
+                  journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+                  frozen.add(intent.symbol)
+                  finalLookupMissing = true
+                }
+              } catch (error) {
+                journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+                frozen.add(intent.symbol)
+                finalLookupMissing = true
+                journal.appendAudit({ actor: 'system', kind: 'open_order_final_lookup_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+              }
+              if (finalLookupMissing) {
+                await protectLateOpenUnlocked(intent, ack)
+                return
+              }
+              if (ack.state === 'acked') {
+                journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
+                frozen.add(intent.symbol)
+                await protectLateOpenUnlocked(intent)
+                return
+              }
+            }
+
+            const applied = journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now())
+            if (applied.unknown) frozen.add(intent.symbol)
+            await protectLateOpenUnlocked(intent, ack)
+          })
+          continue
+        }
+
+        let ack: Awaited<ReturnType<NonNullable<Broker['findOrderByExchangeOrderId']>>> | undefined
+        try {
+          ack = await findOrderByExchangeOrderId.call(broker, intent.exchangeOrderId, intent.symbol)
+        } catch (error) {
+          frozen.add(intent.symbol)
+          journal.appendAudit({ actor: 'system', kind: 'order_poll_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
+        }
         if (ack === undefined) {
           journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
           frozen.add(intent.symbol)
           journal.appendAudit({ actor: 'system', kind: 'order_lookup_missing', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, clientOrderId: intent.clientOrderId }, ts: deps.clock.now() })
-          await protectLateOpen(intent)
           continue
-        }
-        if (broker.venue === 'htx' && !intent.reduceOnly && ack.state === 'acked') {
-          let finalLookupMissing = false
-          try {
-            await broker.cancelOrder(intent.exchangeOrderId)
-          } catch (error) {
-            journal.appendAudit({ actor: 'system', kind: 'open_order_cancel_uncertain', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
-          }
-          try {
-            const settled = await broker.findOrderByExchangeOrderId(intent.exchangeOrderId, intent.symbol)
-            if (settled !== undefined) ack = settled
-            else {
-              journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
-              frozen.add(intent.symbol)
-              finalLookupMissing = true
-            }
-          } catch (error) {
-            journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
-            frozen.add(intent.symbol)
-            finalLookupMissing = true
-            journal.appendAudit({ actor: 'system', kind: 'open_order_final_lookup_failed', payload: { symbol: intent.symbol, exchangeOrderId: intent.exchangeOrderId, error: String(error) }, ts: deps.clock.now() })
-          }
-          if (finalLookupMissing) {
-            await protectLateOpen(intent, ack)
-            continue
-          }
-          if (ack.state === 'acked') {
-            journal.markIntentAcked(intent.clientOrderId, 'unknown', intent.exchangeOrderId, deps.clock.now())
-            frozen.add(intent.symbol)
-            await protectLateOpen(intent)
-            continue
-          }
         }
         const applied = journal.applyOrderAck({ ...ack, clientOrderId: intent.clientOrderId }, deps.clock.now())
         if (applied.unknown) frozen.add(intent.symbol)
-        await protectLateOpen(intent, ack)
       }
     }
     if (!acknowledgeOrphans) {
-      const [remoteOrders, remotePositions] = await Promise.all([broker.getOpenOrders(), broker.getPositions()])
-      const result = reconcile({
-        localOrders: local.orders(),
-        remoteOrders: remoteOrders.map((order) => ({
-          ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
-          ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
-          ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
-        })),
-        localPositions: local.positions(),
-        remotePositions: remotePositions.map((position) => ({
-          symbol: position.symbol,
-          qty: position.qty,
-          ...(position.protectedStopPrice === undefined ? {} : { protectedStopPrice: position.protectedStopPrice }),
-        })),
+      // 只读对账也会产生冻结裁决；快照、判定、冻结和审计必须先于排队开仓的锁内重读。
+      return await withExposureLock(journal, async () => {
+        const [remoteOrders, remotePositions] = await Promise.all([broker.getOpenOrders(), broker.getPositions()])
+        const result = reconcile({
+          localOrders: local.orders(),
+          remoteOrders: remoteOrders.map((order) => ({
+            ...(order.clientOrderId === undefined ? {} : { clientOrderId: order.clientOrderId }),
+            ...(order.exchangeOrderId === undefined ? {} : { exchangeOrderId: order.exchangeOrderId }),
+            ...(order.symbol === undefined ? {} : { symbol: order.symbol }),
+          })),
+          localPositions: local.positions(),
+          remotePositions: remotePositions.map((position) => ({
+            symbol: position.symbol,
+            qty: position.qty,
+            ...(position.protectedStopPrice === undefined ? {} : { protectedStopPrice: position.protectedStopPrice }),
+          })),
+        })
+        updateFrozen(result.actions)
+        // 第①步只报告不撤单；仍写入完整审计，方便解释为何没有执行动作。
+        journal.appendAudit({
+          actor: 'system',
+          kind: 'reconcile_report',
+          payload: { acknowledgeOrphans, result, applied: [] },
+          ts: ranAt,
+        })
+        return {
+          ranAt,
+          acknowledgeOrphans: false,
+          result,
+          actions: result.actions,
+          consistent: result.consistent,
+          applied: [],
+          freezeTrading: result.freezeTrading,
+        }
       })
-      updateFrozen(result.actions)
-      // 第①步只报告不撤单；仍写入完整审计，方便解释为何没有执行动作。
-      journal.appendAudit({
-        actor: 'system',
-        kind: 'reconcile_report',
-        payload: { acknowledgeOrphans, result, applied: [] },
-        ts: ranAt,
-      })
-      return {
-        ranAt,
-        acknowledgeOrphans: false,
-        result,
-        actions: result.actions,
-        consistent: result.consistent,
-        applied: [],
-        freezeTrading: result.freezeTrading,
-      }
     }
 
     const reconciler = new Reconciler({
@@ -717,7 +752,8 @@ export async function createExecRuntime(
         journal.appendAudit({ actor: 'system', kind: 'reconcile_action', payload: event, ts: event.at })
       },
     })
-    const reconcilerResult: ReconcilerResult = await reconciler.runOnce()
+    // 孤儿撤单同样会改变账户在途敞口；快照、撤单和 freeze 回调与开仓串行化。
+    const reconcilerResult: ReconcilerResult = await withExposureLock(journal, () => reconciler.runOnce())
     updateFrozen(reconcilerResult.result.actions)
     journal.appendAudit({
       actor: 'system',

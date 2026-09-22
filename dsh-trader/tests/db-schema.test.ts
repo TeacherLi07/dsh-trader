@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION, migrate } from '../src/db/schema.js'
+import { PmStore } from '../src/predictions/store.js'
 
 let db: Database.Database
 
@@ -60,6 +61,7 @@ describe('schema (plan §4.1 invariants)', () => {
       'supervisor_window_cursors',
       'supervisor_windows',
       'pm_markets',
+      'pm_market_versions',
       'pm_series',
       'pm_quotes',
       'pm_watches',
@@ -71,6 +73,44 @@ describe('schema (plan §4.1 invariants)', () => {
   it('is idempotent and records the schema version', () => {
     expect(() => migrate(db)).not.toThrow()
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+  })
+
+  it('v10 给旧 PM quotes 保留未知 availability，并在同 source key 首次重读时补真实可见时刻', () => {
+    db.exec(`
+      DROP TABLE pm_quotes;
+      CREATE TABLE pm_quotes (
+        token_id TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        best_bid REAL, best_ask REAL, mid REAL, spread REAL,
+        last_trade_price REAL, volume24h REAL, liquidity REAL,
+        PRIMARY KEY (token_id, observed_at)
+      ) WITHOUT ROWID;
+      INSERT INTO pm_quotes (token_id, observed_at, mid) VALUES ('legacy-token', 100, 0.4);
+      PRAGMA user_version = 9;
+    `)
+
+    migrate(db)
+    expect(db.pragma('user_version', { simple: true })).toBe(10)
+    const columns = db.prepare('PRAGMA table_info(pm_quotes)').all() as { name: string }[]
+    expect(columns.map((column) => column.name)).toContain('available_at')
+    expect(db.prepare('SELECT available_at FROM pm_quotes WHERE token_id = ?').get('legacy-token'))
+      .toEqual({ available_at: null })
+
+    const pm = new PmStore(db, { liquidity: { liquidityFloorQuote: 1_000, spreadCeilBps: 200 } })
+    expect(pm.latestQuoteAsOf('legacy-token', 10_000)).toBeUndefined()
+    expect(pm.recordQuote({ tokenId: 'legacy-token', observedAt: 100, availableAt: 200, mid: 0.9 })).toBe(true)
+    expect(pm.latestQuoteAsOf('legacy-token', 199)).toBeUndefined()
+    expect(pm.latestQuoteAsOf('legacy-token', 200)).toMatchObject({
+      observedAt: 100,
+      availableAt: 200,
+      mid: 0.4,
+    })
+    // 再次命中既有 key 不改 source 行内容、availability，也不产生第二条 quote。
+    expect(pm.recordQuote({ tokenId: 'legacy-token', observedAt: 100, availableAt: 300, mid: 0.9 })).toBe(false)
+    expect(db.prepare('SELECT count(*) AS count FROM pm_quotes WHERE token_id = ?').get('legacy-token'))
+      .toEqual({ count: 1 })
+    expect(pm.latestQuoteAsOf('legacy-token', 300)?.availableAt).toBe(200)
+    expect(() => migrate(db)).not.toThrow()
   })
 
   it('v8 outcomes 用 NULL 表示未知净额/基准，并要求资金费值与来源成对持久化', () => {
@@ -352,6 +392,66 @@ describe('schema (plan §4.1 invariants)', () => {
     // 同一时刻的"桶观测"与"精确 tick"可以并存（resolution_seconds=0 表示精确 tick）
     insert(1_700_000_000_000, 3600)
     expect(() => insert(1_700_000_000_000, 0)).toThrow()
+  })
+
+  it('v9 把旧 PM 当前行保守迁成最后可核验时刻的 append-only 元数据版本', () => {
+    const insertLegacy = (conditionId: string, firstSeenAt: number, lastSeenAt: number, observedAt: number): void => {
+      db.prepare(`INSERT INTO pm_markets (
+        condition_id, slug, question, outcomes_json, token_ids_json, created_at,
+        first_seen_at, last_seen_at, observed_at
+      ) VALUES (?, ?, 'last known question', '["Yes"]', '["77"]', 100, ?, ?, ?)`)
+        .run(conditionId, `${conditionId}-slug`, firstSeenAt, lastSeenAt, observedAt)
+    }
+    insertLegacy('legacy-observed-later', 1000, 2000, 2000)
+    insertLegacy('legacy-first-seen-later', 3000, 3000, 2500)
+    db.exec(`DROP TRIGGER pm_market_versions_no_update;
+      DROP TRIGGER pm_market_versions_no_delete;
+      DROP INDEX pm_market_versions_pit;
+      DROP TABLE pm_market_versions;
+      PRAGMA user_version = 8;`)
+
+    migrate(db)
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+    const versions = db.prepare(`SELECT condition_id, available_at, observed_at, question, revision_fingerprint
+      FROM pm_market_versions ORDER BY condition_id`).all() as {
+      condition_id: string
+      available_at: number
+      observed_at: number
+      question: string
+      revision_fingerprint: string
+    }[]
+    expect(versions).toHaveLength(2)
+    expect(versions[0]).toMatchObject({
+      condition_id: 'legacy-first-seen-later',
+      available_at: 3000,
+      observed_at: 3000,
+      question: 'last known question',
+    })
+    expect(versions[0]?.revision_fingerprint).toContain('legacy-v8:')
+    expect(versions[1]).toMatchObject({
+      condition_id: 'legacy-observed-later',
+      available_at: 2000,
+      observed_at: 2000,
+    })
+    const migratedStore = new PmStore(db, {
+      liquidity: { liquidityFloorQuote: 1_000, spreadCeilBps: 200 },
+    })
+    expect(migratedStore.marketsVisibleAt(1999)).toHaveLength(0)
+    expect(migratedStore.marketsVisibleAt(2000).map((row) => row.conditionId)).toEqual([
+      'legacy-observed-later',
+    ])
+    expect(migratedStore.marketsVisibleAt(2999).map((row) => row.conditionId)).toEqual([
+      'legacy-observed-later',
+    ])
+    expect(migratedStore.marketsVisibleAt(3000).map((row) => row.conditionId)).toEqual([
+      'legacy-first-seen-later',
+      'legacy-observed-later',
+    ])
+    expect(() => db.prepare(`UPDATE pm_market_versions SET question = 'rewritten'`).run()).toThrow(/append-only/)
+    expect(() => db.prepare(`DELETE FROM pm_market_versions`).run()).toThrow(/append-only/)
+
+    expect(() => migrate(db)).not.toThrow()
+    expect((db.prepare('SELECT COUNT(*) AS n FROM pm_market_versions').get() as { n: number }).n).toBe(2)
   })
 
   it('v5 binds decisions to a decision run when a run is supplied', () => {

@@ -51,8 +51,10 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>
   }[] = []
   balanceParams: (Readonly<Record<string, unknown>> | undefined)[] = []
-  /** 默认空 = 现货语义（contractSize 视为 1）；永续测试自行注入 contractSize/precision。 */
-  markets: Readonly<Record<string, CcxtMarketLike>> = {}
+  /** 默认是带权威类型标记的 fake 线性永续；缺元数据场景需在测试中显式清空。 */
+  markets: Readonly<Record<string, CcxtMarketLike>> = {
+    [SYMBOL]: { linear: true, swap: true, contractSize: 1 },
+  }
   balance: CcxtBalanceLike = { total: { USDT: '10000' } }
   positions: readonly CcxtPositionLike[] = []
   positionsReadCount = 0
@@ -373,7 +375,7 @@ describe('CcxtBroker', () => {
 
   it('converts HTX contract fill quantities back to the broker base-quantity unit', async () => {
     const exchange = new FakeExchange()
-    exchange.markets = { [SYMBOL]: { linear: true, contractSize: 10 } }
+    exchange.markets = { [SYMBOL]: { linear: true, swap: true, contractSize: 10 } }
     exchange.directOrder = {
       id: 'contract-fill', clientOrderId: 'contract-client', symbol: SYMBOL,
       status: 'closed', filled: 2, average: 100,
@@ -637,7 +639,7 @@ describe('CcxtBroker', () => {
   it('★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位）', async () => {
     const exchange = new FakeExchange()
     // HTX BTC 永续：1 张 = 0.001 BTC，amount 精度 1 张
-    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, precision: { amount: 1 } } }
+    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, swap: true, precision: { amount: 1 } } }
     const broker = makeBroker(exchange)
 
     // 下单：0.05 BTC ⇒ 50 张（而不是把 0.05 当张数）
@@ -655,7 +657,7 @@ describe('CcxtBroker', () => {
 
   it('不足一张最小合约时拒绝下单（绝不四舍五入放大仓位）', async () => {
     const exchange = new FakeExchange()
-    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, precision: { amount: 1 } } }
+    exchange.markets = { [SYMBOL]: { contractSize: 0.001, linear: true, swap: true, precision: { amount: 1 } } }
     const broker = makeBroker(exchange)
     // 0.0004 BTC < 1 张（0.001 BTC）
     await expect(broker.placeOrder(orderRequest({ qty: 0.0004, notionalUsd: 30 }))).rejects.toThrow(
@@ -665,9 +667,38 @@ describe('CcxtBroker', () => {
 
   it('inverse 合约拒绝换算（口径不同，宁可拒绝也不下错）', async () => {
     const exchange = new FakeExchange()
-    exchange.markets = { [SYMBOL]: { contractSize: 100, inverse: true, precision: { amount: 1 } } }
+    exchange.markets = { [SYMBOL]: { contractSize: 100, linear: true, swap: true, inverse: true, precision: { amount: 1 } } }
     const broker = makeBroker(exchange)
     await expect(broker.placeOrder(orderRequest({ qty: 0.5, notionalUsd: 100 }))).rejects.toThrow(/inverse/)
+  })
+
+  it.each([
+    ['spot metadata', { linear: false, swap: false, contractSize: 1 }],
+    ['missing swap flag', { linear: true, contractSize: 1 }],
+    ['missing market metadata', undefined],
+  ] as const)('%s rejects orders and positions before conversion/submission', async (_name, market) => {
+    const exchange = new FakeExchange()
+    exchange.markets = market === undefined ? {} : { [SYMBOL]: market }
+    exchange.positions = [{ symbol: SYMBOL, contracts: 1, side: 'long', entryPrice: 100 }]
+
+    await expect(makeBroker(exchange).placeOrder(orderRequest())).rejects.toThrow(/永续市场元数据/)
+    await expect(makeBroker(exchange).getPositions()).rejects.toThrow(/永续市场元数据/)
+    expect(exchange.createCalls).toEqual([])
+  })
+
+  it('does not convert filled quantities without authoritative swap metadata', async () => {
+    const exchange = new FakeExchange()
+    exchange.markets = {}
+    exchange.directOrder = {
+      id: 'untyped-fill', clientOrderId: 'untyped-client', symbol: SYMBOL,
+      status: 'closed', filled: 2, average: 100,
+    }
+
+    await expect(makeBroker(exchange).findOrderByExchangeOrderId('untyped-fill', SYMBOL))
+      .rejects.toThrow(/永续市场元数据/)
+    // 拒绝发生在订单成交量换算阶段，不应继续读取/聚合成交明细。
+    expect(exchange.fetchMyTradesCalls).toEqual([])
+    expect(exchange.createCalls).toEqual([])
   })
 })
 

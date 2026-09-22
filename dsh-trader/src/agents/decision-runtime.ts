@@ -1,6 +1,8 @@
 /** R3 生产边界：冻结 R2 context、限预算调用模型、资格检查后才落卡/执行。 */
 
 import { BudgetLedger, GLOBAL_SCOPE, PriceTableStore, dayKey, symbolScope } from '../cost-ledger.js'
+import { randomUUID } from 'node:crypto'
+import { Statements } from '../db/statements.js'
 import { DecisionJournal } from '../exec/journal.js'
 import { executeAction } from '../exec/execute-action.js'
 import type { PlanAction, PlanValidation } from '../plan/schema.js'
@@ -9,6 +11,7 @@ import type { TradePorts } from '../exec/ports.js'
 import { buildDecisionContext } from './decision-context-builder.js'
 import { DecisionContextStore } from './decision-context-store.js'
 import { DecisionRunStore, type DecisionRunRecord } from './decision-run-store.js'
+import { redactDecisionErrorText } from './decision-redaction.js'
 import {
   bindDecisionEnvelope,
   DECISION_ENVELOPE_SCHEMA_VERSION,
@@ -69,7 +72,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function safeReason(error: unknown): string {
   const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)
+  return redactDecisionErrorText(raw).slice(0, 1_000)
 }
 
 const SENSITIVE_TRACE_KEYS = new Set(['apikey', 'apisecret', 'secret', 'secretkey', 'token', 'accesstoken', 'refreshtoken', 'authorization', 'privatekey'])
@@ -90,7 +93,7 @@ export function sanitizeModelTrace(value: unknown, depth = 0): unknown {
       '$1"[REDACTED]"',
     )
     return jsonFieldsRedacted
-      .replace(/((?:api[_-]?key|api[_-]?secret|secret[_-]?key|secret|token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key)\s*[:=]\s*)[^\s,;}\]]+/gi, '$1[REDACTED]')
+      .replace(/((?:api[_-]?key|api[_-]?secret|secret[_-]?key|secret|token|access[_-]?token|refresh[_-]?token|authorization|private[_-]?key)\s*[:=]\s*)(?:bearer\s+)?(?!\[REDACTED\])[^\s,;}\]]+/gi, '$1[REDACTED]')
       .slice(0, 200_000)
   }
   if (typeof value === 'number') return Number.isFinite(value) ? value : null
@@ -281,14 +284,17 @@ export async function runDecisionRuntime(input: {
 
   const ledger = new BudgetLedger(ports.db)
   const prices = new PriceTableStore(ports.db)
-  const reservations = new Map<string, { readonly tokens: number; readonly usd: number | null }>()
+  const reservationStatements = new Statements(ports.db)
+  const reservations = new Map<string, { readonly attemptId: string; readonly tokens: number; readonly usd: number | null }>()
+  const completedCalls = new Map<string, string>()
   const callStartedAt = new Map<string, number>()
   const runStartedAt = ports.clock.now()
   const priorDurationMs = prior?.durationMs ?? 0
   let cumulativeCostKnown = prior?.costKnown === false ? false : true
 
   const addLedgerEntry = (call: DecisionModelCall): void => {
-    const reserve = reservations.get(call.requestHash) ?? { tokens: call.estimatedInputTokens + config.route.maxTokens, usd: null }
+    const reserve = reservations.get(call.requestHash)
+    if (reserve === undefined) throw new Error(`模型调用缺少已持久化 reservation：${call.requestHash}`)
     const startedAt = callStartedAt.get(call.requestHash)
     callStartedAt.delete(call.requestHash)
     const callDurationMs = startedAt === undefined ? null : Math.max(0, ports.clock.now() - startedAt)
@@ -316,11 +322,13 @@ export async function runDecisionRuntime(input: {
         durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
       }, ports.clock.now())
     }
+    const settled = call.failure === undefined
     journal.appendAudit({
-      actor: 'system', kind: call.failure === undefined ? 'model_call_accounted' : 'model_call_failed',
+      actor: 'system', kind: settled ? 'model_call_accounted' : 'model_call_unresolved',
       payload: {
         runId, trigger: trigger.id, stage: call.stage, promptVersion: call.promptVersion,
-        requestHash: call.requestHash, requestChars: call.requestChars,
+        requestHash: call.requestHash, callAttemptId: reserve.attemptId, requestChars: call.requestChars,
+        settled,
         estimatedInputTokens: call.estimatedInputTokens,
         durationMs: callDurationMs,
         request: sanitizeModelTrace(call.request),
@@ -335,34 +343,110 @@ export async function runDecisionRuntime(input: {
       },
       ts: ports.clock.now(),
     })
+    reservations.delete(call.requestHash)
+    if (settled) completedCalls.set(call.requestHash, reserve.attemptId)
   }
 
   let budgetDenied: string | undefined
+  let unresolvedReservationDenied = false
   const beforeCall = async (request: { readonly requestHash: string; readonly requestChars: number; readonly estimatedInputTokens: number }, stage: string): Promise<void> => {
     if (trigger.expiresAt !== undefined && ports.clock.now() >= trigger.expiresAt) {
       throw new Error('触发器在模型调用前已过期，拒绝使用陈旧事件判断')
     }
     const estimatedUsage = { tokensIn: request.estimatedInputTokens, tokensOut: config.route.maxTokens, tokensCached: 0 }
-    const result = ledger.preflight({
-      at: ports.clock.now(),
-      model: config.route.model,
-      estimatedUsage,
-      dailyBudgetUsd: config.dailyBudgetUsd ?? 0,
-      ...(config.dailyTokenCap === undefined ? {} : { tokenCap: config.dailyTokenCap }),
-      scope: GLOBAL_SCOPE,
-      wake: trigger.source,
-    })
-    if (!result.decision.allow) {
-      budgetDenied = result.decision.reason
+    const now = ports.clock.now()
+    const reserve = ports.db.transaction(() => {
+      const rows = reservationStatements.get(`SELECT kind, payload_json FROM audit_events
+        WHERE kind IN ('model_call_reserved', 'model_call_accounted', 'model_call_failed', 'model_call_unresolved',
+                       'model_call_output_rejected', 'model_stage_persisted') ORDER BY seq`).all() as {
+        kind: string
+        payload_json: string
+      }[]
+      const pending = new Map<string, {
+        readonly runId: string
+        readonly requestHash: string
+        readonly stage: string
+        readonly state: 'reserved' | 'accounted' | 'unresolved'
+      }>()
+      for (const row of rows) {
+        const payload: unknown = JSON.parse(row.payload_json)
+        if (!isRecord(payload)) throw new Error('模型调用 reservation 审计损坏；停止模型调用')
+        if (row.kind === 'model_call_reserved') {
+          const attemptId = payload['callAttemptId']
+          const run = payload['runId']
+          const hash = payload['requestHash']
+          const attemptStage = payload['stage']
+          if (typeof attemptId !== 'string' || typeof run !== 'string' || typeof hash !== 'string' || typeof attemptStage !== 'string') {
+            throw new Error('模型调用 reservation 身份损坏；停止模型调用')
+          }
+          pending.set(attemptId, { runId: run, requestHash: hash, stage: attemptStage, state: 'reserved' })
+        } else if (typeof payload['callAttemptId'] === 'string') {
+          const attempt = payload['callAttemptId']
+          const priorAttempt = pending.get(attempt)
+          if (priorAttempt === undefined || payload['runId'] !== priorAttempt.runId ||
+              payload['requestHash'] !== priorAttempt.requestHash ||
+              (row.kind !== 'model_stage_persisted' && payload['stage'] !== priorAttempt.stage)) {
+            throw new Error('模型调用结算审计与 reservation 不匹配；停止模型调用')
+          }
+          if (row.kind === 'model_call_accounted') {
+            pending.set(attempt, { ...priorAttempt, state: 'accounted' })
+          } else if (row.kind === 'model_call_output_rejected' || row.kind === 'model_stage_persisted') {
+            if (priorAttempt.state !== 'accounted') throw new Error('未确认成功的模型调用不能结算为输出拒绝或 stage 持久化')
+            pending.delete(attempt)
+          } else {
+            // 旧 model_call_failed 也是泛化异常，没有“未计费/未受理”的可验证证据。
+            pending.set(attempt, { ...priorAttempt, state: 'unresolved' })
+          }
+        }
+      }
+      const pendingReservations = [...pending.values()].filter((item) => item.state === 'reserved' || item.state === 'unresolved')
+      if (pendingReservations.length > 0) {
+        unresolvedReservationDenied = true
+        return { allowed: false as const, reason: `存在 ${pendingReservations.length} 个未结算模型调用 reservation；未知成本跨重启 fail-closed` }
+      }
+      const uncommittedSuccesses = [...pending.values()].filter((item) => item.state === 'accounted')
+      if (uncommittedSuccesses.length > 0) {
+        return { allowed: false as const, reason: `存在 ${uncommittedSuccesses.length} 个已结算成功但 stage 尚未持久化的模型调用；禁止重发` }
+      }
+
+      const preflight = ledger.preflight({
+        at: now,
+        model: config.route.model,
+        estimatedUsage,
+        dailyBudgetUsd: config.dailyBudgetUsd ?? 0,
+        ...(config.dailyTokenCap === undefined ? {} : { tokenCap: config.dailyTokenCap }),
+        scope: GLOBAL_SCOPE,
+        wake: trigger.source,
+      })
+      if (!preflight.decision.allow) return { allowed: false as const, reason: preflight.decision.reason }
+
+      const attemptId = randomUUID()
+      const persisted = { attemptId, tokens: preflight.estimatedTokens, usd: preflight.estimateUsd }
+      journal.appendAudit({
+        actor: 'system', kind: 'model_call_reserved',
+        payload: {
+          runId, trigger: trigger.id, stage, requestHash: request.requestHash, callAttemptId: attemptId,
+          requestChars: request.requestChars, estimatedInputTokens: request.estimatedInputTokens,
+          estimatedTokens: preflight.estimatedTokens, reservedUsd: preflight.estimateUsd,
+          dailyBudgetUsd: config.dailyBudgetUsd ?? null, dailyTokenCap: config.dailyTokenCap ?? null,
+        },
+        ts: now,
+      })
+      return { allowed: true as const, reservation: persisted }
+    }).immediate()
+
+    if (!reserve.allowed) {
+      budgetDenied = reserve.reason
+      if (unresolvedReservationDenied) cumulativeCostKnown = false
       journal.appendAudit({
         actor: 'system', kind: 'model_budget_denied',
-        payload: { runId, trigger: trigger.id, stage, requestHash: request.requestHash, requestChars: request.requestChars, estimatedInputTokens: request.estimatedInputTokens, reason: result.decision.reason },
-        ts: ports.clock.now(),
+        payload: { runId, trigger: trigger.id, stage, requestHash: request.requestHash, requestChars: request.requestChars, estimatedInputTokens: request.estimatedInputTokens, reason: reserve.reason },
+        ts: now,
       })
-      throw new DecisionBudgetDenied(`模型预算准入拒绝：${result.decision.reason}`)
+      throw new DecisionBudgetDenied(`模型预算准入拒绝：${reserve.reason}`)
     }
-    reservations.set(request.requestHash, { tokens: result.estimatedTokens, usd: result.estimateUsd })
-    callStartedAt.set(request.requestHash, ports.clock.now())
+    reservations.set(request.requestHash, reserve.reservation)
+    callStartedAt.set(request.requestHash, now)
   }
 
   const stages = await runDecisionWorkflowStages({
@@ -375,11 +459,32 @@ export async function runDecisionRuntime(input: {
     beforeCall: (request, stage) => beforeCall(request, stage),
     onModelCall: async (call) => addLedgerEntry(call),
     onModelFailure: async (call) => addLedgerEntry(call),
-    onStage: async (stage, artifact) => {
-      const current = runStore.get(runId)
-      if (current?.status !== 'running') throw new Error(`decision run 在 stage 写入前已终结：${runId}`)
-      const patch = stage === 'draft' ? { draft: artifact } : stage === 'critique' ? { critique: artifact } : { final: artifact }
-      runStore.update(runId, patch, ports.clock.now())
+    onModelOutputRejected: async (call, errors) => {
+      const callAttemptId = completedCalls.get(call.requestHash)
+      if (callAttemptId === undefined) throw new Error(`模型输出拒绝缺少已结算 attempt：${call.requestHash}`)
+      journal.appendAudit({
+        actor: 'system', kind: 'model_call_output_rejected',
+        payload: { runId, stage: call.stage, requestHash: call.requestHash, callAttemptId, errors: sanitizeModelTrace(errors) },
+        ts: ports.clock.now(),
+      })
+      completedCalls.delete(call.requestHash)
+    },
+    onStage: async (stage, artifact, requestHash) => {
+      const callAttemptId = completedCalls.get(requestHash)
+      if (callAttemptId === undefined) throw new Error(`stage 写入缺少已结算模型调用：${requestHash}`)
+      const persistStage = ports.db.transaction(() => {
+        const current = runStore.get(runId)
+        if (current?.status !== 'running') throw new Error(`decision run 在 stage 写入前已终结：${runId}`)
+        const patch = stage === 'draft' ? { draft: artifact } : stage === 'critique' ? { critique: artifact } : { final: artifact }
+        runStore.update(runId, patch, ports.clock.now())
+        journal.appendAudit({
+          actor: 'system', kind: 'model_stage_persisted',
+          payload: { runId, stage, requestHash, callAttemptId },
+          ts: ports.clock.now(),
+        })
+      })
+      persistStage.immediate()
+      completedCalls.delete(requestHash)
     },
   })
 
@@ -387,30 +492,20 @@ export async function runDecisionRuntime(input: {
     const reason = budgetDenied ?? stages.failure ?? '模型 workflow 没有 final 工件'
     const envelope = failureEnvelope(context, runId, reason)
     const eligibility: EligibilityResult = { state: 'decision_only', reasons: [reason], validatedEvidencePaths: [] }
-    const retryable = stages.failureKind === 'model'
     const current = runStore.get(runId)
     if (current?.status === 'running') {
-      if (retryable) {
-        runStore.update(runId, {
-          draft: stages.draft === undefined ? undefined : stageArtifact(stages, 'draft'),
-          critique: stages.critique === undefined ? undefined : stageArtifact(stages, 'critique'),
-          costKnown: cumulativeCostKnown,
-          durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
-        }, ports.clock.now())
-      } else {
-        runStore.update(runId, {
-          status: 'review',
-          draft: stages.draft === undefined ? undefined : stageArtifact(stages, 'draft'),
-          critique: stages.critique === undefined ? undefined : stageArtifact(stages, 'critique'),
-          final: { envelope, workflow: decisionWorkflowSummary(stages), failure: reason },
-          eligibility,
-          costKnown: cumulativeCostKnown,
-          durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
-          finishedAt: ports.clock.now(),
-        }, ports.clock.now())
-      }
+      runStore.update(runId, {
+        status: 'review',
+        draft: stages.draft === undefined ? undefined : stageArtifact(stages, 'draft'),
+        critique: stages.critique === undefined ? undefined : stageArtifact(stages, 'critique'),
+        final: { envelope, workflow: decisionWorkflowSummary(stages), failure: reason },
+        eligibility,
+        costKnown: cumulativeCostKnown,
+        durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
+        finishedAt: ports.clock.now(),
+      }, ports.clock.now())
     }
-    if (!retryable && !journal.hasDecision(`decision:${runId}`)) {
+    if (!journal.hasDecision(`decision:${runId}`)) {
       journal.recordDecision({
         decisionId: `decision:${runId}`,
         runId,
@@ -424,11 +519,15 @@ export async function runDecisionRuntime(input: {
       })
     }
     journal.appendAudit({
-      actor: 'system', kind: retryable ? 'decision_attempt_retryable' : 'decision_review',
-      payload: { runId, contextHash: context.contextHash, reason, strategy: config.strategy, retryable },
+      actor: 'system', kind: 'decision_review',
+      payload: {
+        runId, contextHash: context.contextHash, reason, strategy: config.strategy,
+        retryable: false,
+        providerOutcomeUnresolved: stages.failureKind === 'model',
+      },
       ts: ports.clock.now(),
     })
-    return { runId, status: 'review', replayed: false, retryable, contextHash: context.contextHash, envelope, eligibility, reason }
+    return { runId, status: 'review', replayed: false, retryable: false, contextHash: context.contextHash, envelope, eligibility, reason }
   }
 
   const envelope = bindDecisionEnvelope(stages.final, { runId, context })

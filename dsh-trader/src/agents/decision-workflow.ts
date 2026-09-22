@@ -9,6 +9,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { renderDecisionRequest, type RenderedDecisionRequest } from './decision-request.js'
 import type { DecisionContext } from './decision-context.js'
+import { redactDecisionErrorText } from './decision-redaction.js'
 import {
   DECISION_ENVELOPE_TOOL,
   parseDecisionEnvelopeCandidate,
@@ -149,7 +150,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function safeModelError(error: unknown): string {
   const name = error instanceof Error ? error.name : 'UnknownError'
   const raw = error instanceof Error ? error.message : String(error)
-  return `${name}: ${raw.replace(/(api[_-]?key|secret|token|authorization)\s*[:=]\s*[^\s,;]+/gi, '$1=[REDACTED]').slice(0, 1_000)}`
+  return `${name}: ${redactDecisionErrorText(raw).slice(0, 1_000)}`
 }
 
 function modelMessages(request: RenderedDecisionRequest) {
@@ -252,6 +253,7 @@ async function callStructuredTool(input: {
         throw new DecisionModelCallFailure(`模型阶段失败：${chunk.reason.kind}`)
       }
     }
+    if (finishReason === null) throw new Error('模型流未提供明确 finish；调用结算状态未知')
     if (toolCallCount > 1) output = undefined
     return {
       stage: input.stage,
@@ -352,7 +354,9 @@ export async function runDecisionWorkflowStages(input: {
   readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
   readonly onModelFailure?: (call: DecisionModelCall) => Promise<void>
   readonly onModelCall?: (call: DecisionModelCall) => Promise<void>
-  readonly onStage?: (stage: DecisionWorkflowStageName, artifact: unknown) => Promise<void>
+  readonly onStage?: (stage: DecisionWorkflowStageName, artifact: unknown, requestHash: string) => Promise<void>
+  /** 校验失败的成功响应是已结算失败，允许修复请求；崩溃前未写此事件则恢复必须 fail-closed。 */
+  readonly onModelOutputRejected?: (call: DecisionModelCall, errors: readonly string[]) => Promise<void>
 }): Promise<DecisionWorkflowStages> {
   const calls: DecisionModelCall[] = []
   let repairs = 0
@@ -381,7 +385,7 @@ export async function runDecisionWorkflowStages(input: {
     readonly instructions: string
     readonly materials?: readonly unknown[]
     readonly validate: (raw: unknown) => { readonly ok: true; readonly value: T; readonly evidenceIssues?: readonly string[] } | { readonly ok: false; readonly errors: readonly string[] }
-  }): Promise<{ readonly value: T; readonly evidenceIssues: readonly string[] }> => {
+  }): Promise<{ readonly value: T; readonly evidenceIssues: readonly string[]; readonly requestHash: string }> => {
     let materials = stage.materials ?? []
     let instructions = stage.instructions
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -406,7 +410,8 @@ export async function runDecisionWorkflowStages(input: {
       calls.push(call)
       await input.onModelCall?.(call)
       const result = stage.validate(call.output)
-      if (result.ok) return { value: result.value, evidenceIssues: result.evidenceIssues ?? [] }
+      if (result.ok) return { value: result.value, evidenceIssues: result.evidenceIssues ?? [], requestHash: call.requestHash }
+      await input.onModelOutputRejected?.(call, result.errors)
       if (repairs >= 1) throw new DecisionOutputFailure(result.errors.join('; '))
       repairs += 1
       instructions = `${stage.instructions}\n\n${REPAIR_INSTRUCTION}`
@@ -419,7 +424,7 @@ export async function runDecisionWorkflowStages(input: {
     if (input.strategy === 'single') {
       let final = storedEnvelope(input.resume?.final)
       if (final === undefined) {
-        final = await callAndValidate({
+        const generated = await callAndValidate({
           modelStage: 'strategist', tool: DECISION_ENVELOPE_TOOL,
           instructions: STAGE_INSTRUCTIONS.single,
           validate: (raw) => {
@@ -429,7 +434,8 @@ export async function runDecisionWorkflowStages(input: {
               : { ok: false, errors: parsed.errors }
           },
         })
-        await input.onStage?.('final', { candidate: final.value, evidenceIssues: final.evidenceIssues })
+        final = generated
+        await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
       }
       if (final === undefined) throw new Error('single final stage 未产出')
       finalEvidenceIssues = [...final.evidenceIssues]
@@ -439,7 +445,7 @@ export async function runDecisionWorkflowStages(input: {
 
     let draftArtifact = storedEnvelope(input.resume?.draft)
     if (draftArtifact === undefined) {
-      draftArtifact = await callAndValidate({
+      const generated = await callAndValidate({
         modelStage: 'strategist', tool: DECISION_ENVELOPE_TOOL,
         instructions: STAGE_INSTRUCTIONS.draft,
         validate: (raw) => {
@@ -449,7 +455,8 @@ export async function runDecisionWorkflowStages(input: {
             : { ok: false, errors: parsed.errors }
         },
       })
-      await input.onStage?.('draft', { candidate: draftArtifact.value, evidenceIssues: draftArtifact.evidenceIssues })
+      draftArtifact = generated
+      await input.onStage?.('draft', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
     }
     if (draftArtifact === undefined) throw new Error('critique draft stage 未产出')
     const draft = draftArtifact.value
@@ -457,7 +464,7 @@ export async function runDecisionWorkflowStages(input: {
 
     let critiqueArtifact = storedCritique(input.resume?.critique)
     if (critiqueArtifact === undefined) {
-      critiqueArtifact = await callAndValidate({
+      const generated = await callAndValidate({
         modelStage: 'risk-critic', tool: CRITIQUE_TOOL,
         instructions: STAGE_INSTRUCTIONS.critic,
         materials: [{ draft }],
@@ -468,14 +475,15 @@ export async function runDecisionWorkflowStages(input: {
             : { ok: false, errors: parsed.errors }
         },
       })
-      await input.onStage?.('critique', { ...critiqueArtifact.value, evidenceIssues: critiqueArtifact.evidenceIssues })
+      critiqueArtifact = generated
+      await input.onStage?.('critique', { ...generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
     }
     const critique = critiqueArtifact.value
     critiqueResult = critique
 
     let final = storedEnvelope(input.resume?.final)
     if (final === undefined) {
-      final = await callAndValidate({
+      const generated = await callAndValidate({
         modelStage: 'strategist', tool: DECISION_ENVELOPE_TOOL,
         instructions: STAGE_INSTRUCTIONS.final,
         materials: [{ draft }, { critique }],
@@ -487,7 +495,8 @@ export async function runDecisionWorkflowStages(input: {
           return { ok: true, value: parsed.candidate, evidenceIssues: parsed.evidenceIssues }
         },
       })
-      await input.onStage?.('final', { candidate: final.value, evidenceIssues: final.evidenceIssues })
+      final = generated
+      await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
     }
     if (final === undefined) throw new Error('critique final stage 未产出')
     finalEvidenceIssues = [...final.evidenceIssues]

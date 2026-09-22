@@ -70,6 +70,7 @@ function safePrediction(snapshot: PmAliasSnapshot): Readonly<Record<string, unkn
     alias: snapshot.alias,
     tokenId: snapshot.tokenId,
     observedAt: snapshot.quoteObservedAt,
+    availableAt: snapshot.quoteAvailableAt,
     probability: snapshot.probability.ok
       ? { value: snapshot.probability.value, estimator: snapshot.probability.estimator, status: 'ok' }
       : { value: null, estimator: null, status: 'missing', reason: snapshot.probability.reason },
@@ -83,6 +84,7 @@ function safePrediction(snapshot: PmAliasSnapshot): Readonly<Record<string, unkn
     change24h: snapshot.change24h,
     absChangeMean: snapshot.absChangeMean,
     quoteObservedAt: snapshot.quoteObservedAt,
+    quoteAvailableAt: snapshot.quoteAvailableAt,
     resolved: snapshot.resolved,
     winningOutcome: snapshot.winningOutcome,
     negRiskDeviation: snapshot.negRiskDeviation,
@@ -107,7 +109,7 @@ function predictionSection(
   if (snapshots.length === 0) {
     return { asOf: null, source: 'pm-store', missing: [`prediction.${alias}:not-visible-at-asOf`], value: { state: 'unavailable', alias, items: [] } }
   }
-  const predictionAsOf = latestTimestamp(snapshots.map((snapshot) => snapshot.quoteObservedAt))
+  const predictionAsOf = latestTimestamp(snapshots.map((snapshot) => snapshot.quoteAvailableAt))
   const missing = snapshots.flatMap((snapshot) => [
     ...(snapshot.probability.ok ? [] : [`prediction.${alias}.${snapshot.tokenId}.probability:missing`]),
     ...(snapshot.liquidity.pass ? [] : [`prediction.${alias}.${snapshot.tokenId}.liquidity:unqualified`]),

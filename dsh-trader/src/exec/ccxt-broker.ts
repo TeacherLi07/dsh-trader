@@ -1044,8 +1044,9 @@ export class HtxBroker implements Broker {
     return this.#exchange.markets?.[symbol]
   }
 
-  /** 永续：一张 = `contractSize` 个基础币；现货为 1。缺元数据时按 1（fail-closed 由 assertLinear/精度兜底）。 */
+  /** 永续：一张 = `contractSize` 个基础币；只允许在已验证的线性永续市场读取张数换算。 */
   #contractSize(symbol: string): number {
+    this.#assertLinear(symbol)
     const size = this.#market(symbol)?.contractSize
     return typeof size === 'number' && Number.isFinite(size) && size > 0 ? size : 1
   }
@@ -1058,6 +1059,11 @@ export class HtxBroker implements Broker {
     const market = this.#market(symbol)
     if (market?.inverse === true) {
       throw this.#safeError(new Error(`${symbol} 是 inverse 合约：本 broker 只支持 linear，拒绝按错误口径换算`))
+    }
+    if (market?.linear !== true || market.swap !== true) {
+      throw this.#safeError(
+        new Error(`${symbol} 缺少已确认的线性永续市场元数据（linear=true、swap=true）；拒绝按合约张数换算`),
+      )
     }
   }
 

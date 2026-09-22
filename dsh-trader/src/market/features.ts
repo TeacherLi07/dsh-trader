@@ -427,6 +427,8 @@ export class FeatureEngine {
  */
 export class FeaturePipeline {
   #engines = new Map<string, FeatureEngine>()
+  #lastOpenTimes = new Map<string, number>()
+  #blocked = new Set<string>()
 
   constructor(
     private readonly archive: FeatureArchive,
@@ -434,7 +436,40 @@ export class FeaturePipeline {
   ) {}
 
   onClosedCandle(candle: Candle, derivatives?: FeatureDerivatives, availableAt?: number): FeatureSnapshot {
-    const snapshot = this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, derivatives)
+    const key = `${candle.symbol}|${candle.timeframe}`
+    if (this.#blocked.has(key)) {
+      throw new MarketSourceError(
+        'other',
+        `特征流水线因历史修订 fail-closed：${candle.symbol} ${candle.timeframe}；需运维完成 feature-only 重建并显式确认处理游标`,
+      )
+    }
+
+    const lastOpenTime = this.#lastOpenTimes.get(key)
+    let snapshot: FeatureSnapshot
+    try {
+      snapshot = this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, derivatives)
+    } catch (error) {
+      if (candle.closed && lastOpenTime !== undefined && candle.openTime <= lastOpenTime) {
+        this.#blocked.add(key)
+        try {
+          this.archive.invalidateFrom(
+            candle.symbol,
+            candle.timeframe,
+            candle.openTime,
+            availableAt,
+            candle.closeTime,
+          )
+        } catch (invalidationError) {
+          throw new MarketSourceError(
+            'other',
+            `历史修订已阻断特征流水线，但失效投影失败：${String(invalidationError)}`,
+          )
+        }
+      }
+      throw error
+    }
+
+    this.#lastOpenTimes.set(key, candle.openTime)
     this.archive.upsert(snapshot, availableAt)
     return snapshot
   }
@@ -452,6 +487,8 @@ export class FeaturePipeline {
       if (!candle.closed) continue
       const snapshot = byOpen.get(`${candle.symbol}|${candle.timeframe}|${candle.openTime}`)
       this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, snapshot?.derivatives)
+      const key = `${candle.symbol}|${candle.timeframe}`
+      this.#lastOpenTimes.set(key, candle.openTime)
     }
   }
 

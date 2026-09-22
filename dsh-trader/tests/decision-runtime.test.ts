@@ -1,10 +1,13 @@
 import Database from 'better-sqlite3'
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ReplayClock } from '../src/clock.js'
 import { EXAMPLE_LIMITS } from '../src/config.js'
 import { DEEPSEEK_PRICE_SEED } from '../src/cost.js'
-import { BudgetLedger, PriceTableStore } from '../src/cost-ledger.js'
+import { BudgetLedger, GLOBAL_SCOPE, PriceTableStore } from '../src/cost-ledger.js'
 import { migrate } from '../src/db/schema.js'
 import type { AccountSnapshot, Broker } from '../src/exec/broker.js'
 import { DecisionJournal } from '../src/exec/journal.js'
@@ -18,8 +21,10 @@ import { normalizeCandles, timeframeMs } from '../src/market/normalize.js'
 import { PlanStore } from '../src/plan/store.js'
 import { decisionRunId, runDecisionRuntime } from '../src/agents/decision-runtime.js'
 import { DECISION_ENVELOPE_SCHEMA_VERSION } from '../src/agents/decision-envelope.js'
+import { buildDecisionContext } from '../src/agents/decision-context-builder.js'
+import { DecisionContextStore } from '../src/agents/decision-context-store.js'
 import { DecisionRunStore } from '../src/agents/decision-run-store.js'
-import { DECISION_WORKFLOW_PROMPT_VERSION, type DecisionModel } from '../src/agents/decision-workflow.js'
+import { DECISION_WORKFLOW_PROMPT_VERSION, runDecisionWorkflowStages, type DecisionModel } from '../src/agents/decision-workflow.js'
 import { raw } from './helpers/market.js'
 
 const AS_OF = Date.UTC(2026, 8, 20, 12)
@@ -86,14 +91,14 @@ function makeRuntime(db: Database.Database, brokerOverride?: Broker, clockOverri
   return { ports, clock, journal, plans }
 }
 
-function seedExecutableContext(db: Database.Database, runtime: ReturnType<typeof makeRuntime>): void {
+function seedExecutableContext(db: Database.Database, runtime: ReturnType<typeof makeRuntime>, barCount = 64): void {
   const { bars, features, journal } = runtime.ports
   const observations = new MarketObservationStore(db)
   for (const timeframe of ['15m', '1h', '4h']) {
     const engine = new FeatureEngine()
     const step = timeframeMs(timeframe)
-    const start = AS_OF - 64 * step
-    const candles = normalizeCandles(Array.from({ length: 64 }, (_, index) => {
+    const start = AS_OF - barCount * step
+    const candles = normalizeCandles(Array.from({ length: barCount }, (_, index) => {
       const openTime = start + index * step
       const close = 100 + index * 0.03 + (index % 5) * 0.01
       return raw(openTime, close, { open: close, high: close + 0.2, low: close - 0.2 })
@@ -119,6 +124,58 @@ function seedExecutableContext(db: Database.Database, runtime: ReturnType<typeof
     payload: { acknowledgeOrphans: false, result: { actions: [], consistent: true, freezeTrading: false }, applied: [] },
     ts: AS_OF,
   })
+}
+
+async function recordInterruptedRun(
+  db: Database.Database,
+  runtime: ReturnType<typeof makeRuntime>,
+  triggerId: string,
+  state: 'reserved' | 'accounted',
+): Promise<{ readonly runId: string; readonly requestHash: string }> {
+  const resumedTrigger = { ...trigger, id: triggerId }
+  const context = await buildDecisionContext(runtime.ports, SYMBOL, '1h')
+  new DecisionContextStore(db).record(context, { createdAt: context.asOf })
+  const promptVersion = `${DECISION_WORKFLOW_PROMPT_VERSION}:${config.strategy}:schema-${DECISION_ENVELOPE_SCHEMA_VERSION}`
+  const runId = decisionRunId({
+    trigger: resumedTrigger, symbol: SYMBOL, strategy: config.strategy, route: config.route,
+    promptVersion, schemaVersion: DECISION_ENVELOPE_SCHEMA_VERSION, planWindowMs: config.planWindowMs,
+  })
+  new DecisionRunStore(db).start({
+    runId, contextId: context.contextId, contextHash: context.contextHash, symbol: SYMBOL,
+    primaryTimeframe: '1h', triggerSource: `${resumedTrigger.source}:${resumedTrigger.id}`,
+    modelVersion: `${config.route.provider}/${config.route.model}`, promptVersion, createdAt: context.asOf,
+  })
+  const callAttemptId = `crashed-attempt-${state}`
+  let requestHash: string | undefined
+  await runDecisionWorkflowStages({
+    strategy: 'single', context, route: config.route,
+    model: { async *stream() { throw new Error('hash capture must not call model') } },
+    beforeCall: async (request) => {
+      requestHash = request.requestHash
+      throw new Error('offline request-hash capture')
+    },
+  })
+  if (requestHash === undefined) throw new Error('offline request-hash capture failed')
+  runtime.journal.appendAudit({
+    actor: 'system', kind: 'model_call_reserved',
+    payload: { runId, trigger: triggerId, stage: 'strategist', requestHash, callAttemptId, estimatedTokens: 500, reservedUsd: 0.001 },
+    ts: AS_OF,
+  })
+  if (state === 'accounted') {
+    const accounting = new BudgetLedger(db).record({
+      at: AS_OF, scopes: [GLOBAL_SCOPE], model: config.route.model,
+      usage: { tokensIn: 300, tokensOut: 80, tokensCached: 0 },
+    }, new PriceTableStore(db).all())
+    new DecisionRunStore(db).update(runId, {
+      tokensIn: 300, tokensOut: 80, costUsd: accounting.estUsd, costKnown: accounting.costKnown,
+    }, AS_OF)
+    runtime.journal.appendAudit({
+      actor: 'system', kind: 'model_call_accounted',
+      payload: { runId, trigger: triggerId, stage: 'strategist', requestHash, callAttemptId, costKnown: accounting.costKnown },
+      ts: AS_OF,
+    })
+  }
+  return { runId, requestHash }
 }
 
 const noTrade = {
@@ -168,7 +225,9 @@ describe('R3 decision runtime', () => {
     db.prepare('INSERT INTO config_versions (ts, author, params_json) VALUES (?, ?, ?)')
       .run(AS_OF - 1, 'test', JSON.stringify({ apiSecret: 'MODEL-TRACE-MUST-REDACT' }))
     const runtime = makeRuntime(db)
-    const model = new FakeDecisionModel(noTrade)
+    const model = new FakeDecisionModel(noTrade, () => {
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reserved'").get()).toMatchObject({ n: 1 })
+    })
     try {
       const first = await runDecisionRuntime({
         ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h',
@@ -182,14 +241,16 @@ describe('R3 decision runtime', () => {
       const traceRows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_accounted'").all() as { payload_json: string }[]
       expect(traceRows).toHaveLength(1)
       const trace = JSON.parse(traceRows[0]!.payload_json) as {
-        runId: string; durationMs: number | null; request: { requestHash: string; messages: readonly unknown[] }; responseHash: string
+        runId: string; callAttemptId: string; durationMs: number | null; request: { requestHash: string; messages: readonly unknown[] }; responseHash: string
       }
       expect(trace.runId).toBe(first.runId)
+      expect(trace.callAttemptId).toMatch(/^[0-9a-f-]{36}$/)
       expect(trace.request.requestHash).toMatch(/^sha256:/)
       expect(trace.request.messages.length).toBeGreaterThan(0)
       expect(trace.responseHash).toMatch(/^sha256:/)
       expect(trace.durationMs).not.toBeNull()
       expect(traceRows[0]?.payload_json).not.toContain('MODEL-TRACE-MUST-REDACT')
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_stage_persisted'").get()).toMatchObject({ n: 1 })
       const attemptRows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'decision_run_attempt_started'").all() as { payload_json: string }[]
       expect(attemptRows).toHaveLength(1)
       expect(JSON.parse(attemptRows[0]!.payload_json)).toMatchObject({
@@ -212,6 +273,93 @@ describe('R3 decision runtime', () => {
       expect(model.calls).toBe(1)
     } finally {
       db.close()
+    }
+  })
+
+  it('reopens persistent runs fail-closed after a reservation or success before stage persistence', async () => {
+    for (const state of ['reserved', 'accounted'] as const) {
+      const directory = mkdtempSync(join(tmpdir(), 'dsh-decision-reservation-'))
+      const dbPath = join(directory, 'state.sqlite')
+      let db: Database.Database | undefined
+      try {
+        db = new Database(dbPath)
+        migrate(db)
+        new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+        const beforeCrash = makeRuntime(db)
+        const triggerId = `w1-crash-${state}`
+        const interrupted = await recordInterruptedRun(db, beforeCrash, triggerId, state)
+        db.close()
+        db = new Database(dbPath)
+        migrate(db)
+
+        const afterRestart = makeRuntime(db)
+        const model = new FakeDecisionModel(noTrade)
+        const resumed = await runDecisionRuntime({
+          ...afterRestart, model, config,
+          trigger: { ...trigger, id: triggerId }, symbol: SYMBOL, timeframe: '1h',
+        })
+        expect(resumed).toMatchObject({ status: 'review', replayed: false, runId: interrupted.runId })
+        expect(resumed.reason).toContain(state === 'reserved' ? '未知成本跨重启' : 'stage 尚未持久化')
+        expect(model.calls).toBe(0)
+        expect(new DecisionRunStore(db).get(interrupted.runId)).toMatchObject({ status: 'review' })
+        const denied = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_budget_denied' ORDER BY seq DESC LIMIT 1").get() as { payload_json: string }
+        expect(JSON.parse(denied.payload_json)).toMatchObject({ requestHash: interrupted.requestHash })
+      } finally {
+        db?.close()
+        rmSync(directory, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('keeps a provider stream failure unresolved across SQLite restart despite a configured dailyTokenCap', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-decision-unresolved-'))
+    const dbPath = join(directory, 'state.sqlite')
+    let db: Database.Database | undefined
+    const cappedConfig = { ...config, dailyTokenCap: 100_000 }
+    try {
+      db = new Database(dbPath)
+      migrate(db)
+      new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+      const firstRuntime = makeRuntime(db)
+      const disconnected: DecisionModel & { calls: number } = {
+        calls: 0,
+        async *stream() {
+          this.calls += 1
+          throw new Error('synthetic stream disconnected before finish')
+        },
+      }
+      const first = await runDecisionRuntime({
+        ...firstRuntime, model: disconnected, config: cappedConfig,
+        trigger: { ...trigger, id: 'w1-unresolved-stream-crash' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(first).toMatchObject({ status: 'review', retryable: false })
+      expect(disconnected.calls).toBe(1)
+      const firstRun = new DecisionRunStore(db).get(first.runId)
+      expect(firstRun).toMatchObject({ status: 'review', costKnown: false })
+      expect(firstRun?.finishedAt).not.toBeNull()
+      expect(db.prepare("SELECT action FROM decisions WHERE decision_id = ?").get(`decision:${first.runId}`)).toMatchObject({ action: 'review' })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_unresolved'").get()).toMatchObject({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_failed'").get()).toMatchObject({ n: 0 })
+
+      db.close()
+      db = new Database(dbPath)
+      migrate(db)
+      const afterRestart = makeRuntime(db)
+      const retry = new FakeDecisionModel(noTrade)
+      const blocked = await runDecisionRuntime({
+        ...afterRestart, model: retry, config: cappedConfig,
+        trigger: { ...trigger, id: 'w1-after-unresolved-stream' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(blocked).toMatchObject({ status: 'review', retryable: false })
+      expect(blocked.reason).toContain('未结算模型调用 reservation')
+      expect(retry.calls).toBe(0)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reserved'").get()).toMatchObject({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_budget_denied'").get()).toMatchObject({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM decision_runs WHERE status = 'running'").get()).toMatchObject({ n: 0 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'decision_review'").get()).toMatchObject({ n: 2 })
+    } finally {
+      db?.close()
+      rmSync(directory, { recursive: true, force: true })
     }
   })
 
@@ -271,13 +419,16 @@ describe('R3 decision runtime', () => {
     migrate(db)
     new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
     const runtime = makeRuntime(db)
-    const rawSecret = 'MODEL-TRACE-SECRET-DO-NOT-PERSIST'
+    const rawSecret = 'MODEL-AUTH-BEARER-SECRET-DO-NOT-PERSIST'
+    const rawToken = 'MODEL-TOKEN-BEARER-SECRET-DO-NOT-PERSIST'
+    const rawBasic = 'MODEL-AUTH-BASIC-SECRET-DO-NOT-PERSIST'
+    const rawJsonBearer = 'MODEL-JSON-AUTH-BEARER-SECRET-DO-NOT-PERSIST'
     const model: DecisionModel & { calls: number } = {
       calls: 0,
       async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
         this.calls += 1
         yield { type: 'text-delta', index: 0, text: JSON.stringify({ apiSecret: rawSecret }) } as StreamChunk
-        throw new Error(`upstream apiKey=${rawSecret}`)
+        throw new Error(`upstream Authorization: Bearer ${rawSecret}; token: Bearer ${rawToken}; {"Authorization":"Bearer ${rawJsonBearer}", "authorization":"Basic ${rawBasic}"}`)
       },
     }
     try {
@@ -286,18 +437,76 @@ describe('R3 decision runtime', () => {
         trigger: { ...trigger, id: 'w1-provider-failure' },
         symbol: SYMBOL, timeframe: '1h',
       })
-      expect(result).toMatchObject({ status: 'review', retryable: true })
+      expect(result).toMatchObject({ status: 'review', retryable: false })
       expect(model.calls).toBe(1)
-      expect(new DecisionRunStore(db).get(result.runId)).toMatchObject({ status: 'running', costKnown: false })
-      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_failed'").all() as { payload_json: string }[]
+      expect(new DecisionRunStore(db).get(result.runId)).toMatchObject({ status: 'review', costKnown: false })
+      expect(new DecisionRunStore(db).get(result.runId)?.finishedAt).not.toBeNull()
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_unresolved'").all() as { payload_json: string }[]
       expect(rows).toHaveLength(1)
       const trace = JSON.parse(rows[0]!.payload_json) as { request?: unknown; response?: unknown; error?: string; durationMs?: number }
       expect(trace.request).toBeDefined()
       expect(trace.response).toBeDefined()
-      expect(trace.error).toContain('apiKey=[REDACTED]')
+      expect(trace.error).toContain('Authorization: [REDACTED]')
+      expect(trace.error).toContain('token: [REDACTED]')
+      expect(trace.error).not.toContain(rawJsonBearer)
+      expect(trace.error).not.toContain(rawBasic)
       expect(trace.durationMs).toBeGreaterThanOrEqual(0)
       expect(rows[0]?.payload_json).not.toContain(rawSecret)
+      expect(rows[0]?.payload_json).not.toContain(rawToken)
+
+      const allPersistentData = [
+        ...(db.prepare('SELECT payload_json FROM audit_events').all() as { payload_json: string }[]).map((row) => row.payload_json),
+        ...(db.prepare('SELECT draft_json, critique_json, final_json FROM decision_runs').all() as { draft_json: string | null; critique_json: string | null; final_json: string | null }[])
+          .flatMap((row) => [row.draft_json, row.critique_json, row.final_json].filter((value): value is string => value !== null)),
+        ...(db.prepare('SELECT rationale FROM decisions').all() as { rationale: string | null }[]).map((row) => row.rationale ?? ''),
+      ].join('\n')
+      expect(allPersistentData).not.toContain(rawSecret)
+      expect(allPersistentData).not.toContain(rawToken)
+      expect(allPersistentData).not.toContain(rawJsonBearer)
+      expect(allPersistentData).not.toContain(rawBasic)
     } finally {
+      db.close()
+    }
+  })
+
+  it('redacts quoted Authorization Basic credentials from plan-failure reasons before persistence', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    seedExecutableContext(db, runtime)
+    const secret = 'MODEL-PLAN-BASIC-SECRET-DO-NOT-PERSIST'
+    const save = vi.spyOn(runtime.plans, 'save').mockImplementation(() => {
+      throw new Error(`plan provider error {"Authorization":"Basic ${secret}"}`)
+    })
+    const model = new FakeDecisionModel({
+      outcome: 'act', thesis: '冻结证据支持条件计划', rejectedAlternatives: [],
+      claims: [{ kind: 'observation', statement: '1h close 可用', evidencePaths: ['/sections/market/value/timeframes/1h/features/close/value'] }],
+      uncertainties: [], confidence: 0.6, riskFraction: 0.5,
+      plan: {
+        thesis: '冻结条件满足后开仓', confidence: 0.6, keyLevels: [], forbidden: [], noTrade: false,
+        invalidation: [{ id: 'inv', tf: '1h', when: 'bar.close < 90', then: { action: 'close' } }],
+        commitments: [{ id: 'entry', seq: 1, tf: '1h', when: 'position.qty == 0 and bar.close > 0', then: {
+          action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 },
+        } }],
+      },
+    })
+    try {
+      const result = await runDecisionRuntime({
+        ...runtime, model, config,
+        trigger: { ...trigger, id: 'w1-plan-save-basic-redaction' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(result).toMatchObject({ status: 'review' })
+      expect(result.reason).toContain('Authorization')
+      expect(result.reason).not.toContain(secret)
+      const persistentData = [
+        ...(db.prepare('SELECT payload_json FROM audit_events').all() as { payload_json: string }[]).map((row) => row.payload_json),
+        ...(db.prepare('SELECT final_json FROM decision_runs').all() as { final_json: string | null }[]).map((row) => row.final_json ?? ''),
+        ...(db.prepare('SELECT rationale FROM decisions').all() as { rationale: string | null }[]).map((row) => row.rationale ?? ''),
+      ].join('\n')
+      expect(persistentData).not.toContain(secret)
+    } finally {
+      save.mockRestore()
       db.close()
     }
   })
@@ -320,6 +529,7 @@ describe('R3 decision runtime', () => {
       expect(new DecisionRunStore(db).get(result.runId)?.final).toMatchObject({ workflow: { repairCalls: 1 } })
       const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_accounted' ORDER BY seq").all() as { payload_json: string }[]
       expect(rows).toHaveLength(2)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_output_rejected'").get()).toMatchObject({ n: 1 })
       const traces = rows.map((row) => JSON.parse(row.payload_json) as {
         requestHash: string; responseHash: string; durationMs: number | null; costKnown: boolean; response: unknown
       })
@@ -558,6 +768,37 @@ describe('R3 decision runtime', () => {
       expect(card?.commitments[0]?.then).toMatchObject({ action: 'open', riskFraction: 0.5 })
       expect(runtime.plans.count(SYMBOL)).toBe(1)
       expect(runtime.journal.intentIds()).toHaveLength(0)
+    } finally {
+      db.close()
+    }
+  })
+
+  it('does not save an open plan whose RSI DSL dependency is missing in the frozen context', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    seedExecutableContext(db, runtime, 10)
+    const model = new FakeDecisionModel({
+      outcome: 'act', thesis: 'RSI 可用时才按条件开仓', rejectedAlternatives: [], claims: [], uncertainties: [],
+      confidence: 0.6, riskFraction: 0.5,
+      plan: {
+        thesis: 'RSI 条件满足时开仓', confidence: 0.6, keyLevels: [], forbidden: [], noTrade: false,
+        invalidation: [{ id: 'exit', tf: '1h', when: 'bar.close < 90', then: { action: 'close' } }],
+        commitments: [{ id: 'entry', seq: 1, tf: '1h', when: 'rsi14 > 30', then: {
+          action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 90 },
+        } }],
+      },
+    })
+    try {
+      const result = await runDecisionRuntime({
+        ...runtime, model, config,
+        trigger: { ...trigger, id: 'w1-open-plan-missing-rsi' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(result).toMatchObject({ status: 'review', eligibility: { state: 'decision_only' } })
+      expect(result.eligibility?.reasons.join(' ')).toContain('rsi14')
+      expect(runtime.plans.count(SYMBOL)).toBe(0)
+      expect(runtime.journal.intentIds()).toEqual([])
     } finally {
       db.close()
     }

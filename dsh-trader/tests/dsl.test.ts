@@ -63,6 +63,8 @@ describe('when DSL v0', () => {
       ),
     ).toEqual([])
     expect(unknownPaths(['bar.close < foo.bar'], V0_ALLOWED_PATHS)).toEqual(['foo.bar'])
+    // PM alias 是动态数据，不属于机械 DSL 固定执行词汇表。
+    expect(unknownPaths(['pm.future_event.prob > 0.5'], V0_ALLOWED_PATHS)).toEqual(['pm.future_event.prob'])
   })
 
   it('leaves crossAbove/crossBelow out of the pure-math table (they need the previous bar)', () => {

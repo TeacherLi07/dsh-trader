@@ -15,6 +15,18 @@ export interface NumericFact {
   readonly availableAt: number | null
   readonly status: FactStatus
   readonly samples: number
+  /** DSL cross* 使用的前一根、按 eventTime 对齐的 PIT 特征事实。 */
+  readonly previous?: NumericFactPoint
+}
+
+export interface NumericFactPoint {
+  readonly value: number | null
+  readonly unit: string
+  readonly window: string
+  readonly asOf: number | null
+  readonly availableAt: number | null
+  readonly status: FactStatus
+  readonly samples: number
 }
 
 export function finite(value: unknown): number | null {
@@ -32,16 +44,74 @@ const FEATURE_UNITS: Readonly<Record<string, string>> = {
   open: 'quote/base', high: 'quote/base', low: 'quote/base', close: 'quote/base', volume: 'venue-volume',
   ema20: 'quote/base', ema50: 'quote/base', rsi14: 'index-0-100', atr14: 'quote/base', adx14: 'index-0-100',
   vwap20: 'quote/base', zscore20: 'standard-deviations', volRealized20: 'log-return',
+  fundingRate: 'fraction', oiChangePct: 'percent', liqNotional: 'quote', basisBps: 'bps',
+}
+
+type FeatureObservationValue = FeatureSnapshot & {
+  readonly invalidated?: boolean
+  readonly recoveryRequired?: boolean
+}
+
+function visibleBar(item: MarketObservation<Candle>, symbol: string, timeframe: string, asOf: number): boolean {
+  const candle = item.value
+  return Number.isSafeInteger(item.eventTime) && Number.isSafeInteger(item.availableAt) &&
+    item.eventTime <= asOf && item.availableAt <= asOf && item.availableAt >= item.eventTime &&
+    candle.symbol === symbol && candle.timeframe === timeframe && candle.closed &&
+    candle.openTime < candle.closeTime && candle.closeTime === item.eventTime
+}
+
+function featurePoint(
+  observation: MarketObservation<FeatureObservationValue> | undefined,
+  bar: MarketObservation<Candle> | undefined,
+  symbol: string,
+  timeframe: string,
+  asOf: number,
+  key: string,
+  unit: string,
+  stale: boolean,
+): NumericFactPoint {
+  const snapshot = observation?.value
+  const value = snapshot === undefined ? null : finite(snapshot.values[key as keyof FeatureSnapshot['values']])
+  let status: FactStatus
+  if (bar === undefined) status = 'missing'
+  else if (observation === undefined) status = 'missing'
+  else if (observation.eventTime > asOf || observation.availableAt > asOf ||
+    observation.availableAt < observation.eventTime) status = 'invalid'
+  else if (snapshot === undefined || snapshot.symbol !== symbol || snapshot.timeframe !== timeframe ||
+    snapshot.closeTime !== observation.eventTime || observation.eventTime !== bar.eventTime) status = 'invalid'
+  else if (snapshot.invalidated === true || snapshot.recoveryRequired === true) status = 'invalid'
+  else if (stale) status = 'stale'
+  else if (value === null) status = 'warming'
+  else status = 'ok'
+
+  // 未对齐、未可见或被 correction tombstone 遮蔽的值不进入 context；状态本身保留供审计。
+  const exposeValue = status === 'ok' || status === 'stale' || status === 'warming'
+  return {
+    value: exposeValue ? value : null,
+    unit,
+    window: `${timeframe}:${key.match(/\d+$/)?.[0] ?? 1} bars; EMA/Wilder retain prior state`,
+    asOf: observation?.eventTime ?? null,
+    availableAt: observation?.availableAt ?? null,
+    status,
+    samples: observation === undefined ? 0 : 1,
+  }
 }
 
 export function marketSlice(store: MarketObservationStore, symbol: string, timeframe: string, asOf: number, config: DecisionContextConfig) {
   const bars = store.recent<Candle>('bar', symbol, timeframe, asOf, config.barsPerTimeframe)
-  const snapshots = store.recent<FeatureSnapshot>('feature', symbol, timeframe, asOf, config.barsPerTimeframe)
+    .filter((item) => visibleBar(item, symbol, timeframe, asOf))
+  const snapshots = store.recent<FeatureObservationValue>('feature', symbol, timeframe, asOf, config.barsPerTimeframe)
   const latest = bars.at(-1)
-  const snapshot = snapshots.at(-1)
+  const previousBar = bars.at(-2)
   const step = timeframeMs(timeframe)
   const stale = latest !== undefined && asOf - latest.eventTime > step + config.marketGraceMs
   const gaps = bars.slice(1).filter((bar, index) => bar.eventTime - bars[index]!.eventTime !== step).map(bar => bar.eventTime)
+  const alignedPreviousBar = latest !== undefined && previousBar !== undefined &&
+    latest.eventTime - previousBar.eventTime === step && latest.value.openTime === previousBar.eventTime
+    ? previousBar : undefined
+  const featureByEventTime = new Map(snapshots.map((item) => [item.eventTime, item]))
+  const currentFeature = latest === undefined ? undefined : featureByEventTime.get(latest.eventTime)
+  const previousFeature = alignedPreviousBar === undefined ? undefined : featureByEventTime.get(alignedPreviousBar.eventTime)
   const count = config.statisticsWindow
   const window = bars.slice(-count)
   const warm = window.length === count && gaps.length === 0
@@ -56,9 +126,9 @@ export function marketSlice(store: MarketObservationStore, symbol: string, timef
   const metricStatus: FactStatus = stale ? 'stale' : !warm ? 'warming' : 'ok'
   const features: Record<string, NumericFact> = {}
   for (const [key, unit] of Object.entries(FEATURE_UNITS)) {
-    const value = snapshot?.value.values[key as keyof FeatureSnapshot['values']]
-    const status: FactStatus = snapshot === undefined ? 'missing' : snapshot.eventTime !== latest?.eventTime || stale ? 'stale' : value === null ? 'warming' : 'ok'
-    features[key] = fact(value, unit, `${timeframe}:${key.match(/\d+$/)?.[0] ?? 1} bars; EMA/Wilder retain prior state`, snapshot, status)
+    const current = featurePoint(currentFeature, latest, symbol, timeframe, asOf, key, unit, stale)
+    const previous = featurePoint(previousFeature, alignedPreviousBar, symbol, timeframe, asOf, key, unit, false)
+    features[key] = { ...current, previous }
   }
   const summary = {
     slope: fact(slope, 'quote/base/bar', `OLS close; ${count} ${timeframe} bars`, latest, metricStatus, window.length),
