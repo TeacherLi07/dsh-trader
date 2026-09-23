@@ -71,7 +71,9 @@ describe('validateIntent (hard gate)', () => {
       kind: 'deny',
     })
     expect(validateIntent(intent(), { ...account, dailyLossUsd: 101 }, policy())).toMatchObject({ kind: 'deny' })
+    expect(validateIntent(intent(), { ...account, dailyLossUsd: EXAMPLE_LIMITS.dailyLossLimitUsd }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), { ...account, drawdownUsd: 301 }, policy())).toMatchObject({ kind: 'deny' })
+    expect(validateIntent(intent(), { ...account, drawdownUsd: EXAMPLE_LIMITS.maxDrawdownUsd }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), { ...account, consecutiveLosses: 4 }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), { ...account, spreadBps: 26 }, policy())).toMatchObject({ kind: 'deny' })
     expect(validateIntent(intent(), { ...account, openOrders: 10 }, policy())).toMatchObject({ kind: 'deny' })

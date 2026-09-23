@@ -166,10 +166,10 @@ export function validateIntent(
   if (leverage > limits.maxLeverage) {
     return deny(`预计杠杆 ${leverage.toFixed(3)} 超过上限 ${limits.maxLeverage}`)
   }
-  if (account.dailyLossUsd > limits.dailyLossLimitUsd) {
+  if (account.dailyLossUsd >= limits.dailyLossLimitUsd) {
     return deny(`当日亏损 ${account.dailyLossUsd} 已达上限 ${limits.dailyLossLimitUsd}`)
   }
-  if (account.drawdownUsd > limits.maxDrawdownUsd) {
+  if (account.drawdownUsd >= limits.maxDrawdownUsd) {
     return deny(`回撤 ${account.drawdownUsd} 已达上限 ${limits.maxDrawdownUsd}`)
   }
   if (account.consecutiveLosses >= limits.maxConsecutiveLosses) {
