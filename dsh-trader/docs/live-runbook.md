@@ -2,8 +2,8 @@
 
 本项目采用 Docker 单进程部署：dsh 是容器主进程，容器 restart policy 负责进程存活；
 **不启动、不安装、不依赖外部 watchdog**。dsh 退出后，Docker 重启同一个容器，交易状态
-由启动时 `CrashRecovery → reconcile` 收敛。进入实盘前仍须按 `plan.md` §12.2 A 的顺序
-完成 HTX 只读预检、`paper` 全链路和结构化确认通道检查；不要把历史 systemd/watchdog
+由启动时 `CrashRecovery → reconcile` 收敛。进入实盘前须完成 [plan.md §10/§12](../../plan.md) 的
+R5 真实 critique/forward-paper 经济验收、HTX 非空持仓/保护单对账及独立 arm；不要把历史 systemd/watchdog
 证据当成当前运行能力。
 
 ## 0. 部署前检查
@@ -38,14 +38,14 @@ chmod 600 ~/.dsh/trading.env
 cd /workspace/dsh-trader && pnpm build
 TRADER_MODE=paper dsh --profile trade
 
-# 无人值守实盘（会下真单；需已按 plan §12.2 A/E 完成授权）
-TRADER_MODE=live_auto dsh --profile trade
+# 无人值守实盘（会下真单；需通过 plan §10/§12 并配置独立凭据及完整限额）
+TRADER_MODE=live_auto TRADER_LIVE_ARMED=1 dsh --profile trade
 ```
 
 生产容器通过 secret/env 注入 `TRADER_MODE`；修改后重启唯一交易容器生效。非法模式值会被插件 Config 的 union 校验**拒绝启动**
 （不会静默退回 paper，避免"以为在实盘、其实在纸面"）。
 
-先执行 §12.2 A 的只读步骤，确认私有端点、永续账户和本地状态都能读到；该命令不下单、
+先执行 plan §12 的只读步骤，确认私有端点、永续账户和本地状态都能读到；该命令不下单、
 不撤单：
 
 ```bash
@@ -118,14 +118,14 @@ sqlite3 ~/.dsh/trading/desk.db \
 /resume
 ```
 
-`/halt` 是人工停机动作：先持久化暂停状态，再尝试撤销全部挂单；撤单失败时保持
+`/halt` 是人工停机动作：先持久化暂停状态，再尝试撤销普通挂单并保留保护单；撤单失败时保持
 `halted`、落审计，必须人工在交易所核对并处理。`/resume` 只解除持久化熔断并刷新心跳，
 不会自动撤单，也不会自动开仓。执行 `/resume` 前必须由人工确认：交易所挂单、持仓、
 保护单和本地对账均已一致。
 
-## 4. 确认“交易所挂单 = 0”
+## 4. 确认普通挂单与保护单
 
-至少做两次独立确认：
+至少做两次独立确认；有持仓时保留必要保护单，确认普通挂单已撤，不能以全部挂单为 0 作为停机目标：
 
 1. 查看 dsh 重启后的 `reconcile_report`，确认普通单与算法保护单的 merged 视图一致；
 2. 登录 HTX 对应的 USDT 永续账户，逐标的检查 Open Orders 页面/API；不要只看
@@ -175,10 +175,10 @@ sqlite3 ~/.dsh/trading/desk.db \
 
 ## 6. 出事时的降级路径
 
-1. 先 `/halt`；交易所侧直接撤单时保留截图/API 回执。
+1. 先 `/halt`；交易所侧直接撤普通单时保留必要保护单和截图/API 回执。
 2. 私有接口连续失败时进入“可平不可开”：禁止所有增加敞口的 open/非 reduceOnly 请求，
    只允许 reduceOnly 的减仓、平仓和保护单维护；不要为了恢复开仓而绕过硬闸。
-3. 出现未知持仓、数量不一致、有持仓无保护单或无法证明挂单为 0 时，保持 halted，
+3. 出现未知持仓、数量不一致、有持仓无保护单或普通挂单状态不可核验时，保持 halted，
    人工对账；必要时使用交易所原生 reduce-only 平仓入口。
 4. 若主进程异常，不启动任何旁路 watchdog，也不要删除 SQLite/WAL 文件。让 Docker 按
    restart policy 重启 dsh；检查容器启动日志中的恢复/对账审计，以及 key 权限、代理、

@@ -99,8 +99,8 @@ src/
 ├── market/           行情、归档、特征、规则（纯函数）
 ├── trigger/          去重 / 冷却 / 限流 / 分级 + 持久队列
 ├── memory/           情节记忆、journal、检索、结算
-├── agents/           角色提示词与工具白名单
-├── supervisor/       desk 会话调度 + 心跳
+├── agents/           冻结上下文、结构化裁决与 single/critique 判断链
+├── supervisor/       W1 窗口、W2/W3 持久队列、预算验收与心跳
 └── plugins/          cordis 插件入口（被 cordis.patch.yml 逐行挂载）
 ```
 

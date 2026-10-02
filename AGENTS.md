@@ -5,7 +5,7 @@
 
 > **本文件不进入交易模型的上下文。** 交易运行时的配置（标的池 / 时间框 / 限额 / 基准）在
 > `dsh-trader/cordis.patch.yml` 的插件 Config 里，因为那些值需要"可审计、可热改、不当代码常量"
-> （见 `plan.md` §6.5）。把构建命令喂给交易模型只是噪声。
+> （见 `plan.md` §5/§8）。把构建命令喂给交易模型只是噪声。
 
 ## 项目概览
 
@@ -41,14 +41,15 @@ pnpm test                        # vitest run（数量随阶段增长，以命�
 pnpm vitest run tests/plan-dsl.test.ts          # 跑单个文件
 pnpm vitest run -t "UNCOVERED"                  # 按用例名过滤
 pnpm link:peers                  # 把 @deepseek-ai/* 运行时 peer 链进来
-dsh --profile probe --dump-config               # 合成配置、验证 patch 行（应列出 13 个 trade-*：12 host + 1 client）
+dsh --profile probe --dump-config               # 合成配置、验证当前 cordis.patch.yml 的 trade-* 行
 ```
 
-### 验收脚本（真实行情 / 真实网络，不进 CI）
+### 验收脚本（离线探针与真实行情；网络入口不进 CI）
 
 ```bash
 pnpm build
 node scripts/client-s0-check.mjs                         # UI S0 client bundle/座位注册探针
+node scripts/offline-startup-check.mjs                    # 隔离 profile 真启动，禁网络，核验 paper/命令/心跳
 node scripts/replay-check.mjs htx BTC/USDT 1h 30     # P0 ②③ 回放确定性
 node scripts/probe-check.mjs probe /tmp/probe.json   # P0 ⑤ 探针 resume + notice 落盘
 node --expose-gc scripts/soak.mjs 24 60              # P0 ⑥ 24h 稳态
@@ -143,7 +144,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | 想做的事 | 改哪里 |
 |---|---|
 | 加 DSL 算子 / 路径 | `src/plan/dsl.ts` + `evaluate.ts`（`V0_ALLOWED_PATHS` / `UNIMPLEMENTED_PATHS`）+ `tests/dsl.test.ts` |
-| 加交易工具 | `src/agents/tools.ts`（定义 + `TOOL_DEFINITIONS`）+ `src/agents/roles.ts` 白名单 + `SIDE_EFFECT_TOOLS` |
+| 改模型动作 | `src/agents/decision-envelope.ts` + `src/plan/schema.ts` + `src/exec/execute-action.ts`；只有统一执行入口 |
 | 加表 / 列 | `src/db/schema.ts` + `plan.md` §4.1 + `tests/db-schema.test.ts` 表清单 |
 | 加触发规则族 | `src/trigger/engine.ts` 的 `RULE_PACKS` + `cordis.patch.yml` 的 `rulePacks` |
 | 预测市场（只读） | `src/predictions/{client,store,poller,rules,wiring}.ts` |
@@ -156,19 +157,18 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 
 写代码时**不要**注册"调用即抛错"的占位工具或空实现来让表格好看；缺口要如实报告。
 
-- 旧 `KNOWN_TOOL_NAMES` 仍会报告 6 个未实现工具：`trade_derivatives`、`trade_news`、`trade_onchain`、
-  `trade_stress_test`、`trade_review`、`trade_playbook_update`。它们不再是目标能力；R3/R4 应删除旧目标
-  工具箱与占位声明，而不是补空实现。
+- 旧目标工具箱、`KNOWN_TOOL_NAMES`、角色白名单与占位工具已在 R3 删除。模型只提交
+  `DecisionEnvelope`，不恢复名义工具或第二条下单链。
 - **0 个指标路径未实现**：`UNIMPLEMENTED_PATHS` 现为空 —— T2.4 已补齐 `adx14`、`oi.changePct`、
   `liq.notional`、`funding.rate`、`basis.bps`，全部已进入 `V0_ALLOWED_PATHS`。
-- 旧持久 desk、多分析师 workflow、C1–C5 assembler 和 JudgmentPack 仍在当前代码中；R1 已替换
-  旧 context/token 存储，剩余判断链按 `plan.md` R3–R5 收敛，不保留兼容层。
+- 旧持久 desk、多分析师 workflow、C1–C5 assembler 和 JudgmentPack 已删除；生产共用
+  DecisionContext、single/critique workflow 与唯一 execute-action，R5 真实验收仍未完成。
 - 结算 scheduler 已在生产运行，reflector 尚未接入；lesson 默认关闭，是否启用按 `plan.md` §7/§10 验收。
 - **P3 未做**：当前仍是 `paper`；`live_confirm` 已从目标计划删除，P3 直接在 R5 达标后以小额、硬限额、
   显式 arm 的 `live_auto` 进行。
 - **剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（生产组合根使用 `HtxBroker`，
   单测覆盖；需用已有 key 做非空实测）。
-  P2 ①②④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`）；旧 watchdog 结果仅作历史归档，当前不启动外部进程。
+  P2 ①②④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`）；旧 watchdog 实现与脚本已删除，结果仅作历史归档；部署禁止启动外部撤单进程。
 - 宏观日历、新闻、社媒、链上供应商与策略自进化均不在当前计划；不要保留名义开关或未接线角色。
 
 ## 文档维护

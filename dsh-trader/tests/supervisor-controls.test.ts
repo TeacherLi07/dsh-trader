@@ -10,14 +10,10 @@ import {
   type LocalPositionSnapshot,
 } from '../src/exec/reconcile.js'
 import type { OrderAck } from '../src/exec/broker.js'
+import { PaperBroker } from '../src/exec/paper.js'
 import { makeHaltHandler, makeResumeHandler } from '../src/plugins/commands.js'
 import { HeartbeatStore, type HeartbeatAuditEvent } from '../src/supervisor/heartbeat.js'
-import {
-  ExternalWatchdog,
-  WATCHDOG_DISABLED_REASON,
-  WATCHDOG_ENABLED,
-  watchdogDecision,
-} from '../src/supervisor/watchdog.js'
+
 
 const START = 1_700_000_000_000
 
@@ -30,24 +26,6 @@ function heartbeatDb(): Database.Database {
 function noOpInvocation(): never {
   return undefined as never
 }
-
-describe('watchdogDecision', () => {
-  it('covers healthy, stale, already halted and missing heartbeat branches', () => {
-    const samples = [
-      watchdogDecision({ now: START + 100, beatAt: START, intervalMs: 100, halted: false }),
-      watchdogDecision({ now: START + 301, beatAt: START, intervalMs: 100, halted: false }),
-      watchdogDecision({ now: START + 301, beatAt: START, intervalMs: 100, halted: true }),
-      watchdogDecision({ now: START, beatAt: undefined, intervalMs: 100, halted: false }),
-    ]
-    expect(samples.length).toBeGreaterThan(0)
-    expect(samples).toEqual([
-      { action: 'none', reason: 'healthy' },
-      { action: 'halt_cancel', reason: 'stale_heartbeat' },
-      { action: 'none', reason: 'already_halted' },
-      { action: 'halt_cancel', reason: 'missing_beat' },
-    ])
-  })
-})
 
 describe('HeartbeatStore', () => {
   it('beats, halts and resumes idempotently', () => {
@@ -69,30 +47,6 @@ describe('HeartbeatStore', () => {
       expect(store.read()).toEqual({ beatAt: START + 5, halted: false })
       expect(store.isHalted()).toBe(false)
       expect(db.prepare('SELECT COUNT(*) AS n FROM heartbeat').get()).toEqual({ n: 1 })
-    } finally {
-      db.close()
-    }
-  })
-})
-
-describe('ExternalWatchdog（已禁用）', () => {
-  it('hard-fails before reading heartbeat or touching the broker', async () => {
-    expect(WATCHDOG_ENABLED).toBe(false)
-    const db = heartbeatDb()
-    try {
-      const heartbeat = new HeartbeatStore(new Statements(db))
-      heartbeat.beat(START)
-      let cancelCalls = 0
-      const watchdog = new ExternalWatchdog({
-        heartbeat,
-        broker: { cancelAll: async () => void cancelCalls++ },
-        clock: new ReplayClock(START + 10_000),
-        intervalMs: 100,
-      })
-
-      await expect(watchdog.checkOnce()).rejects.toThrow(WATCHDOG_DISABLED_REASON)
-      expect(cancelCalls).toBe(0)
-      expect(heartbeat.isHalted()).toBe(false)
     } finally {
       db.close()
     }
@@ -224,6 +178,31 @@ describe('Reconciler', () => {
 })
 
 describe('halt/resume command handlers', () => {
+  it('halt 撤普通挂单并保留非空持仓的保护单，提示与实际结果一致', async () => {
+    const db = heartbeatDb()
+    try {
+      const clock = new ReplayClock(START)
+      const heartbeat = new HeartbeatStore(new Statements(db))
+      const broker = new PaperBroker({ clock, book: { price: () => 100 }, initialEquityQuote: 1_000, slippageBps: 0, feeBps: 0 })
+      await broker.placeOrder({ intentId: 'entry', clientOrderId: 'entry', decisionId: 'entry', symbol: 'BTC/USDT', type: 'market', side: 'buy', qty: 1, notionalUsd: 100 })
+      await broker.placeProtective({ symbol: 'BTC/USDT', clientOrderId: 'stop', stopLossPrice: 95 })
+      await broker.placeOrder({ intentId: 'pending', clientOrderId: 'pending', decisionId: 'pending', symbol: 'BTC/USDT', type: 'limit', side: 'buy', price: 90, qty: 1, notionalUsd: 90 })
+      expect(await broker.getOpenOrders()).toHaveLength(2)
+      expect(await broker.getPositions()).toHaveLength(1)
+
+      const halt = makeHaltHandler({ heartbeat, clock, broker })
+      const first = await halt(noOpInvocation())
+      const second = await halt(noOpInvocation())
+      expect(first).toEqual({ kind: 'success', text: '已暂停交易并撤销普通挂单，保护单保留。' })
+      expect(second).toEqual(first)
+      expect(heartbeat.isHalted()).toBe(true)
+      expect((await broker.getOpenOrders()).map((order) => order.clientOrderId)).toEqual(['stop'])
+      expect((await broker.getPositions())[0]).toMatchObject({ qty: 1, protectedStopPrice: 95 })
+    } finally {
+      db.close()
+    }
+  })
+
   it('在 handler 调用时读取晚到的 broker，而不是在注册时捕获空值', async () => {
     const db = heartbeatDb()
     try {

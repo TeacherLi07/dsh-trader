@@ -1,0 +1,58 @@
+{
+  "task": "R6",
+  "date": "2026-10-02",
+  "scope": "local-only",
+  "removedImplementationLines": 778,
+  "removedFiles": [
+    "src/supervisor/watchdog.ts",
+    "scripts/watchdog-daemon.mjs",
+    "scripts/watchdog-check.mjs",
+    "lib/supervisor/watchdog.js"
+  ],
+  "verification": {
+    "command": "pnpm verify",
+    "exitCode": 0,
+    "testFilesPassed": 71,
+    "testsPassed": 783,
+    "output": "$ pnpm typecheck && pnpm build && pnpm test\n$ tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json\n$ rm -rf lib && tsc -p tsconfig.json && node scripts/build-client.mjs && node scripts/write-build-manifest.mjs\n$ vitest run\n\n RUN  v5.0.0 /workspace/dsh-trader\n\n ✓ tests/trigger-governor.test.ts (8 tests) 103ms\n ✓ tests/market-feed.test.ts (15 tests) 137ms\n ✓ tests/exec-live-engine.test.ts (17 tests) 175ms\n ✓ tests/decision-context-builder.test.ts (10 tests) 269ms\n ✓ tests/memory-settle.test.ts (34 tests) 340ms\n ✓ tests/exec-ccxt-broker.test.ts (38 tests) 252ms\n ✓ tests/exec-runtime.test.ts (18 tests) 237ms\n ✓ tests/trigger-dispatcher.test.ts (9 tests) 80ms\n ✓ tests/supervisor-controls.test.ts (9 tests) 36ms\n ✓ tests/predictions-store.test.ts (73 tests) 405ms\n ✓ tests/exec-sim-exchange.test.ts (5 tests) 160ms\n ✓ tests/plan-store.test.ts (11 tests) 85ms\n ✓ tests/plugins-supervisor.test.ts (15 tests) 81ms\n ✓ tests/db-schema.test.ts (23 tests) 190ms\n ✓ tests/trigger-queue.test.ts (11 tests) 81ms\n ✓ tests/market-features.test.ts (12 tests) 97ms\n ✓ tests/cost-ledger.test.ts (27 tests) 207ms\n ✓ tests/market-backfill.test.ts (8 tests) 71ms\n ✓ tests/decision-workflow.test.ts (15 tests) 75ms\n ✓ tests/trigger-runtime.test.ts (3 tests) 69ms\n ✓ tests/market-feature-archive.test.ts (8 tests) 82ms\n ✓ tests/supervisor-metrics.test.ts (12 tests) 77ms\n ✓ tests/exec-fault-injection.test.ts (1 test) 76ms\n ✓ tests/market-archive.test.ts (8 tests) 56ms\n ✓ tests/exec-protection-flow.test.ts (4 tests) 50ms\n ✓ tests/exec-recovery.test.ts (9 tests) 70ms\n ✓ tests/exec-journal.test.ts (10 tests) 64ms\n ✓ tests/memory-recall.test.ts (6 tests) 45ms\n ✓ tests/supervisor-r5-registry.test.ts (4 tests) 40ms\n ✓ tests/market-runtime.test.ts (6 tests) 40ms\n ✓ tests/supervisor-window-queue.test.ts (3 tests) 32ms\n ✓ tests/decision-eligibility-dependencies.test.ts (5 tests) 48ms\n ✓ tests/supervisor-ab.test.ts (28 tests) 41ms\n ✓ tests/plugins-ui.test.ts (7 tests) 44ms\n ✓ tests/supervisor-r5.test.ts (13 tests) 1221ms\n   ✓ R5 pre-registered manifest and static scoring (13)\n     ✓ requires 200 non-empty independent windows and rejects repeated contexts 388ms\n     ✓ persists real-run structure, enforces call budgets, and resumes without duplicate calls 371ms\n ✓ tests/predictions-client.test.ts (27 tests) 34ms\n ✓ tests/exec-preflight.test.ts (13 tests) 31ms\n ✓ tests/workflow-context.test.ts (2 tests) 35ms\n ✓ tests/market-observations.test.ts (3 tests) 23ms\n ✓ tests/decision-envelope.test.ts (7 tests) 24ms\n ✓ tests/ui-startup.test.ts (2 tests) 27ms\n ✓ tests/exec-replay.test.ts (12 tests) 1479ms\n   ✓ T0.8b acceptance: deterministic replay (plan §10 P0 ②③) (4)\n     ✓ replaying 30 days twice produces identical id sets and zero duplicate clientOrderIds 461ms\n ✓ tests/db-discipline.test.ts (2 tests) 25ms\n ✓ tests/ui-cycles.test.ts (1 test) 22ms\n ✓ tests/exec-paper.test.ts (14 tests) 16ms\n ✓ tests/trigger-engine.test.ts (12 tests) 13ms\n ✓ tests/dsl.test.ts (10 tests) 15ms\n ✓ tests/plan-card.test.ts (12 tests) 21ms\n ✓ tests/market-indicators.test.ts (19 tests) 16ms\n ✓ tests/market-source.test.ts (11 tests) 11ms\n ✓ tests/exec-sizing.test.ts (11 tests) 9ms\n ✓ tests/predictions-pit.test.ts (9 tests) 11ms\n ✓ tests/exec-reconcile.test.ts (15 tests) 11ms\n ✓ tests/plan-match.test.ts (17 tests) 18ms\n ✓ tests/build-integrity.test.ts (2 tests) 8ms\n ✓ tests/market-normalize.test.ts (7 tests) 8ms\n ✓ tests/config.test.ts (9 tests) 9ms\n ✓ tests/supervisor-windows.test.ts (10 tests) 12ms\n ✓ tests/clock-discipline.test.ts (1 test) 9ms\n ✓ tests/gate.test.ts (10 tests) 11ms\n ✓ tests/exec-smoke-safety.test.ts (4 tests) 6ms\n ✓ tests/market-derivatives.test.ts (7 tests) 7ms\n ✓ tests/market-regime.test.ts (5 tests) 8ms\n ✓ tests/clock.test.ts (5 tests) 6ms\n ✓ tests/ui-state.test.ts (5 tests) 7ms\n ✓ tests/market-ratelimit.test.ts (5 tests) 5ms\n ✓ tests/supervisor-config-guard.test.ts (2 tests) 4ms\n ✓ tests/decision-runtime.test.ts (18 tests) 1906ms\n   ✓ R3 decision runtime (18)\n     ✓ decision_only may add an initial remote stop, but cannot replace an existing algorithm stop 376ms\n ✓ tests/util-canonical.test.ts (2 tests) 3ms\n ✓ tests/package-surface.test.ts (3 tests) 4ms\n ✓ tests/deploy-config.test.ts (4 tests) 4ms\n\n Test Files  71 passed (71)\n      Tests  783 passed (783)\n   Start at  15:10:06\n   Duration  2.64s (tests 49%, transform 34%, import 15%, worker 2%)\n\n  Transform  transforming modules took 6.28s · 34% of tracked time, re-done on every run\n             persist transforms across runs with fsModuleCache: true\n             learn more: https://vitest.dev/guide/improving-performance#caching-between-reruns\n\n"
+  },
+  "offlineStartup": {
+    "command": "node scripts/offline-startup-check.mjs",
+    "exitCode": 0,
+    "report": {
+      "status": "passed",
+      "broker": "paper",
+      "commands": [
+        "halt",
+        "resume"
+      ],
+      "halt": {
+        "kind": "success",
+        "text": "已暂停交易并撤销普通挂单，保护单保留。"
+      },
+      "resume": {
+        "kind": "success",
+        "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+      },
+      "equityQuote": 24.914,
+      "modelCalls": 0,
+      "networkAttempts": 0,
+      "command": "dsh --profile trade",
+      "isolatedProfile": true,
+      "output": ""
+    }
+  },
+  "nonemptySafetySample": {
+    "positions": 1,
+    "openOrdersBeforeHalt": 2,
+    "openOrdersAfterHalt": 1,
+    "retainedStopPrice": 95,
+    "haltCalls": 2
+  },
+  "externalProviderCalls": 0,
+  "externalExchangeCalls": 0,
+  "limitations": [
+    "The isolated profile contains commands/llm services and trade DB/exec/commands/supervisor, not production market/provider adapters",
+    "R5/R6 external acceptance remains blocked"
+  ]
+}

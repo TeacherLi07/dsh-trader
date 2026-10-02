@@ -1,9 +1,8 @@
 /**
  * SQLite 连接的生命周期（单一连接，进程内共享）。
  *
- * 单进程 Docker 约束：SQLite 仍启用 WAL 以保证崩溃恢复时的持久性与读取一致性；不再有外部
- * watchdog 与主进程并行读写 `heartbeat`/`halted`。T0.2 会把这里收敛成正式的 Cordis 服务；
- * 当前先用模块级单例，避免依赖尚未核对的 service API。
+ * 单进程 Docker 下插件共享模块级连接，WAL 保证崩溃恢复时的持久性与读取一致性。
+ * 连接由 trade-db 插件拥有，卸载时关闭，避免每个插件另开连接和重复迁移。
  */
 
 import { mkdirSync } from 'node:fs'

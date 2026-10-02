@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import * as packageRoot from '../src/index.js'
 
@@ -22,5 +22,14 @@ describe('交易包 public API', () => {
     expect(paths).not.toContain('./plugins/*')
     expect(paths).not.toContain('./internal-api')
     expect(paths).not.toContain('./internal-api.js')
+  })
+
+  it('发布产物与源码均不携带已删除的外部撤单进程', () => {
+    const removedFiles = [
+      '../src/supervisor/watchdog.ts', '../lib/supervisor/watchdog.js',
+      '../scripts/watchdog-daemon.mjs', '../scripts/watchdog-check.mjs',
+    ]
+    expect(removedFiles.length).toBeGreaterThan(0)
+    for (const path of removedFiles) expect(existsSync(new URL(path, import.meta.url))).toBe(false)
   })
 })

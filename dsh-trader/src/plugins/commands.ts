@@ -26,17 +26,6 @@ export interface CommandInvocation {
   readonly rawInput?: string
 }
 
-export interface CommandBrokerPort {
-  readonly broker?: Pick<Broker, 'cancelAll'>
-}
-
-let commandPort: CommandBrokerPort | undefined
-
-/** 由执行插件提供 Broker；未提供时 /halt 仍然会先把本地状态熔断。 */
-export function setCommandPort(port: CommandBrokerPort | undefined): void {
-  commandPort = port
-}
-
 export interface HaltHandlerDeps {
   readonly heartbeat: Pick<HeartbeatStore, 'halt'>
   readonly clock: Clock
@@ -114,7 +103,7 @@ export function makeHaltHandler(deps: HaltHandlerDeps): CommandHandler {
           text: '已暂停交易且已尝试撤单，但审计写入失败：' + auditError,
         }
       }
-      return { kind: 'success', text: '已暂停交易并撤销全部挂单。' }
+      return { kind: 'success', text: '已暂停交易并撤销普通挂单，保护单保留。' }
     } catch (error) {
       const auditError = auditFailure(deps.audit, {
         actor: 'human',
@@ -166,17 +155,6 @@ interface CommandsContext extends Context {
   }
 }
 
-/**
- * 取撤单用的 broker：优先显式注入的 port，其次组合根暴露的 `TradePorts`。
- *
- * ⚠️ 不能读 `ctx.tradePorts`/`ctx.broker` 这类**未声明的上下文属性**：cordis 会直接抛
- * `cannot get property "tradePorts" without inject`，把整个 profile 启动打挂（真启动时实测）。
- * 组合根用的是模块级注册表，因此这里只读同一个引用即可。
- */
-function brokerFromContext(): Pick<Broker, 'cancelAll'> | undefined {
-  return getExecPorts()?.broker
-}
-
 export function apply(ctx: Context): void {
   const database = getDatabase()
   const journal = new DecisionJournal(database)
@@ -188,9 +166,8 @@ export function apply(ctx: Context): void {
   const halt = makeHaltHandler({
     heartbeat,
     clock,
-    // 不在 apply 时读取 broker；/halt 执行时再看最新的显式 commandPort 与
-    // exec 注册表，保证 runtime 晚到仍会完成 cancelAll。
-    brokerProvider: () => commandPort?.broker ?? brokerFromContext(),
+    // 命令与执行层只读同一个组合根；调用时读取可处理 runtime 晚到与卸载。
+    brokerProvider: () => getExecPorts()?.broker,
     audit,
   })
   const resume = makeResumeHandler({ heartbeat, clock, audit })
@@ -198,7 +175,7 @@ export function apply(ctx: Context): void {
   const commands = (ctx as CommandsContext).commands
   const unregisterHalt = commands.register({
     name: 'halt',
-    description: '暂停自动交易并撤销全部挂单',
+    description: '暂停自动交易并撤销普通挂单，保留保护单',
     handler: halt,
   })
   const unregisterResume = commands.register({

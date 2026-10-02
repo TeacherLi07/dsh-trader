@@ -331,6 +331,8 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 减险与机械保护不受影响。provider I/O 前追加持久 reservation；流中断、异常或缺少明确 finish 都按费用未决处理，不能自动重发。即使 run 已终结为 REVIEW，未决 reservation 仍会跨重启阻断后续模型调用。报价、判断等待、推理和下单延迟分别记录，用于回放执行时点。
 
 生产为 Docker 单进程；容器负责 restart，进程内不启动第二个 watchdog。UI 只读。
+旧外部 watchdog 实现和脚本已删除，历史证据保留；命令 broker 只从执行组合根读取。
+构建先清理 lib/，避免删除的代码仍被旧产物带入运行包。离线真启动复现入口：`node scripts/offline-startup-check.mjs`。
 
 ## 9. 重构范围
 
@@ -367,7 +369,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。2026-10-02 修复跨重启的 repair 额度、已计费拒绝请求重发、恢复 final 回应复验、Critic shape 与无效 token 计数；本地证据见 `docs/r3-workspace-review-2026-10-02.md`。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
 | R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
 | R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。R5 仍需预算授权后的真实 critique 运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
-| R6 | P3 小额 `live_auto` | R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0 |
+| R6 | P3 小额 `live_auto` | ⬜ R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0。2026-10-02 删除废弃外部 watchdog/命令注册旁路并通过禁网络 DSH paper 真启动；仅为本地补修，见 `docs/r6-workspace-review-2026-10-02.md` |
 
 R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs` 至 `scripts/r5-acceptance.mjs`，
 以 `pnpm build && node scripts/rN-acceptance.mjs` 运行（N 替换为阶段号），输出同名日期化

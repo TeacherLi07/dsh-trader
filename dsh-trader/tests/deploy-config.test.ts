@@ -31,4 +31,11 @@ describe('部署配置：运行模式来自启动参数', () => {
     expect(resolveDecisionStrategy('single')).toBe('single')
     expect(() => resolveDecisionStrategy('anything-else')).toThrow(/decisionStrategy 必须是 single\|critique/)
   })
+
+  it('部署样例保持 paper 且未 arm，只列已实现的两种模式', () => {
+    const example = readFileSync(new URL('../deploy/systemd/dsh-trader.env.example', import.meta.url), 'utf8')
+    expect(example).toMatch(/^TRADER_MODE=paper$/m)
+    expect(example).toMatch(/^TRADER_LIVE_ARMED=0$/m)
+    expect(example).not.toContain('live_confirm')
+  })
 })

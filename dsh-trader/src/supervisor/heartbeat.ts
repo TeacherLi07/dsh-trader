@@ -27,11 +27,6 @@ export interface HeartbeatSnapshot {
   readonly halted: boolean
 }
 
-export interface HeartbeatPort {
-  readonly read: () => HeartbeatSnapshot | undefined
-  readonly halt: (at: number) => void
-}
-
 export class HeartbeatStore {
   readonly #statements: Statements
 
