@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { freezeDecisionContext } from '../src/agents/decision-context.js'
-import { runDecisionWorkflowStages, type DecisionModel } from '../src/agents/decision-workflow.js'
+import type { DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.js'
+import { runDecisionWorkflowStages, toLedgerUsage, type DecisionModel, type DecisionWorkflowResume } from '../src/agents/decision-workflow.js'
 
 const AS_OF = 1_700_000_000_000
 const SYMBOL = 'BTC/USDT:USDT'
@@ -109,5 +110,69 @@ describe('R3 Decision workflow', () => {
     expect(resumed.failure).toBeUndefined()
     expect(retryModel.requests).toHaveLength(1)
     expect(resumed.final?.critiqueResponses).toHaveLength(1)
+  })
+
+  it('恢复时不能重新获得已经消耗的结构修复额度', async () => {
+    let savedDraft: DecisionWorkflowResume['draft']
+    const beforeCrash = await runDecisionWorkflowStages({
+      strategy: 'critique', context: context(), model: new FakeDecisionModel([{}, envelope()]), route,
+      onStage: async (stage, artifact) => {
+        if (stage === 'draft') savedDraft = artifact as NonNullable<DecisionWorkflowResume['draft']>
+        throw new Error('模拟 draft 持久化后的进程退出')
+      },
+    })
+    expect(beforeCrash.calls).toHaveLength(2)
+    expect(savedDraft).toMatchObject({ repairCalls: 1 })
+    const model = new FakeDecisionModel([{}, envelope()])
+    const result = await runDecisionWorkflowStages({
+      strategy: 'critique', context: context(), model, route,
+      resume: { draft: savedDraft },
+    })
+    expect(result.failure).toContain('RiskCritic shape')
+    expect(model.requests).toHaveLength(1)
+    expect(result.repairCalls).toBe(1)
+    expect(result.final).toBeUndefined()
+  })
+
+  it('恢复的 final 仍须逐项回应已经持久化的 critique', async () => {
+    const model = new FakeDecisionModel([])
+    const result = await runDecisionWorkflowStages({
+      strategy: 'critique', context: context(), model, route,
+      resume: {
+        draft: { candidate: envelope() as DecisionEnvelopeCandidate },
+        critique: { issues: [{ critiqueId: 'required', severity: 'P2', statement: '考虑等待', evidencePaths: [] }], uncertainties: [] },
+        final: { candidate: envelope() as DecisionEnvelopeCandidate },
+      },
+    })
+    expect(model.requests).toHaveLength(0)
+    expect(result.failure).toContain('critiqueResponses')
+    expect(result.final).toBeUndefined()
+  })
+
+  it.each([
+    { issues: [], uncertainties: [], unauthorized: true },
+    { issues: [], uncertainties: Array.from({ length: 41 }, () => '缺口') },
+    { issues: [{ critiqueId: 'bad', severity: 'P2', statement: 'x'.repeat(2001), evidencePaths: [] }], uncertainties: [] },
+    { issues: [{ critiqueId: 'bad', severity: 'P2', statement: '问题', evidencePaths: [], authorize: true }], uncertainties: [] },
+  ])('RiskCritic 输出违反已声明的形状/长度时拒绝：%j', async (critic) => {
+    const model = new FakeDecisionModel([envelope(), critic, critic, envelope()])
+    const result = await runDecisionWorkflowStages({ strategy: 'critique', context: context(), model, route })
+    expect(result.calls).toHaveLength(3)
+    expect(result.failure).toContain('RiskCritic')
+    expect(result.final).toBeUndefined()
+  })
+})
+
+describe('模型 usage 归一', () => {
+  it('互斥输入、缓存读写只累计一次，省略缓存计数允许为零', () => {
+    expect(toLedgerUsage({ inputTokens: 100, outputTokens: 40, totalTokens: 140 })).toEqual({ tokensIn: 100, tokensOut: 40, tokensCached: 0 })
+    expect(toLedgerUsage({ inputTokens: 100, outputTokens: 40, cacheReadTokens: 20, cacheWriteTokens: 10, totalTokens: 170 })).toEqual({ tokensIn: 130, tokensOut: 40, tokensCached: 20 })
+    expect(toLedgerUsage({ inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 1, totalTokens: Number.MAX_SAFE_INTEGER })).toBeNull()
+  })
+
+  it.each(['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const)('拒绝 %s 的无效计数，保留成本未知', (field) => {
+    for (const invalid of [-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(toLedgerUsage({ inputTokens: 100, outputTokens: 40, totalTokens: 140, [field]: invalid })).toBeNull()
+    }
   })
 })

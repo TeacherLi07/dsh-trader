@@ -368,6 +368,7 @@ export async function runDecisionRuntime(input: {
         readonly stage: string
         readonly state: 'reserved' | 'accounted' | 'unresolved'
       }>()
+      const rejectedRequests = new Set<string>()
       for (const row of rows) {
         const payload: unknown = JSON.parse(row.payload_json)
         if (!isRecord(payload)) throw new Error('模型调用 reservation 审计损坏；停止模型调用')
@@ -392,6 +393,9 @@ export async function runDecisionRuntime(input: {
             pending.set(attempt, { ...priorAttempt, state: 'accounted' })
           } else if (row.kind === 'model_call_output_rejected' || row.kind === 'model_stage_persisted') {
             if (priorAttempt.state !== 'accounted') throw new Error('未确认成功的模型调用不能结算为输出拒绝或 stage 持久化')
+            if (row.kind === 'model_call_output_rejected' && priorAttempt.runId === runId) {
+              rejectedRequests.add(priorAttempt.requestHash)
+            }
             pending.delete(attempt)
           } else {
             // 旧 model_call_failed 也是泛化异常，没有“未计费/未受理”的可验证证据。
@@ -407,6 +411,10 @@ export async function runDecisionRuntime(input: {
       const uncommittedSuccesses = [...pending.values()].filter((item) => item.state === 'accounted')
       if (uncommittedSuccesses.length > 0) {
         return { allowed: false as const, reason: `存在 ${uncommittedSuccesses.length} 个已结算成功但 stage 尚未持久化的模型调用；禁止重发` }
+      }
+      if (rejectedRequests.has(request.requestHash)) {
+        // 结构修复会使用不同请求；崩溃后的原请求已经计费并被拒，不能自动再发。
+        return { allowed: false as const, reason: '该模型请求的输出已被拒绝；恢复时禁止重发已计费请求' }
       }
 
       const preflight = ledger.preflight({
@@ -449,13 +457,15 @@ export async function runDecisionRuntime(input: {
     callStartedAt.set(request.requestHash, now)
   }
 
+  const rejectedOutputs = reservationStatements.get(`SELECT COUNT(*) AS n FROM audit_events
+    WHERE kind = 'model_call_output_rejected' AND json_extract(payload_json, '$.runId') = ?`).get(runId) as { n: number }
   const stages = await runDecisionWorkflowStages({
     strategy: config.strategy,
     context,
     model,
     route: config.route,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
-    resume: resumeStages(prior as DecisionRunRecord),
+    resume: { ...resumeStages(prior as DecisionRunRecord), repairCalls: Math.min(rejectedOutputs.n, 1) },
     beforeCall: (request, stage) => beforeCall(request, stage),
     onModelCall: async (call) => addLedgerEntry(call),
     onModelFailure: async (call) => addLedgerEntry(call),

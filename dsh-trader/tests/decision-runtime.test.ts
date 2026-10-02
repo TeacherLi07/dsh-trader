@@ -363,6 +363,40 @@ describe('R3 decision runtime', () => {
     }
   })
 
+  it('恢复已拒绝输出时不重发已计费的原请求', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-decision-rejected-'))
+    const dbPath = join(directory, 'state.sqlite')
+    let db: Database.Database | undefined
+    try {
+      db = new Database(dbPath)
+      migrate(db)
+      new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+      const beforeCrash = makeRuntime(db)
+      const triggerId = 'w1-crash-after-output-rejected'
+      const interrupted = await recordInterruptedRun(db, beforeCrash, triggerId, 'accounted')
+      beforeCrash.journal.appendAudit({
+        actor: 'system', kind: 'model_call_output_rejected',
+        payload: { runId: interrupted.runId, requestHash: interrupted.requestHash, stage: 'strategist', callAttemptId: 'crashed-attempt-accounted', errors: ['invalid shape'] },
+        ts: AS_OF,
+      })
+      db.close()
+      db = new Database(dbPath)
+      migrate(db)
+      const model = new FakeDecisionModel(noTrade)
+      const resumed = await runDecisionRuntime({
+        ...makeRuntime(db), model, config, trigger: { ...trigger, id: triggerId }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(resumed).toMatchObject({ status: 'review', runId: interrupted.runId })
+      expect(resumed.reason).toContain('禁止重发已计费请求')
+      expect(model.calls).toBe(0)
+      expect(new DecisionRunStore(db).get(resumed.runId)?.final).toMatchObject({ workflow: { repairCalls: 1 } })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reserved'").get()).toEqual({ n: 1 })
+    } finally {
+      db?.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
   it('uses a new run instead of replaying a terminal result after route/output budget changes', async () => {
     const db = new Database(':memory:')
     migrate(db)

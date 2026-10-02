@@ -1899,3 +1899,15 @@ paper 下可显式 waiver，live_auto 不可 waiver。
 该决定是成本/产品选择，不是 `critique` 优于 `single` 的证据；不宣称两种策略等效，也不将保留的 R5 两路
 静态 runner 当成已执行。默认 `dailyBudgetUsd` 仍未配置，因此仅将默认策略改为 critique 不会启动模型调用。
 这项决定不豁免所选 critique 的 R5 真实 forward-paper、成本后经济门槛或 R6 HTX 非空保护对账。
+
+## 23. 2026-10-02：R3 恢复边界与输出校验
+
+本地审查发现工作流的 repair 计数只存在于内存；已修复 draft 的 run 恢复后，Critic 可以再次消耗修复额度。
+阶段工件现在保存整轮计数，生产恢复还从拒绝输出审计补足；拒绝审计与修复之间崩溃时，不自动重发已经计费的原请求。
+这段状态不能只靠本次调用次数或 provider 幂等来推断。
+
+恢复的 final 现在同新响应一样检查逐项 critiqueResponses；Critic 的未知字段、数组与文本上限在本地强制执行。
+引用检查直接调用 Strategist 共用的事实路径函数，删除“为单个 Critic 引用构造临时完整 envelope”的间接校验。
+usage 的输入、输出、缓存读写均须为非负安全整数，合计溢出也返回未知成本；不再把负值修正为零。
+
+证据见 [R3 工作区审查](r3-workspace-review-2026-10-02.md)。只运行本地 fixture 和测试，不改变预算、模式或 R5/R6 外部阻塞。

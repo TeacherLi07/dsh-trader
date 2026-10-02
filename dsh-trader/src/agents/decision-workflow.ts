@@ -12,6 +12,7 @@ import type { DecisionContext } from './decision-context.js'
 import { redactDecisionErrorText } from './decision-redaction.js'
 import {
   DECISION_ENVELOPE_TOOL,
+  isDecisionEvidencePathAvailable,
   parseDecisionEnvelopeCandidate,
   type CritiqueIssue,
   type CritiqueResponse,
@@ -60,9 +61,10 @@ export interface DecisionWorkflowStages {
 }
 
 export interface DecisionWorkflowResume {
-  readonly draft?: { readonly candidate: DecisionEnvelopeCandidate; readonly evidenceIssues?: readonly string[] }
-  readonly critique?: { readonly issues: readonly CritiqueIssue[]; readonly uncertainties: readonly string[]; readonly evidenceIssues?: readonly string[] }
-  readonly final?: { readonly candidate: DecisionEnvelopeCandidate; readonly evidenceIssues?: readonly string[] }
+  readonly repairCalls?: number
+  readonly draft?: { readonly candidate: DecisionEnvelopeCandidate; readonly evidenceIssues?: readonly string[]; readonly repairCalls?: number }
+  readonly critique?: { readonly issues: readonly CritiqueIssue[]; readonly uncertainties: readonly string[]; readonly evidenceIssues?: readonly string[]; readonly repairCalls?: number }
+  readonly final?: { readonly candidate: DecisionEnvelopeCandidate; readonly evidenceIssues?: readonly string[]; readonly repairCalls?: number }
 }
 
 export type DecisionWorkflowStageName = 'draft' | 'critique' | 'final'
@@ -290,16 +292,22 @@ function parseCritique(value: unknown, context: DecisionContext): {
   readonly critique: { readonly issues: readonly CritiqueIssue[]; readonly uncertainties: readonly string[] }
   readonly evidenceIssues: readonly string[]
 } | { readonly ok: false; readonly errors: readonly string[] } {
-  if (!isRecord(value) || !Array.isArray(value['issues']) || !Array.isArray(value['uncertainties']) ||
-      !value['uncertainties'].every((item) => typeof item === 'string')) return { ok: false, errors: ['RiskCritic shape 无效'] }
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== 'issues' && key !== 'uncertainties') ||
+      !Array.isArray(value['issues']) || value['issues'].length > 40 ||
+      !Array.isArray(value['uncertainties']) || value['uncertainties'].length > 40 ||
+      !value['uncertainties'].every((item) => typeof item === 'string' && item.length <= 2_000)) {
+    return { ok: false, errors: ['RiskCritic shape 无效'] }
+  }
   const ids = new Set<string>()
   const evidenceIssues: string[] = []
   const issues: CritiqueIssue[] = []
   for (const [index, item] of value['issues'].entries()) {
-    if (!isRecord(item) || typeof item['critiqueId'] !== 'string' || item['critiqueId'].trim() === '' ||
+    if (!isRecord(item) || Object.keys(item).some((key) => !['critiqueId', 'severity', 'statement', 'evidencePaths'].includes(key)) ||
+        typeof item['critiqueId'] !== 'string' || item['critiqueId'].trim() === '' ||
         (item['severity'] !== 'P0' && item['severity'] !== 'P1' && item['severity'] !== 'P2') ||
-        typeof item['statement'] !== 'string' || item['statement'].trim() === '' ||
-        !Array.isArray(item['evidencePaths']) || !item['evidencePaths'].every((path) => typeof path === 'string')) {
+        typeof item['statement'] !== 'string' || item['statement'].trim() === '' || item['statement'].length > 2_000 ||
+        !Array.isArray(item['evidencePaths']) || item['evidencePaths'].length > 20 ||
+        !item['evidencePaths'].every((path) => typeof path === 'string' && path.trim() !== '')) {
       return { ok: false, errors: [`RiskCritic issues[${index}] shape 无效`] }
     }
     if (ids.has(item['critiqueId'])) return { ok: false, errors: [`RiskCritic critiqueId 重复：${item['critiqueId']}`] }
@@ -316,13 +324,7 @@ function parseCritique(value: unknown, context: DecisionContext): {
   // Critic 的引用也必须在冻结 context 中存在，但它的主观意见不直接授权/否决执行。
   for (const issue of issues) {
     for (const path of issue.evidencePaths) {
-      // 以一个临时 observation claim 复用同一 JSON Pointer 验证器。
-      const checked = parseDecisionEnvelopeCandidate({
-        outcome: 'no_trade', thesis: 'critique path check', rejectedAlternatives: [],
-        claims: [{ kind: 'observation', statement: 'reference', evidencePaths: [path] }],
-        uncertainties: [], confidence: 0, riskFraction: 1,
-      }, context)
-      if (!checked.ok || checked.evidenceIssues.length > 0) evidenceIssues.push(`RiskCritic ${issue.critiqueId} 引用无效：${path}`)
+      if (!isDecisionEvidencePathAvailable(context, path)) evidenceIssues.push(`RiskCritic ${issue.critiqueId} 引用无效：${path}`)
     }
   }
   return {
@@ -372,7 +374,7 @@ export async function runDecisionWorkflowStages(input: {
   }
   const storedCritique = (artifact: DecisionWorkflowResume['critique']) => {
     if (artifact === undefined) return undefined
-    const parsed = parseCritique(artifact, input.context)
+    const parsed = parseCritique({ issues: artifact.issues, uncertainties: artifact.uncertainties }, input.context)
     if (!parsed.ok) throw new Error(`已持久化 critique 无法重验：${parsed.errors.join('; ')}`)
     return {
       value: { ...parsed.critique, evidenceIssues: parsed.evidenceIssues },
@@ -421,6 +423,13 @@ export async function runDecisionWorkflowStages(input: {
   }
 
   try {
+    const repairCounts = [input.resume?.repairCalls, input.resume?.draft?.repairCalls,
+      input.resume?.critique?.repairCalls, input.resume?.final?.repairCalls].map((count) => count ?? 0)
+    if (repairCounts.some((count) => !Number.isSafeInteger(count) || count < 0 || count > 1)) {
+      throw new DecisionOutputFailure('已持久化的结构修复次数无效')
+    }
+    // 修复额度属于整个 run；阶段恢复与进程重启都不能重新获得额度。
+    repairs = Math.max(...repairCounts)
     if (input.strategy === 'single') {
       let final = storedEnvelope(input.resume?.final)
       if (final === undefined) {
@@ -435,7 +444,7 @@ export async function runDecisionWorkflowStages(input: {
           },
         })
         final = generated
-        await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
+        await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues, repairCalls: repairs }, generated.requestHash)
       }
       if (final === undefined) throw new Error('single final stage 未产出')
       finalEvidenceIssues = [...final.evidenceIssues]
@@ -456,7 +465,7 @@ export async function runDecisionWorkflowStages(input: {
         },
       })
       draftArtifact = generated
-      await input.onStage?.('draft', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
+      await input.onStage?.('draft', { candidate: generated.value, evidenceIssues: generated.evidenceIssues, repairCalls: repairs }, generated.requestHash)
     }
     if (draftArtifact === undefined) throw new Error('critique draft stage 未产出')
     const draft = draftArtifact.value
@@ -476,7 +485,7 @@ export async function runDecisionWorkflowStages(input: {
         },
       })
       critiqueArtifact = generated
-      await input.onStage?.('critique', { ...generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
+      await input.onStage?.('critique', { ...generated.value, evidenceIssues: generated.evidenceIssues, repairCalls: repairs }, generated.requestHash)
     }
     const critique = critiqueArtifact.value
     critiqueResult = critique
@@ -496,9 +505,11 @@ export async function runDecisionWorkflowStages(input: {
         },
       })
       final = generated
-      await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues }, generated.requestHash)
+      await input.onStage?.('final', { candidate: generated.value, evidenceIssues: generated.evidenceIssues, repairCalls: repairs }, generated.requestHash)
     }
     if (final === undefined) throw new Error('critique final stage 未产出')
+    const responseErrors = validateResponses(final.value, critique.issues)
+    if (responseErrors.length > 0) throw new DecisionOutputFailure(responseErrors.join('; '))
     finalEvidenceIssues = [...final.evidenceIssues]
     finalResult = final.value
     return { strategy: 'critique', draft, critique, final: final.value, evidenceIssues: finalEvidenceIssues, calls, repairCalls: repairs }
@@ -524,12 +535,15 @@ export async function runDecisionWorkflowStages(input: {
 
 /** Cost ledger 用：把 dsh-llm 的互斥缓存计数归一为入账 usage。 */
 export function toLedgerUsage(usage: TokenUsage | null): { readonly tokensIn: number; readonly tokensOut: number; readonly tokensCached: number } | null {
-  if (usage === null || !Number.isFinite(usage.inputTokens) || !Number.isFinite(usage.outputTokens)) return null
-  const cached = Math.max(0, usage.cacheReadTokens ?? 0)
-  const write = Math.max(0, usage.cacheWriteTokens ?? 0)
+  if (usage === null) return null
+  const cached = usage.cacheReadTokens ?? 0
+  const write = usage.cacheWriteTokens ?? 0
+  if (![usage.inputTokens, usage.outputTokens, cached, write].every((count) => Number.isSafeInteger(count) && count >= 0)) return null
+  const tokensIn = usage.inputTokens + cached + write
+  if (!Number.isSafeInteger(tokensIn) || !Number.isSafeInteger(tokensIn + usage.outputTokens)) return null
   return {
-    tokensIn: Math.max(0, usage.inputTokens) + cached + write,
-    tokensOut: Math.max(0, usage.outputTokens),
+    tokensIn,
+    tokensOut: usage.outputTokens,
     tokensCached: cached,
   }
 }

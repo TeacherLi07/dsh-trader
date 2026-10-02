@@ -378,6 +378,11 @@ function evidenceValueAvailable(value: unknown): boolean {
   return true
 }
 
+/** Strategist 与 Critic 共用事实叶子检查，避免为一个引用伪造整份裁决。 */
+export function isDecisionEvidencePathAvailable(context: DecisionContext, path: string): boolean {
+  return evidenceValueAvailable(pointerValue(context, path))
+}
+
 function actionHasOpen(action: unknown): action is OpenAction {
   return isRecord(action) && action['action'] === 'open'
 }
@@ -468,8 +473,7 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
       evidenceIssues.push(`claims[${index}] 缺少证据路径`)
     }
     for (const path of claim['evidencePaths']) {
-      const referenced = pointerValue(context, path)
-      if (!evidenceValueAvailable(referenced)) evidenceIssues.push(`claims[${index}] 引用缺失/过期/非叶子事实：${path}`)
+      if (!isDecisionEvidencePathAvailable(context, path)) evidenceIssues.push(`claims[${index}] 引用缺失/过期/非叶子事实：${path}`)
     }
   }
 

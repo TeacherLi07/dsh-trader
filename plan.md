@@ -199,6 +199,8 @@ v10 为 `pm_quotes` 增加 nullable `available_at`，保留 `(token_id, observed
 R3 补足运行语义：run 必须绑定候选/提示词/模型版本与触发身份，不能只凭 context hash 合并不同
 实验；终结工件不可重写，重试按已持久化阶段恢复。状态为 running/failed 或 eligibility 未计算的
 run 不能授权开仓。同一 context 可用于多个对照 run，实验账户及其订单幂等域彼此隔离。
+结构修复额度按整个 run 计数，随阶段工件持久化并从拒绝审计补足；重启不能重置额度或重发已计费且输出已拒绝的原请求。
+恢复的 final 必须重新核验全部 critiqueResponses；Critic 输出的字段与长度由本地代码执行校验。
 
 ### 4.2 权威顺序
 
@@ -362,7 +364,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；当前 schema v8 渲染复验为 107,128 context / 119,243 request 字符及 123,751 UTF-8 保守输入 token 上界；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，证据见 `docs/r2-decision-context-2026-09-21.md` |
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
-| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
+| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。2026-10-02 修复跨重启的 repair 额度、已计费拒绝请求重发、恢复 final 回应复验、Critic shape 与无效 token 计数；本地证据见 `docs/r3-workspace-review-2026-10-02.md`。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
 | R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
 | R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。R5 仍需预算授权后的真实 critique 运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
 | R6 | P3 小额 `live_auto` | R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0 |
