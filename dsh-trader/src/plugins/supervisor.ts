@@ -17,6 +17,7 @@ import { DEFAULT_TRIGGER_LIMITS, type TriggerLimits } from '../trigger/engine.js
 import { TriggerQueue } from '../trigger/queue.js'
 import { getPmRuntime } from '../predictions/runtime.js'
 import { redactDecisionErrorText } from '../agents/decision-redaction.js'
+import { createDecisionModelProvider } from '../agents/model-provider.js'
 import { getExecPorts } from './exec.js'
 import { runDecisionRuntime } from '../agents/decision-runtime.js'
 import type { DecisionStrategy } from '../agents/decision-workflow.js'
@@ -209,7 +210,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
     checkPriceTableAge()
   }, heartbeatMs)
 
-  const model = { stream: (options: Parameters<typeof ctx.llm.stream>[0]) => ctx.llm.stream(options) }
+  const model = createDecisionModelProvider(ctx.llm, route)
   const decisionConfig = (ports: TradePorts) => ({
     strategy,
     route: { ...route, maxChars: ports.decisionContextConfig?.maxChars ?? route.maxChars },
