@@ -114,19 +114,20 @@ export class SupervisorWindowQueue {
     return claim()
   }
 
-  complete(item: WindowQueueItem, now: number): void {
+  complete(item: WindowQueueItem, now: number): boolean {
     const mark = this.#statements.get(
       `UPDATE supervisor_windows SET state = 'done', updated_at = ?
-       WHERE window_id = ? AND fire_ts = ? AND state = 'running'`,
+       WHERE window_id = ? AND fire_ts = ? AND state = 'running' AND attempts = ?`,
     )
     const advance = this.#statements.get(
       `UPDATE supervisor_window_cursors SET cursor_ts = ?, updated_at = ?
        WHERE window_id = ? AND cursor_ts < ?`,
     )
-    this.db.transaction(() => {
-      mark.run(now, item.id, item.fireTs)
-      // 只有成功完成后推进；若状态已被恢复/重试，旧 fire 不会把 cursor 倒退。
+    return this.db.transaction(() => {
+      if (Number(mark.run(now, item.id, item.fireTs, item.attempts).changes) !== 1) return false
+      // 恢复/重试会更换 attempt；旧回调既不能完成新领取，也不能跳过尚未完成的 fire。
       advance.run(item.fireTs, now, item.id, item.fireTs)
+      return true
     })()
   }
 
@@ -134,9 +135,9 @@ export class SupervisorWindowQueue {
     this.#statements
       .get(
         `UPDATE supervisor_windows SET state = 'pending', last_error = ?, updated_at = ?
-         WHERE window_id = ? AND fire_ts = ? AND state = 'running'`,
+         WHERE window_id = ? AND fire_ts = ? AND state = 'running' AND attempts = ?`,
       )
-      .run(String(error), now, item.id, item.fireTs)
+      .run(String(error), now, item.id, item.fireTs, item.attempts)
   }
 
   pendingCount(): number {

@@ -90,6 +90,7 @@ W1 时间窗 / W2 未覆盖 / W3 新颖性
 W2/W3 的去重、冷却和预算必须实际接线；重复缺口不能无限唤醒。事件入队时刻、等待时间、判断
 完成时刻和动作执行时刻均可审计。事件已过期时记录原因，不能执行旧快照的动作。频率变化要
 单独对照，不能与工作流变化混为一个实验；未接入的事件源不宣称能被 W3 识别。
+W1 完成/失败回写绑定领取时的 attempts；恢复/重试后的旧回调不能改写新领取，只有当前领取成功完成才推进窗口游标。
 
 R3 先实现单次 Strategist，再用同一调用适配器组合三步 draft→critique→final，供 R5 对照。
 默认每轮为 1 或 3 次调用；每轮最多增加 1 次结构修复，失败原文与修复成本均保留，仍失败则
@@ -367,7 +368,7 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
 | R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。2026-10-02 修复跨重启的 repair 额度、已计费拒绝请求重发、恢复 final 回应复验、Critic shape 与无效 token 计数；本地证据见 `docs/r3-workspace-review-2026-10-02.md`。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
-| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
+| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。2026-10-02 补修 W1 旧 attempt 回写与游标误推进，见 `docs/r4-window-recovery-2026-10-02.md`。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
 | R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。R5 仍需预算授权后的真实 critique 运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
 | R6 | P3 小额 `live_auto` | ⬜ R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0。2026-10-02 删除废弃外部 watchdog/命令注册旁路并通过禁网络 DSH paper 真启动；仅为本地补修，见 `docs/r6-workspace-review-2026-10-02.md` |
 

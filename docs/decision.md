@@ -1923,3 +1923,12 @@ Docker 单进程已是运行合同，永久禁用的 watchdog 仍携带 778 行�
 
 本地验证包括非空持仓/保护单下的重复 halt 与禁网络的隔离 DSH 真启动。证据见
 [R6 工作区简化](r6-workspace-review-2026-10-02.md)，这些工程检查不完成 R6 外部验收。
+
+## 25. 2026-10-02：R4 W1 窗口回写身份
+
+SupervisorWindowQueue.complete 曾在 UPDATE 未命中时照样推进 cursor；领取被恢复或退回 pending 后，旧回调可以吞掉未完成窗口。
+完成/失败更新只检查 running 状态也不足以区分重试后的新领取，旧 attempt 能结束或释放新 attempt。
+
+现在两种回写均使用已有 attempts 字段校验领取身份，只有完成更新命中一行才在同一事务推进 cursor。
+supervisor 对失效完成记录失败审计；重复完成与旧失败均不改写当前状态。复用现有计数，不增加锁或 lease 表。
+三个非空恢复/重试回归在原实现上均失败，证据见 [W1 恢复修复](r4-window-recovery-2026-10-02.md)。

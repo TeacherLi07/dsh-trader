@@ -279,7 +279,7 @@ export function apply(ctx: Context, config: SupervisorConfig): void {
         payload: { windowId: fire.id, fireTs: fire.fireTs, strategy, results },
         ts: clock.now(),
       })
-      windowQueue.complete(fire, clock.now())
+      if (!windowQueue.complete(fire, clock.now())) throw new Error('W1 fire 的领取已失效；拒绝推进窗口游标')
       logger.info(`W1 ${fire.id}: ${results.length} symbol decisions persisted`)
     } catch (error) {
       windowQueue.fail(fire, safeError(error), clock.now())
