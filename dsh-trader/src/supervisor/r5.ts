@@ -8,18 +8,28 @@ import { DECISION_WORKFLOW_PROMPT_VERSION, type DecisionModelRoute, type Decisio
 
 export const R5_MIN_WINDOWS = 200
 export const R5_MAX_SAMPLES = 10_000
-export const R5_MODEL_CONTEXT_WINDOW = 1_000_000
+export const R5_MODEL_CONTEXT_WINDOW = 1_048_576
 export const R5_MAX_REQUEST_CHARS = 300_000
-export const R5_FIXED_PROVIDER = 'deepseek-official'
+export const R5_FIXED_PROVIDER = 'deepseek-r5-responses'
 export const R5_FIXED_MODEL = 'deepseek-flash'
 export const R5_DEEPSEEK_PROVIDER_CONFIG = Object.freeze({
   provider: R5_FIXED_PROVIDER,
-  adapter: '@deepseek-ai/dsh-llm-deepseek',
+  adapter: '@deepseek-ai/dsh-llm-pi-ai',
   connection: Object.freeze({
     apiKeyEnv: 'TRADER_R5_API_KEY',
     baseURL: 'https://api.deepseek.com',
-    thinking: 'enabled',
-    reasoningEffort: 'high',
+    api: 'openai-responses',
+    reasoning: 'high',
+    compat: Object.freeze({ supportsStrictMode: false }),
+    transport: 'sse',
+    retryPolicy: Object.freeze({ mode: 'normal', maxRetries: 0 }),
+    models: Object.freeze([Object.freeze({
+      id: R5_FIXED_MODEL,
+      name: 'DeepSeek Flash',
+      contextWindow: 1_048_576,
+      maxTokens: 393_216,
+      reasoningEfforts: Object.freeze({ high: 'high', max: 'max' }),
+    })]),
   }),
 })
 export const R5_STRATEGIES = ['single', 'critique'] as const

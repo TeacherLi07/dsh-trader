@@ -1,8 +1,9 @@
 /** 交易判断只依赖 DSH LLM seam；协议、凭据、重试与传输均由已注册 provider 持有。 */
 
 import type { GenerateOptions, LlmRuntime, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { PiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 
-export interface DecisionModelRoute {
+export interface DecisionProviderRoute {
   readonly provider: string
   readonly model: string
 }
@@ -12,12 +13,45 @@ export interface DecisionModelProvider {
 }
 
 /**
+ * Build real `dsh-llm-pi-ai` provider profiles for isolated DSH contexts.
+ * Only environment-variable names enter this value; credentials resolve in DSH.
+ */
+export function deepseekResponsesPiAiConfig(input: {
+  readonly productionApiKeyEnv: string
+  readonly r5ApiKeyEnv: string
+}) {
+  const profile = (apiKeyEnv: string): PiAiProviderProfile => ({
+    apiKeyEnv,
+    api: 'openai-responses',
+    baseURL: 'https://api.deepseek.com',
+    reasoning: 'high',
+    compat: { supportsStrictMode: false },
+    transport: 'sse',
+    retryPolicy: { mode: 'normal', maxRetries: 0 },
+    models: [{
+      id: 'deepseek-flash',
+      name: 'DeepSeek Flash',
+      contextWindow: 1_048_576,
+      maxTokens: 393_216,
+      reasoningEfforts: { high: 'high', max: 'max' },
+    }],
+  })
+
+  return {
+    providers: {
+      'deepseek-responses': profile(input.productionApiKeyEnv),
+      'deepseek-r5-responses': profile(input.r5ApiKeyEnv),
+    },
+  }
+}
+
+/**
  * 将 DSH 的 provider-neutral LLM seam 接入交易判断工作流。
  * 该检查防止工作流配置漂移成第二条 provider 路由；实际传输始终由 DSH 适配器负责。
  */
 export function createDecisionModelProvider(
   llm: Pick<LlmRuntime, 'stream'>,
-  route: DecisionModelRoute,
+  route: DecisionProviderRoute,
 ): DecisionModelProvider {
   const provider = route.provider.trim()
   const model = route.model.trim()

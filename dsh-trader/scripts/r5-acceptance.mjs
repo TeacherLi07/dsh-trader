@@ -24,6 +24,7 @@ import {
   PriceTableStore,
   PRICING_SOURCE,
   R5_MIN_WINDOWS,
+  R5_FIXED_PROVIDER,
   R5_DEEPSEEK_PROVIDER_CONFIG,
   R5ControlRegistry,
   assertNoCredentialValues,
@@ -211,11 +212,11 @@ function markdown(report) {
 }
 
 async function createDshDecisionModel(route) {
-  if (route.provider !== 'deepseek-official') throw new Error('R5 runner 只允许 manifest 固定到 DSH deepseek-official provider')
-  const [{ Context }, LlmModule, DeepSeekModule] = await Promise.all([
+  if (route.provider !== R5_FIXED_PROVIDER) throw new Error(`R5 runner 只允许 manifest 固定到 DSH ${R5_FIXED_PROVIDER} provider`)
+  const [{ Context }, LlmModule, PiAiModule] = await Promise.all([
     import('@deepseek-ai/cordis'),
     import('@deepseek-ai/dsh-llm'),
-    import('@deepseek-ai/dsh-llm-deepseek'),
+    import('@deepseek-ai/dsh-llm-pi-ai'),
   ])
   const context = new Context()
   let llmFiber
@@ -223,8 +224,8 @@ async function createDshDecisionModel(route) {
   try {
     llmFiber = await context.plugin(LlmModule.default ?? LlmModule.LlmRuntime)
     providerFiber = await context.plugin(
-      { apply: DeepSeekModule.apply, inject: DeepSeekModule.inject },
-      R5_DEEPSEEK_PROVIDER_CONFIG.connection,
+      { apply: PiAiModule.apply, inject: PiAiModule.inject },
+      { providers: { [R5_FIXED_PROVIDER]: R5_DEEPSEEK_PROVIDER_CONFIG.connection } },
     )
     const providers = context.llm.listProviders().map((item) => item.id)
     if (!providers.includes(route.provider)) throw new Error('DSH LLM provider route 未注册')
@@ -277,7 +278,7 @@ async function main() {
   const apiKeyPresent = r5ApiKey.trim() !== ''
   const keyIsolationAcknowledged = process.env['TRADER_R5_CONFIRM_KEY_ISOLATION'] === '1'
   const apiKeyDedicated = isDedicatedR5ApiKey(r5ApiKey, productionApiKey, keyIsolationAcknowledged)
-  const routeSupported = manifest.route.provider === 'deepseek-official'
+  const routeSupported = manifest.route.provider === R5_FIXED_PROVIDER
   const sourceRevision = inspectSourceRevision()
   const codeCommitMatches = sourceRevision.currentGitCommit === manifest.versions.gitCommit
   let buildArtifactsHash = null

@@ -1,63 +1,61 @@
 # 模型 provider 路由
 
-交易判断通过 `trade-supervisor.l3.provider/model` 选择 DSH LLM route。`model-provider.ts` 只把冻结的 route 请求交给 `ctx.llm.stream` 并核对 provider/model；凭据、协议序列化、流解析和重试策略都由 DSH adapter 管理。没有交易插件自己的 HTTP、SSE 或 WebSocket 客户端。
+交易判断通过 `trade-supervisor.l3.provider/model` 选择 DSH LLM route。`model-provider.ts` 将冻结的 route 请求交给 `ctx.llm.stream` 并核对 provider/model。provider 协议、凭据、流解析及重试由 DSH adapter 管理。
 
 ## DeepSeek Responses API
 
-当前 DSH 的 `deepseek-official` route 由 `@deepseek-ai/dsh-llm-deepseek` 提供，协议是 DeepSeek Chat Completions + SSE。要优先使用官方 Responses API，配置一个由已挂载 `@deepseek-ai/dsh-llm-pi-ai` 提供的新 route，并将 `trade-supervisor.l3.provider` 指向它。DSH base 已挂载该 adapter；它默认 dormant，可从 `$DSH_HOME/settings.yaml` 的 `llm-pi-ai:` section 注册 route。凭据字段只写环境变量引用：
+`cordis.patch.yml` 显式配置 DSH 自带的 `@deepseek-ai/dsh-llm-pi-ai`，默认交易 route 为 `deepseek-responses/deepseek-flash`。profile 使用 DeepSeek 官方 `https://api.deepseek.com` Responses HTTP/SSE、`reasoning: high`，输出能力上限不少于 32768，并将 SDK 与 DSH retry executor 重试数设为 0。R5 隔离 route `deepseek-r5-responses` 使用独立的 `TRADER_R5_API_KEY` reference。
 
-```yaml
-llm-pi-ai:
-  providers:
-    deepseek-responses:
-      displayName: DeepSeek Responses
-      apiKeyEnv: DEEPSEEK_API_KEY
-      api: openai-responses
-      baseURL: https://api.deepseek.com
-      reasoning: high
-      transport: sse
-      retryPolicy:
-        mode: normal
-        maxRetries: 0
-      models:
-        - id: deepseek-flash
-          name: DeepSeek Flash
-          contextWindow: 1048576
-          maxTokens: 32768
-          reasoningEfforts:
-            high: high
-            max: max
+同样的 profile 可程序化挂载到隔离 DSH Context，不需要改共享 settings：
+
+```ts
+ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
+  productionApiKeyEnv: 'DEEPSEEK_API_KEY',
+  r5ApiKeyEnv: 'TRADER_R5_API_KEY',
+}))
 ```
 
-运行时请求 cap 仍由 `trade-supervisor.maxOutputTokens` 设定，必须至少 32768；profile 的 `maxTokens` 是所声明模型的能力上限。生产 W1/W2/W3 仍受 daily budget、token budget 与已知价目闸门控制。
+此工厂返回 pi-ai 插件实际接受的 `{ providers: { [route]: profile } }` 形状；只包含环境变量 reference，不读取或复制 key。
 
-官方 DeepSeek 文档定义 `POST /responses`，并说明 `stream: true` 产生 Responses 事件格式的 SSE。文档没有声明 Responses WebSocket 传输，因此此 route 固定走 SSE。DSH 安装包的 `dsh-llm-pi-ai` 使用 pi-ai `openai-responses` adapter；该 adapter 当前走 OpenAI SDK HTTP/SSE 路径，未实现通用 Responses WebSocket。pi-ai 的 WebSocket 实现位于 OpenAI Codex 专用 Responses adapter，不能据此推断 DeepSeek 或普通 OpenAI-compatible 网关也支持 WS。
+官方 DeepSeek 文档定义 `POST /responses`，并明确 `stream: true` 使用语义 SSE；没有文档化 WebSocket 传输，所以官方 route 固定走真实可用的 SSE。
 
-这条路由没有 SDK 级重试或 transport fallback：`dsh-llm-pi-ai` 为 pi-ai 固定传 `maxRetries: 0`，OpenAI SDK 请求也固定 `maxRetries: 0`；`retryPolicy.maxRetries: 0` 关闭可选的 DSH `llm-retry` 重放。流中断由上层作为失败/成本未决处理。不要改成 Codex adapter 或打开不受此协议支持的 WebSocket transport。
+## Sub2API Responses WebSocket
 
-## Sub2API
+公开 DSH `@godd6366/dsh-sub2api` 插件把 `llm-sub2api:` settings 翻译到 DSH `llm-pi-ai` route；其 `sub2api-openai` 使用 generic `openai-responses` HTTP/SSE adapter。Sub2API gateway 本身另有标准 Responses WebSocket v2 ingress，本项目提供 `sub2api-openai-ws` 作为单独 DSH LLM provider route。
 
-公开的 `@godd6366/dsh-sub2api` 插件不实现 LLM wire client。它将 `llm-sub2api:` settings 翻译成 DSH `llm-pi-ai` profile；OpenAI group 的默认协议是 `openai-responses`，其请求仍由 pi-ai 序列化与流解析。启用该第三方插件并配置其模型后，`trade-supervisor.l3` 可以使用该插件实际注册的 route，例如 `sub2api-openai`：
+此 route 使用官方 OpenAI Node SDK `ResponsesWS` 负责 WebSocket transport，复用 pi-ai 的 Responses message/tool serializer 和 terminal event processor。通用 `openai-responses` 的 `transport: websocket` 不会被读取，不能用来打开 WS。
 
 ```yaml
-llm-sub2api:
-  baseURL: http://localhost:8080
-  providers:
-    openai:
-      apiKeyEnv: SUB2API_OPENAI_API_KEY
-      models:
-        - id: <gateway-model-id>
+- id: trade-sub2api-responses-ws
+  name: dsh-trader/plugins/sub2api-responses-ws
+  config:
+    enabled: true
+    baseURL: https://sub2api.example
+    apiKeyEnv: SUB2API_OPENAI_API_KEY
+    connectTimeoutMs: 10000
+    models:
+      - id: sub2api:gpt-6
+        wireModelId: gpt-6
+        name: Gateway GPT-6
+        contextWindow: 262144
+        maxTokens: 32768
+        reasoningEfforts: [high]
+        defaultReasoningEffort: high
 ```
 
-`<gateway-model-id>` 必须替换成该 gateway group 实际服务的模型。key 由 DSH credential/env 机制提供，不写入交易配置、prompt 或日志。公开插件说明的是 SSE streaming；本项目不强制 WebSocket，也不假设网关支持 WS。无 DSH/OpenAI SDK 的重试或 WS→HTTP fallback。若未来网关单独证明 WS 支持，应由其 DSH provider adapter 实现并确保“请求已发送但无明确终态”不会被自动重发。
+把 `trade-supervisor.l3` 设为 `provider: sub2api-openai-ws, model: sub2api:gpt-6` 后，DSH route 使用 `sub2api:gpt-6` 记账，网关收到 `wireModelId: gpt-6`。Sub2API key 只通过 `apiKeyEnv` reference 解析。adapter 发 `OpenAI-Beta: responses_websockets=2026-02-06`，使用 `HttpsProxyAgent` 读取 HTTPS proxy 环境变量；loopback 地址绕过代理。
 
-交易成本价目表不能因更换 route 而沿用 DeepSeek 官方价。任何未有独立、可审计 price row 的 sub2api model 都保持 `cost_known=false`，模型判断继续 fail-closed。
+OpenAI SDK 自动重连关闭，DSH provider retry policy 的 `maxRetries` 为 0；此 WS route 没有 HTTP fallback。请求发送后若未收到 `response.completed`、`response.incomplete` 或 `response.failed`，adapter 返回 `OUTCOME_UNKNOWN` 并停止，绝不重新发送 `response.create`。已解析的 API key 会从流错误文本中精确脱敏。
 
-## 来源与验证边界
+`sub2api:` model alias 保持与 DeepSeek 价目表不同；如无该 alias 对应、可审计的价格行，现有 cost gate 将其识别为未知并 fail-closed。不能按同名 wire model 借用 DeepSeek 单价。
 
-- [DeepSeek Responses API 参考](https://api-docs.deepseek.com/api/create-response/) 与 [Responses API 指南](https://api-docs.deepseek.com/guides/responses_api/)：端点、streaming SSE、thinking effort 和参数支持。
-- [DeepSeek 模型目录](https://api-docs.deepseek.com/api/list-models/)：按当前模型返回 context/output 上限与协议能力。
-- [DSH `dsh-llm-pi-ai` adapter](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/llm/llm-pi-ai)：配置化 provider route 与 pi-ai adapter。
-- [DSH sub2api plugin README](https://github.com/GodD6366/dsh-sub2api) 与 [其 plugin entry source](https://github.com/GodD6366/dsh-sub2api/blob/master/src/index.ts)：插件把 sub2api settings 转成 `llm-pi-ai` profile。
+## 验证与来源
 
-本地只检查了安装包源码和离线接口；没有读取凭据、发起 provider 请求或验证真实 sub2api gateway。Responses route 与模型 quality/cost 仍需独立连接和账单验证。
+- [DeepSeek Responses API 参考](https://api-docs.deepseek.com/api/create-response/) 与 [指南](https://api-docs.deepseek.com/guides/responses_api/)：HTTP endpoint、SSE、thinking effort。
+- [DeepSeek 模型目录](https://api-docs.deepseek.com/api/list-models/)：context 和 output cap。
+- [DSH `dsh-llm-pi-ai` adapter](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/llm/llm-pi-ai)：DSH provider route 配置。
+- [DSH sub2api plugin](https://github.com/GodD6366/dsh-sub2api)：settings 到 pi-ai 的 route 适配。
+- [Sub2API gateway routes](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/server/routes/gateway.go) 和 [WS 配置](https://github.com/Wei-Shaw/sub2api/blob/main/deploy/config.example.yaml)：Responses WebSocket v2 ingress。
+- [OpenAI Node SDK Responses WS](https://github.com/openai/openai-node/blob/main/docs/responses.md)：官方 WebSocket client/events。
+
+Loopback WS 服务模拟覆盖了非空 `response.create`、pi-ai 事件处理、未终结断线无重连/HTTP 重发、错误中 fake key 脱敏与 usage 完整性。真实 DeepSeek/Sub2API 连接与网关账单仍由主 agent 在预算/隔离凭据护栏内验证。

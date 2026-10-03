@@ -20,8 +20,16 @@ describe('部署配置：运行模式来自启动参数', () => {
     expect(patch).toMatch(/waiver:\s*false/)
   })
 
-  it('R5 静态实验冻结的模型路由与生产 supervisor 路由一致', () => {
-    expect(patch).toContain(`l3: { provider: ${R5_FIXED_PROVIDER}, model: ${R5_FIXED_MODEL} }`)
+  it('生产默认 route 使用 Responses SSE，R5 固定 route 使用隔离 key', () => {
+    expect(patch).toContain('l3: { provider: deepseek-responses, model: deepseek-flash }')
+    expect(patch).toContain(`          ${R5_FIXED_PROVIDER}:`)
+    expect(patch).toMatch(/api: openai-responses/)
+    expect(patch).toMatch(/reasoning: high/)
+    expect(patch).toMatch(/compat: \{ supportsStrictMode: false \}/)
+    expect(patch).toMatch(/transport: sse/)
+    expect(patch).toMatch(/retryPolicy: \{ mode: normal, maxRetries: 0 \}/)
+    expect(patch).toMatch(/maxOutputTokens: 32768/)
+    expect(R5_FIXED_MODEL).toBe('deepseek-flash')
   })
 
   it('默认选择 critique，保留 single 配置回退，拒绝未知策略', () => {

@@ -12,6 +12,7 @@ import type { DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.
 import type { DecisionModel, DecisionWorkflowStages } from '../src/agents/decision-workflow.js'
 import {
   R5_MIN_WINDOWS,
+  R5_FIXED_PROVIDER,
   R5_DEEPSEEK_PROVIDER_CONFIG,
   assertNoCredentialValues,
   aggregateR5StaticResults,
@@ -92,7 +93,7 @@ function manifest(count = R5_MIN_WINDOWS): R5ExperimentManifest {
       absoluteMaxDrawdownUsd: 100,
       selectionRule: 'critique-if-supported-otherwise-single',
     },
-    route: { provider: 'deepseek-official', model: 'deepseek-flash', maxTokens: 512, maxChars: 180_000 },
+    route: { provider: R5_FIXED_PROVIDER, model: 'deepseek-flash', maxTokens: 512, maxChars: 180_000 },
     samples,
   }
 }

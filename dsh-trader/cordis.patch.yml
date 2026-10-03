@@ -9,6 +9,52 @@
 # 包安装进 profile 后，`dsh-trader/plugins/*` 由 package.json 的 exports 解析。
 
 - insert:
+    # DSH base 默认 dormant 挂载此 provider-neutral adapter。显式覆写其 route 配置，
+    # 直接调用 DeepSeek 官方 Responses HTTP/SSE；provider secrets 仍由 credential ref 解析。
+    - id: llm-pi-ai
+      name: '@deepseek-ai/dsh-llm-pi-ai'
+      config:
+        providers:
+          deepseek-responses:
+            apiKeyEnv: DEEPSEEK_API_KEY
+            api: openai-responses
+            baseURL: https://api.deepseek.com
+            reasoning: high
+            compat: { supportsStrictMode: false }
+            transport: sse
+            retryPolicy: { mode: normal, maxRetries: 0 }
+            models:
+              - id: deepseek-flash
+                name: DeepSeek Flash
+                contextWindow: 1048576
+                maxTokens: 393216
+                reasoningEfforts: { high: high, max: max }
+          deepseek-r5-responses:
+            apiKeyEnv: TRADER_R5_API_KEY
+            api: openai-responses
+            baseURL: https://api.deepseek.com
+            reasoning: high
+            compat: { supportsStrictMode: false }
+            transport: sse
+            retryPolicy: { mode: normal, maxRetries: 0 }
+            models:
+              - id: deepseek-flash
+                name: DeepSeek Flash
+                contextWindow: 1048576
+                maxTokens: 393216
+                reasoningEfforts: { high: high, max: max }
+
+    # 仅设置真实 Sub2API gateway/model 时启用。模型 alias 与 wireModelId 分离，
+    # 保证缺少独立价格的 sub2api:<id> 不会误中 DeepSeek 官方价目表。
+    - id: trade-sub2api-responses-ws
+      name: dsh-trader/plugins/sub2api-responses-ws
+      config:
+        enabled: false
+        baseURL: ''
+        apiKeyEnv: SUB2API_OPENAI_API_KEY
+        connectTimeoutMs: 10000
+        models: []
+
     - id: trade-db
       name: dsh-trader/plugins/db
       config:
@@ -111,7 +157,7 @@
     - id: trade-supervisor
       name: dsh-trader/plugins/supervisor
       config:
-        l3: { provider: deepseek-official, model: deepseek-flash }
+        l3: { provider: deepseek-responses, model: deepseek-flash }
         decisionStrategy: critique # 可显式改为 single；变更前先排空/核对 running 与 claimed 触发器
         maxOutputTokens: 32768
         wakeLimits:
