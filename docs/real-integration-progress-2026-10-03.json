@@ -377,16 +377,34 @@
   },
   "legacyDeepSeekStatus": "blocked_on_provider_balance",
   "latestUpdate": {
-    "updatedAt": "2026-10-03T08:57:55.481838+00:00",
-    "source": "https://ai.teacherli.net",
+    "at": "2026-10-03T13:26:56.217942+00:00",
     "model": "gpt-6-luna",
     "reasoningEffort": "max",
-    "api": "responses-websocket",
-    "deepseekSampleTopUpCancelled": true,
-    "evidence": "r5-luna-teacherli-2026-10-03.json",
-    "invoiceVerified": false,
-    "status": "cache_identity_validation_in_progress",
-    "validLunaCritiqueSamples": 3,
-    "unknownOutcomesPreserved": true
+    "transport": "Responses WS",
+    "detail": "r5-luna-teacherli-2026-10-03.json",
+    "stableSession": {
+      "status": "stopped_on_unknown_rate_limited_ws_outcome",
+      "completedFullWorkflowSamples": 2,
+      "failedSamples": 1,
+      "providerWsRequests": 9,
+      "knownUsageCalls": 8,
+      "unknownUsageCalls": 1,
+      "cacheReadFraction": 0.012594324985051808
+    },
+    "localVerification": {
+      "files": 78,
+      "tests": 878,
+      "command": "pnpm verify"
+    },
+    "htxLatestRead": "HTTP 200 business code 401 Incorrect IP address; no new orders; previous successful live runtime evidence retained",
+    "terminalReplay": {
+      "runs": 3,
+      "replayCalls": 6,
+      "providerCalls": 0,
+      "networkCalls": 0,
+      "budgetUnchanged": true,
+      "originalDbUnmodified": true
+    },
+    "economicAndLongTermAcceptance": "incomplete"
   }
 }

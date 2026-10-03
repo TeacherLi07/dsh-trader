@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-10-03T11:09:06.971303+00:00",
+  "updatedAt": "2026-10-03T13:26:56.217942+00:00",
   "status": "cache_identity_validation_in_progress",
   "endpoint": "https://ai.teacherli.net",
   "credentialReference": "SUB2API_KEY",
@@ -267,40 +267,9 @@
     "output": ""
   },
   "localVerification": {
-    "files": 76,
-    "tests": 855,
-    "totalCoverage": {
-      "lines": {
-        "total": 8293,
-        "covered": 7223,
-        "skipped": 0,
-        "pct": 87.09
-      },
-      "statements": {
-        "total": 9612,
-        "covered": 7991,
-        "skipped": 0,
-        "pct": 83.13
-      },
-      "functions": {
-        "total": 1575,
-        "covered": 1429,
-        "skipped": 0,
-        "pct": 90.73
-      },
-      "branches": {
-        "total": 9466,
-        "covered": 7259,
-        "skipped": 0,
-        "pct": 76.68
-      },
-      "branchesTrue": {
-        "total": 0,
-        "covered": 0,
-        "skipped": 0,
-        "pct": 100
-      }
-    }
+    "files": 78,
+    "tests": 878,
+    "command": "pnpm verify"
   },
   "limitations": [
     "All attempts and schema failures are retained; no completed full Luna critique sample yet",
@@ -498,12 +467,495 @@
   "cacheInvestigation": "codex-cache-investigation-2026-10-03.json",
   "nextValidation": {
     "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6",
-    "status": "running",
+    "status": "stopped_on_unknown_rate_limited_ws_outcome",
     "codeCommit": "1ba3787",
     "samples": 6,
     "totalBudgetUsd": 1,
     "maxTokens": 32768,
     "reasoningEffort": "max",
-    "sessionScope": "one stable identifier per run"
+    "sessionScope": "one stable identifier per run",
+    "validFullWorkflowSamples": 2,
+    "failedSamples": 1,
+    "cacheBenefitConfirmed": false
+  },
+  "stableSessionValidation": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6",
+    "status": "stopped_on_unknown_rate_limited_ws_outcome",
+    "codeCommit": "1ba37873cd471e71708d7b2ef233bba569f8d508",
+    "sourceAttempt": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/attempt-1791025570127.json",
+    "traceSha256": "e4cfb408cd93747261b9b7f55464bd08768bcd5cd6fbc21dfed19f4348043128",
+    "requestedSamples": 6,
+    "completedFullWorkflowSamples": 2,
+    "failedSamples": 1,
+    "providerWsRequests": 9,
+    "knownUsageCalls": 8,
+    "unknownUsageCalls": 1,
+    "actualInputTokens": 396369,
+    "outputTokens": 31104,
+    "reasoningTokens": 25047,
+    "cachedTokens": 4992,
+    "cacheReadFraction": 0.012594324985051808,
+    "distinctCacheKeys": 3,
+    "sessionScope": "one stable identifier per run",
+    "calls": [
+      {
+        "index": 1,
+        "sentAt": 1791025591763,
+        "keyHash": "fa9eec48db8d5838",
+        "tool": "submit_decision_envelope",
+        "createdMs": 1648,
+        "visibleMs": 55396,
+        "terminalMs": 69485,
+        "usage": {
+          "input_tokens": 49197,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1664
+          },
+          "output_tokens": 3699,
+          "output_tokens_details": {
+            "reasoning_tokens": 2912
+          },
+          "total_tokens": 52896,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 1664,
+              "input_tokens": 1739,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 525,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 2,
+        "sentAt": 1791025662288,
+        "keyHash": "fa9eec48db8d5838",
+        "tool": "submit_risk_critique",
+        "createdMs": 1384,
+        "visibleMs": 85463,
+        "terminalMs": 95530,
+        "usage": {
+          "input_tokens": 48491,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 5192,
+          "output_tokens_details": {
+            "reasoning_tokens": 4619
+          },
+          "total_tokens": 53683,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 237,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 536,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 3,
+        "sentAt": 1791025758904,
+        "keyHash": "fa9eec48db8d5838",
+        "tool": "submit_decision_envelope",
+        "createdMs": 1499,
+        "visibleMs": 31184,
+        "terminalMs": 48654,
+        "usage": {
+          "input_tokens": 50588,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1664
+          },
+          "output_tokens": 2572,
+          "output_tokens_details": {
+            "reasoning_tokens": 1552
+          },
+          "total_tokens": 53160,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 1664,
+              "input_tokens": 1739,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 569,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 4,
+        "sentAt": 1791025808660,
+        "keyHash": "b2d8afcd525aa083",
+        "tool": "submit_decision_envelope",
+        "createdMs": 1811,
+        "visibleMs": 82637,
+        "terminalMs": 97233,
+        "usage": {
+          "input_tokens": 49615,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1664
+          },
+          "output_tokens": 5246,
+          "output_tokens_details": {
+            "reasoning_tokens": 4426
+          },
+          "total_tokens": 54861,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 1664,
+              "input_tokens": 1739,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 525,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 5,
+        "sentAt": 1791025906973,
+        "keyHash": "b2d8afcd525aa083",
+        "tool": "submit_risk_critique",
+        "createdMs": 1417,
+        "visibleMs": 63349,
+        "terminalMs": 70343,
+        "usage": {
+          "input_tokens": 48942,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 3779,
+          "output_tokens_details": {
+            "reasoning_tokens": 3386
+          },
+          "total_tokens": 52721,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 237,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 536,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 6,
+        "sentAt": 1791025978351,
+        "keyHash": "b2d8afcd525aa083",
+        "tool": "submit_decision_envelope",
+        "createdMs": 1538,
+        "visibleMs": 34155,
+        "terminalMs": 59845,
+        "usage": {
+          "input_tokens": 50859,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 3055,
+          "output_tokens_details": {
+            "reasoning_tokens": 1714
+          },
+          "total_tokens": 53914,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 1739,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 569,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 7,
+        "sentAt": 1791026049313,
+        "keyHash": "d8086e36a554f5ad",
+        "tool": "submit_decision_envelope",
+        "createdMs": 1758,
+        "visibleMs": 26051,
+        "terminalMs": 39689,
+        "usage": {
+          "input_tokens": 49701,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 2056,
+          "output_tokens_details": {
+            "reasoning_tokens": 1288
+          },
+          "total_tokens": 51757,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 1739,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 525,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 8,
+        "sentAt": 1791026090067,
+        "keyHash": "d8086e36a554f5ad",
+        "tool": "submit_risk_critique",
+        "createdMs": 1518,
+        "visibleMs": 95233,
+        "terminalMs": 101375,
+        "usage": {
+          "input_tokens": 48976,
+          "input_tokens_details": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          },
+          "output_tokens": 5505,
+          "output_tokens_details": {
+            "reasoning_tokens": 5150
+          },
+          "total_tokens": 54481,
+          "requestFieldsAttribution": {
+            "tools": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 237,
+              "output_tokens": 0
+            },
+            "instructions": {
+              "cache_write_tokens": 0,
+              "cached_tokens": 0,
+              "input_tokens": 536,
+              "output_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "index": 9,
+        "sentAt": 1791026192497,
+        "keyHash": "d8086e36a554f5ad",
+        "tool": "submit_decision_envelope",
+        "createdMs": null,
+        "visibleMs": null,
+        "terminalMs": null,
+        "usage": null,
+        "close": {
+          "code": 1013,
+          "reason": "upstream rate limit exceeded, please retry later"
+        }
+      }
+    ],
+    "latencyMedianMs": {
+      "createdMs": 1528.0,
+      "visibleMs": 59372.5,
+      "terminalMs": 69914.0
+    },
+    "cacheAttribution": "Observed extension: cached input appears only under request_fields.tools; no instructions/dynamic input cache attribution. Not a documented public API contract.",
+    "knownOfficialUpperReferenceUsd": 0.12127209,
+    "standardOfficialReferenceUsd": 0.05473962,
+    "unresolvedUpperReservationUsd": 0.06468775,
+    "ledger": {
+      "day": "2026-10-03",
+      "scope": "global",
+      "tokens_in": 589584,
+      "tokens_out": 31104,
+      "tokens_cached": 4992,
+      "est_usd": 0.18595984,
+      "cost_known": 0
+    },
+    "triggers": [
+      {
+        "trigger_id": "connection-a6a278f1-8af7-49b6-86da-20d2348d2ced-1",
+        "purpose": "commitment",
+        "state": "done",
+        "attempts": 1,
+        "last_error": null
+      },
+      {
+        "trigger_id": "connection-a6a278f1-8af7-49b6-86da-20d2348d2ced-2",
+        "purpose": "novelty",
+        "state": "done",
+        "attempts": 1,
+        "last_error": null
+      }
+    ],
+    "originalSampleStatuses": [
+      {
+        "index": 0,
+        "source": "W1",
+        "symbol": "ADA/USDT:USDT",
+        "runId": "run-0871934ef2dd393bd84f1ce54c540e919a45c3ef4c2b18f27b7939d2b2b791fc",
+        "status": "review",
+        "replayed": false,
+        "outcome": "review",
+        "eligibility": {
+          "state": "decision_only",
+          "reasons": [],
+          "validatedEvidencePaths": []
+        },
+        "reason": null
+      },
+      {
+        "index": 1,
+        "source": "W2",
+        "symbol": "DOGE/USDT:USDT",
+        "runId": "run-0ed4eea85296fd174cd99e7ac3e739764bc4cd516e3cc05cde80fe510aedd292",
+        "status": "review",
+        "replayed": false,
+        "outcome": "review",
+        "eligibility": {
+          "state": "decision_only",
+          "reasons": [],
+          "validatedEvidencePaths": []
+        },
+        "reason": null
+      },
+      {
+        "index": 2,
+        "source": "W3",
+        "symbol": "ADA/USDT:USDT",
+        "runId": "run-fcc48e856fc27f275b34556f9b90ec8a893fa1867c6dc8b09bfba1ec235c9e23",
+        "status": "review",
+        "replayed": false,
+        "outcome": "review",
+        "eligibility": {
+          "state": "decision_only",
+          "reasons": [
+            "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；OUTCOME_UNKNOWN: Sub2API WebSocket ended without a confirmed terminal response; provider outcome and cost are unresolved (Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved)"
+          ],
+          "validatedEvidencePaths": []
+        },
+        "reason": "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；OUTCOME_UNKNOWN: Sub2API WebSocket ended without a confirmed terminal response; provider outcome and cost are unresolved (Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved)"
+      }
+    ],
+    "automaticResubmissions": 0,
+    "realExchangeOrdersSubmitted": 0,
+    "gatewayInvoiceVerified": false,
+    "comparativeBenefitConfirmed": false,
+    "networkResume": {
+      "sourceAttempt": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/attempt-1791033126968.json",
+      "status": "failed",
+      "reachedDecisionReplay": false,
+      "reason": "Error: 余额中没有可识别的 USDT equity",
+      "observedBusinessError": {
+        "code": 401,
+        "message": "Incorrect IP address [IP地址错误]"
+      },
+      "providerWsRequests": 0,
+      "modelInvocations": 0
+    },
+    "terminalReplay": {
+      "passed": true,
+      "source": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/paper.sqlite",
+      "originalHash": "932de32d70b24d97440f9e6fff8d3e910d8892365a6ffcdd8645c743c6a3f8e3",
+      "sourceRuns": 3,
+      "replayCalls": 6,
+      "providerCallbacks": 0,
+      "networkCalls": 0,
+      "budgetUnchanged": true,
+      "sourceDbUnmodified": true,
+      "realExchangeOrdersSubmitted": 0,
+      "cases": [
+        {
+          "runId": "run-0871934ef2dd393bd84f1ce54c540e919a45c3ef4c2b18f27b7939d2b2b791fc",
+          "status": "review",
+          "source": "W1",
+          "costKnown": 1,
+          "reasonPreserved": true,
+          "reason": null,
+          "repetitions": 2
+        },
+        {
+          "runId": "run-0ed4eea85296fd174cd99e7ac3e739764bc4cd516e3cc05cde80fe510aedd292",
+          "status": "review",
+          "source": "W2",
+          "costKnown": 1,
+          "reasonPreserved": true,
+          "reason": null,
+          "repetitions": 2
+        },
+        {
+          "runId": "run-fcc48e856fc27f275b34556f9b90ec8a893fa1867c6dc8b09bfba1ec235c9e23",
+          "status": "review",
+          "source": "W3",
+          "costKnown": 0,
+          "reasonPreserved": true,
+          "reason": "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；OUTCOME_UNKNOWN: Sub2API WebSocket ended without a confirmed terminal response; provider outcome and cost are unresolved (Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved)",
+          "repetitions": 2
+        }
+      ]
+    },
+    "terminalReplayEvidenceDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-terminal-replay-v6-final"
+  },
+  "artifactScanAfterV6": {
+    "checkedAt": "2026-10-03T13:38:46.082Z",
+    "files": 966,
+    "bytes": 521912327,
+    "currentCredentialReferences": 4,
+    "credentialMatches": 0,
+    "privatePermissionViolations": 0,
+    "symlinksSkipped": 0,
+    "scope": [
+      "/workspace/docs",
+      "/workspace/dsh-trader/src",
+      "/workspace/dsh-trader/tests",
+      "/workspace/dsh-trader/scripts",
+      "/workspace/dsh-trader/lib",
+      "/workspace/model.logs",
+      "/home/ubuntu/.dsh/trading/integration-2026-10-02",
+      "/home/ubuntu/.dsh/trading/integration-2026-10-03"
+    ],
+    "excludes": [
+      "credential stores and editor files"
+    ],
+    "passed": true
   }
 }

@@ -22,6 +22,25 @@ GPT5.6及以后由OpenAI自动做cache routing；prompt_cache_key可用于独立
 
 ## 最小调整与验证
 
-一次真实decision run的draft/critic/final/repair现在传同一opaque sessionId；provider保持原Codex会话图。每次仍发送完整当次冻结context，没有previous_response_id或本地答案缓存。77文件/867测试通过，新增非空四调用回归；稳定键的命中/延迟收益待新的有界真实请求验证。
+一次真实decision run的draft/critic/final/repair现在传同一opaque sessionId；provider保持原Codex会话图。每次仍发送完整当次冻结context，没有previous_response_id或本地答案缓存。77文件/867测试通过，新增非空四调用回归；新的有界真实验证已结束，结果见下表；稳定键未显示缓存或延迟收益。
 
 后续可用已有请求的cache diagnostics检查重用边界，先核实目标网关支持。跨run独立缓存namespace、改变静态prefix/材料消息位置或WS复用需要分别验证；动态asOf/contextHash和实时事实始终保留。max effort保持原值，首可见长尾不会由小比例cache hit自动消失。服务端WS retry配置独立于本地maxRetries=0，部署侧尚未核验。
+
+
+## 稳定会话的真实结果与下一候选
+
+v6 共发出9次 WS 请求，8次有终态；第9次被1013“upstream rate limit exceeded”关闭，没有 usage，原 reservation 保留。前两条完整 critique 判断合法完成；第三条最终阶段失败后停止。相同 run 的三个阶段已实测使用同一键，共3个键。
+
+| 分项 | v6 实测 |
+|---|---|
+| 实际 input / cached | 396369 / 4992，1.2594% |
+| 首 response / 首可见工具 token 中位 | 1.528s / 59.3725s（各8次） |
+| 终态中位 | 69.914s（8次） |
+| reasoning / output | 25047 / 31104，约80.5% |
+| 命中归因 | 3次各1664，均在 tools；instructions 与动态 items 未见缓存归因 |
+
+usage.attribution.request_fields 是此端点返回的观测扩展，未作为公开 API 合同依赖。Envelope tools 为1739 tokens，Critic tools为237；阶段 instructions 内容和工具列表均不同。v5的1.3394%与v6的1.2594%来自不同实时事实和请求，不能当受控A/B；没有收益证据。
+
+Luna进一步建议固定完整工具列表/顺序，以具名 tool_choice 或 allowed_tools 限制本阶段函数，并把阶段指令放在固定公共前缀之后。该候选**尚未实施**；落地时须同步请求预算、hash和回归测试，保留完整当次冻结事实与原 schema 校验。目标网关对 explicit cache 参数的兼容性未核验，不能据上游主分支源码直接启用。未发送额外预热或研究请求。
+
+同版本完整联网恢复被HTX HTTP200中的401 IP白名单拒绝阻断，未到decision replay；它不是恢复成功证据。新增 `terminal-run-replay-check.mjs` 在实际v6 DB副本上对3条终态各重放2次，6次均使用原runId/结果/失败原因，模型和网络调用均0，账本与原DB不变。复现入口与原始输出在 [Luna验收](r5-luna-teacherli-2026-10-03.md)。

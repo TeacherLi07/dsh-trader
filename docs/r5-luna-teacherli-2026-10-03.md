@@ -59,4 +59,23 @@ W1/W2/W3 各完成一条合法三阶段判断（NO_TRADE、REVIEW、NO_TRADE）�
 node scripts/trigger-safety-check.mjs /private/real-run/paper.sqlite /private/new-safety-probe
 ```
 
-稳定run会话的全量v6仍在新目录验证，尚不宣称命中率或首可见延迟收益。
+稳定run会话v6已安全停止，结果与恢复证据见下一节；未证实缓存或首可见延迟收益。
+
+
+## 稳定会话 v6 与故障恢复补验
+
+v6实际完成2条无结构修复的三阶段判断（W1/W2，均合法REVIEW）；W3草案与Critic成功，最终阶段已发送后以1013 upstream rate limit exceeded关闭。9次发送/8次权威usage/1次未知，不再追加调用。已知官方参考上界0.12127209 USD、标准参考0.05473962 USD；未知上界0.06468775 USD保留，网关实付仍未核验。原始 `attempt-1791025570127.json` 保留，后续report覆盖不覆盖该证据。
+
+缓存率1.2594%，只归因工具定义；稳定会话未证实收益。完整统计见 [缓存调查](codex-cache-investigation-2026-10-03.md)。W2/W3持久触发均done/attempts=1，其中W3的done表示事件已消费且安全REVIEW，不表示模型最终阶段成功。该批没有达到6条成功目标，没有触达批尾护栏；此前独立的3条生产dispatcher零模型护栏仍单列。
+
+完整联网 `--resume` 在HTX私有余额返回HTTP200业务401 Incorrect IP address时失败：model/WS请求0，但未进入decision replay。余额业务拒绝原文与WS关闭码/原因现已保留，凭据回显会脱敏；878测试通过，不修改IP白名单或隐去失败。
+
+为独立验证恢复，使用真实v6 DB副本调用生产runtime：
+
+```bash
+node scripts/terminal-run-replay-check.mjs \
+  /home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6 \
+  /home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-terminal-replay-v6-final
+```
+
+3个非空终态各重放2遍，共6遍；成功和未知费用REVIEW均保持原runId、envelope、eligibility及失败文本，模型0、网络0，账本和原DB哈希不变。报告在同名JSON.stableSessionValidation.terminalReplay，详细日志仍600/700。此测试不声称断开进程的SIGKILL覆盖，不证明未知账单已结清。

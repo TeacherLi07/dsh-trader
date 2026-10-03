@@ -22,3 +22,8 @@ plugins/exec、supervisor、ui、commands 与 predictions/runtime 的本地行�
 ## Codex结构协议与缓存会话补验
 
 77文件 / 867测试；最新行/语句/函数/分支原始分母与覆盖数见同名JSON.latest。缓存/TTFT的真实网络统计独立见 `codex-cache-investigation-2026-10-03.md`。
+
+
+## HTX业务拒绝与WS诊断补验
+
+78文件 / 878测试全部通过；行87.13%、语句82.98%、函数90.53%、分支76.46%。原始计数见JSON.latest，旧统计保存在snapshots。实际ccxt解码层固定网络响应与非空保护单拒撤测试已计入；真实网关限流和HTX IP拒绝单列。

@@ -68,32 +68,32 @@
     "Percentages do not demonstrate R5 economic quality or R6 long observation"
   ],
   "latest": {
-    "files": 77,
-    "tests": 867,
+    "files": 78,
+    "tests": 878,
     "total": {
       "lines": {
-        "total": 8481,
-        "covered": 7388,
+        "total": 8499,
+        "covered": 7406,
         "skipped": 0,
-        "pct": 87.11
+        "pct": 87.13
       },
       "statements": {
-        "total": 9855,
-        "covered": 8175,
+        "total": 9876,
+        "covered": 8196,
         "skipped": 0,
-        "pct": 82.95
+        "pct": 82.98
       },
       "functions": {
-        "total": 1614,
-        "covered": 1461,
+        "total": 1617,
+        "covered": 1464,
         "skipped": 0,
-        "pct": 90.52
+        "pct": 90.53
       },
       "branches": {
-        "total": 9737,
-        "covered": 7442,
+        "total": 9759,
+        "covered": 7462,
         "skipped": 0,
-        "pct": 76.43
+        "pct": 76.46
       },
       "branchesTrue": {
         "total": 0,
@@ -103,6 +103,46 @@
       }
     },
     "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
-    "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/cache-identity-coverage-867.log"
-  }
+    "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/provider-diagnostics-coverage-878.log"
+  },
+  "snapshots": [
+    {
+      "files": 77,
+      "tests": 867,
+      "total": {
+        "lines": {
+          "total": 8481,
+          "covered": 7388,
+          "skipped": 0,
+          "pct": 87.11
+        },
+        "statements": {
+          "total": 9855,
+          "covered": 8175,
+          "skipped": 0,
+          "pct": 82.95
+        },
+        "functions": {
+          "total": 1614,
+          "covered": 1461,
+          "skipped": 0,
+          "pct": 90.52
+        },
+        "branches": {
+          "total": 9737,
+          "covered": 7442,
+          "skipped": 0,
+          "pct": 76.43
+        },
+        "branchesTrue": {
+          "total": 0,
+          "covered": 0,
+          "skipped": 0,
+          "pct": 100
+        }
+      },
+      "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
+      "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/cache-identity-coverage-867.log"
+    }
+  ]
 }
