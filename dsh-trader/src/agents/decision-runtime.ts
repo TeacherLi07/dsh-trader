@@ -465,6 +465,7 @@ export async function runDecisionRuntime(input: {
   const rejectedOutputs = reservationStatements.get(`SELECT COUNT(*) AS n FROM audit_events
     WHERE kind = 'model_call_output_rejected' AND json_extract(payload_json, '$.runId') = ?`).get(runId) as { n: number }
   const stages = await runDecisionWorkflowStages({
+    sessionId: runId,
     strategy: config.strategy,
     context,
     model,

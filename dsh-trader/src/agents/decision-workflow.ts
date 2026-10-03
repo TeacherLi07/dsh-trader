@@ -177,6 +177,7 @@ async function callStructuredTool(input: {
   readonly model: DecisionModel
   readonly route: DecisionModelRoute
   readonly context: DecisionContext
+  readonly sessionId?: string
   readonly stage: DecisionModelCall['stage']
   readonly tool: ToolSchema
   readonly instructions: string
@@ -205,6 +206,7 @@ async function callStructuredTool(input: {
     }],
     maxTokens: input.route.maxTokens,
     temperature: 0,
+    ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId as NonNullable<GenerateOptions['sessionId']> }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   }
   const providerRequestTrace: Readonly<Record<string, unknown>> = {
@@ -212,6 +214,7 @@ async function callStructuredTool(input: {
     model: options.model,
     maxTokens: options.maxTokens,
     temperature: options.temperature,
+    ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
     promptVersion,
     requestHash: request.requestHash,
     requestChars: request.requestChars,
@@ -362,6 +365,8 @@ function validateResponses(candidate: DecisionEnvelopeCandidate, issues: readonl
 export async function runDecisionWorkflowStages(input: {
   readonly strategy: DecisionStrategy
   readonly context: DecisionContext
+  /** 只用于 provider 会话/缓存亲和性，同一 run 的阶段和修复共享，不复用模型答案。 */
+  readonly sessionId?: string
   readonly model: DecisionModel
   readonly route: DecisionModelRoute
   readonly signal?: AbortSignal
@@ -410,6 +415,7 @@ export async function runDecisionWorkflowStages(input: {
           model: input.model,
           route: input.route,
           context: input.context,
+          ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
           stage: stage.modelStage,
           tool: stage.tool,
           instructions,

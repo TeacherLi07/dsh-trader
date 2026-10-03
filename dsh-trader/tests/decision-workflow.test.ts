@@ -102,6 +102,19 @@ describe('R3 Decision workflow', () => {
     expect(result.final?.critiqueResponses).toMatchObject([{ critiqueId: 'crit-stop', disposition: 'accept' }])
   })
 
+  it('一次 critique 的各阶段和 repair 共享会话，完整冻结 context 与独立角色材料仍逐次发送', async () => {
+    const final = envelope({ outcome: 'no_trade', immediateAction: { action: 'noop' } })
+    const model = new FakeDecisionModel([{ ...final, extra: true }, final, { issues: [], uncertainties: [] }, final])
+    const frozen = context()
+    const result = await runDecisionWorkflowStages({ strategy: 'critique', context: frozen, model, route, sessionId: 'run-cache-fixture' })
+    expect(result.failure).toBeUndefined()
+    expect(result.calls).toHaveLength(4)
+    expect(result.repairCalls).toBe(1)
+    expect(model.requests.map(request => request.sessionId)).toEqual(Array(4).fill('run-cache-fixture'))
+    for (const request of model.requests) expect(JSON.stringify(request.messages)).toContain(frozen.contextHash)
+    expect(result.calls.every(call => call.request['sessionId'] === 'run-cache-fixture')).toBe(true)
+  })
+
   it('实测误放字段进入明确 repair，字段清单来自当前工具而不混入 critic', async () => {
     const valid = envelope({ outcome: 'no_trade', immediateAction: { action: 'noop' } })
     const critic = { issues: [], uncertainties: [] }

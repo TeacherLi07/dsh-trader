@@ -32,6 +32,7 @@ const SYMBOL = 'BTC/USDT:USDT'
 
 class FakeDecisionModel implements DecisionModel {
   calls = 0
+  readonly sessionIds: Array<string | undefined> = []
   constructor(
     private readonly output: unknown,
     private readonly onStream?: () => void,
@@ -39,6 +40,7 @@ class FakeDecisionModel implements DecisionModel {
   ) {}
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
+    this.sessionIds.push(options.sessionId)
     this.onStream?.()
     if (this.includeUsage) yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 80, totalTokens: 380 } } as StreamChunk
     yield {
@@ -234,6 +236,7 @@ describe('R3 decision runtime', () => {
       })
       expect(first.status).toBe('completed')
       expect(first.replayed).toBe(false)
+      expect(model.sessionIds).toEqual([first.runId])
       expect(first.envelope).toMatchObject({ outcome: 'no_trade', runId: first.runId, contextHash: first.contextHash })
       expect(new DecisionRunStore(db).get(first.runId)).toMatchObject({
         status: 'completed', costKnown: true, tokensIn: 300, tokensOut: 80,
