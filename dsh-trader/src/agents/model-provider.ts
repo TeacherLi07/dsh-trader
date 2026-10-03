@@ -13,8 +13,8 @@ export interface DecisionModelProvider {
 }
 
 /**
- * Build real `dsh-llm-pi-ai` provider profiles for isolated DSH contexts.
- * Only environment-variable names enter this value; credentials resolve in DSH.
+ * 配置独立 DSH context 时仍复用官方 provider，避免交易层重新实现协议和凭据读取。
+ * 配置只携带环境变量名，实际密钥由 DSH 解析。
  */
 export function deepseekResponsesPiAiConfig(input: {
   readonly productionApiKeyEnv: string

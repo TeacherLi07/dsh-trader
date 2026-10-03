@@ -33,6 +33,8 @@ import type {
 } from '@earendil-works/pi-ai'
 import OpenAI from 'openai'
 import { ResponsesWS } from 'openai/resources/responses/ws'
+import type { ResponsesWSBaseOptions } from 'openai/resources/responses/ws-base'
+import type { ClientOptions } from 'ws'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import type {
   ResponseStreamEvent,
@@ -52,7 +54,7 @@ export type ResponsesReasoningEffort = (typeof ALLOWED_REASONING_EFFORTS)[number
 
 export interface Sub2ApiWsModelConfig {
   readonly id: string
-  /** DSH route alias; the separate upstream identifier is never substituted into this field. */
+  /** 来源 alias 与上游 ID 分离，避免同名模型被错误归入官方价目。 */
   readonly wireModelId: string
   readonly name: string
   readonly contextWindow: number
@@ -63,9 +65,9 @@ export interface Sub2ApiWsModelConfig {
 
 export interface Sub2ApiResponsesWsConfig {
   readonly enabled: boolean
-  /** Sub2API uses a bare host; this adapter adds `/v1` for the official SDK. */
+  /** Sub2API 配置使用 bare host；为兼容官方 SDK 统一补上 /v1。 */
   readonly baseURL: string
-  /** An environment-variable reference, never a key value. */
+  /** 仅携带凭据引用，防止配置包含实际密钥。 */
   readonly apiKeyEnv: string
   readonly connectTimeoutMs: number
   readonly models: readonly Sub2ApiWsModelConfig[]
@@ -493,6 +495,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.#assertProvider(options.provider)
+    if (options.signal?.aborted) throw new LlmError('Sub2API WebSocket request already aborted before connection', 'ABORTED')
     if (options.stop !== undefined) throw new LlmError('Sub2API Responses WebSocket route does not support stop sequences', 'UNSUPPORTED_OPTION')
     const configuredModel = this.#models.get(options.model)
     if (configuredModel === undefined) throw new LlmError(`Sub2API WebSocket model is not configured: ${options.model}`, 'UNKNOWN_MODEL')
@@ -503,12 +506,14 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     const model = piModel(configuredModel, this.#baseURL)
     const client = new OpenAI({ apiKey, baseURL: this.#baseURL, maxRetries: 0, defaultHeaders: attributionHeaders() })
     const proxyAgent = websocketProxyAgent(this.#baseURL)
-    const socket = new ResponsesWS(client, {
+    // DSH 会复用全局 SDK；其目录可能没有 @types/ws。用本包的 ClientOptions 保留握手参数校验。
+    const socketOptions: ClientOptions & ResponsesWSBaseOptions = {
       reconnect: null,
       maxQueueSize: 0,
       ...(proxyAgent === undefined ? {} : { agent: proxyAgent }),
       headers: { ...attributionHeaders(), 'OpenAI-Beta': OPENAI_RESPONSES_WS_BETA },
-    })
+    }
+    const socket = new ResponsesWS(client, socketOptions)
     const socketEvents = socket.stream()
     const socketIterator = socketEvents[Symbol.asyncIterator]()
     const output: AssistantMessage = {
@@ -604,7 +609,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
       try {
         await socketIterator.return?.()
       } catch {
-        // closed stream cleanup does not change the settled result
+        // 关闭后的清理失败不能改写已确定的结果。
       }
     }
   }

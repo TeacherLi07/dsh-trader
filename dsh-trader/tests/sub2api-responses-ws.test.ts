@@ -98,7 +98,7 @@ function multiTurnHistoryOptions(): GenerateOptions {
   })
 }
 
-function adapter(baseURL: string): Sub2ApiResponsesWebSocketAdapter {
+function adapter(baseURL: string, onResolve?: () => void): Sub2ApiResponsesWebSocketAdapter {
   const config: Sub2ApiResponsesWsConfig = {
     enabled: true,
     baseURL,
@@ -115,7 +115,7 @@ function adapter(baseURL: string): Sub2ApiResponsesWebSocketAdapter {
     }],
   }
   return new Sub2ApiResponsesWebSocketAdapter(config, {
-    resolveApiKey: async () => FAKE_KEY,
+    resolveApiKey: async () => { onResolve?.(); return FAKE_KEY },
     now: () => 1_800_000_000_000,
   })
 }
@@ -225,6 +225,18 @@ afterEach(async () => {
 })
 
 describe('Sub2API Responses WebSocket provider', () => {
+  it('调用前已取消时不读取凭据、不建立握手或发送请求', async () => {
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket))
+    const controller = new AbortController()
+    controller.abort()
+    let credentialReads = 0
+    const stream = adapter(gateway.baseURL, () => { credentialReads += 1 }).stream(requestOptions({ signal: controller.signal }))
+    await expect(stream[Symbol.asyncIterator]().next()).rejects.toThrow('already aborted before connection')
+    expect(gateway.handshakes()).toBe(0)
+    expect(credentialReads).toBe(0)
+    expect(gateway.requests).toEqual([])
+    expect(gateway.httpFallbacks).toEqual([])
+  })
   it('routes secure sockets through HTTPS_PROXY and bypasses loopback/NO_PROXY', () => {
     expect(resolveResponsesWebSocketProxy('https://gateway.example/v1', {
       HTTPS_PROXY: 'http://proxy.example:3128', NO_PROXY: '',
