@@ -222,10 +222,13 @@ try {
       if (clock.now() - lastMarketRefresh >= 5 * 60_000) await refreshMarket()
       const spent = db.prepare("SELECT COALESCE(SUM(est_usd), 0) AS usd FROM budget_ledger WHERE scope = 'global'").get().usd
       assert.ok(spent < totalBudgetUsd, 'integration total budget exhausted')
+      const day = new Date(clock.now()).toISOString().slice(0, 10)
+      const spentToday = db.prepare("SELECT COALESCE(SUM(est_usd), 0) AS usd FROM budget_ledger WHERE scope = 'global' AND day = ?").get(day).usd
       const trigger = { source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: clock.now(), attempt: 1 }
       const symbol = symbols[index % symbols.length]
       const config = { strategy: 'critique', route: { provider, model: 'deepseek-flash', maxTokens, maxChars: 180_000 },
-        dailyBudgetUsd: Math.min(dailyBudgetUsd, totalBudgetUsd - spent), dailyTokenCap, planWindowMs: 14_400_000 }
+        // BudgetGuard 接受当日绝对上限，会再次扣除当日已花金额；不能把剩余额度直接当上限。
+        dailyBudgetUsd: Math.min(dailyBudgetUsd, spentToday + totalBudgetUsd - spent), dailyTokenCap, planWindowMs: 14_400_000 }
       const result = await runDecisionRuntime({ ports, model, config, trigger, symbol, timeframe: '1h', signal: AbortSignal.timeout(300_000) })
       report.samples.push({ index, source: trigger.source, symbol, runId: result.runId, status: result.status,
         replayed: result.replayed, outcome: result.envelope?.outcome, eligibility: result.eligibility, reason: result.reason ?? null })
