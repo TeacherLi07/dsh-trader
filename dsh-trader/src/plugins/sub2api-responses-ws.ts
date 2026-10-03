@@ -105,6 +105,8 @@ interface SocketStreamEvent {
   readonly type: string
   readonly message?: ResponseStreamEvent
   readonly error?: unknown
+  readonly code?: number
+  readonly reason?: string
 }
 
 interface ResolvedSub2ApiWsModel extends Sub2ApiWsModelConfig {}
@@ -592,9 +594,10 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
         } else if (raw.type === 'close') {
           if (terminalEvent === undefined) {
             failureCode = requestSent ? 'OUTCOME_UNKNOWN' : 'TRANSPORT'
-            throw new LlmError(requestSent
+            throw new LlmError((requestSent
               ? 'Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved'
-              : 'Sub2API WebSocket closed before response.create was sent', failureCode)
+              : 'Sub2API WebSocket closed before response.create was sent') +
+              ` (close code=${raw.code ?? 'unknown'}; reason=${redactSecret(raw.reason ?? '', apiKey)})`, failureCode)
           }
           return
         }

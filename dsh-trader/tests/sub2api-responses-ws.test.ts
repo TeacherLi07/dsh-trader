@@ -507,6 +507,22 @@ describe('Sub2API Responses WebSocket provider', () => {
     expect(finish.reason.failure.message).toMatch(/outcome and cost are unresolved/)
   })
 
+  it('保留真实限流关闭码和原因并脱敏，已发送的 1013 请求仍保持未知且不重发', async () => {
+    const gateway = await startGateway((socket) => socket.close(1013, `upstream rate limit exceeded; ${FAKE_KEY}`))
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL).stream(requestOptions())) chunks.push(chunk)
+    expect(gateway.requests).toHaveLength(1)
+    expect(gateway.handshakes()).toBe(1)
+    expect(gateway.httpFallbacks).toEqual([])
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected unresolved finish')
+    expect(finish.reason.failure.code).toBe('OUTCOME_UNKNOWN')
+    expect(finish.reason.failure.message).toContain('close code=1013')
+    expect(finish.reason.failure.message).toContain('upstream rate limit exceeded; [redacted]')
+    expect(JSON.stringify(chunks)).not.toContain(FAKE_KEY)
+    expect(chunks.some((chunk) => chunk.type === 'usage')).toBe(false)
+  })
+
   it('保留网关 error 帧的原始诊断并脱敏，已发送请求仍不重发或伪造已知费用', async () => {
     const gateway = await startGateway((socket) => {
       socket.send(JSON.stringify({ type: 'error', status: 400, error: {
