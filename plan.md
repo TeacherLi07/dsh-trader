@@ -456,7 +456,7 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
    共用的专用 provider key；provider 账户也应专用或设 provider-side hard cap，否则本地总额只覆盖本 control registry。
    当前 profile 刻意不设日预算，所以 production W1/W2/W3 fail-closed；未获预算授权时只运行 preflight/stub，不尝试付费 provider 调用。
 
-**当前验收阻塞（2026-10-03）**：负责人已授权保守真实测试并选择 critique，生产日预算仍未配置。本轮最终批量完成38条，另有1条同运行时版本的恢复探针；四条请求因 DeepSeek 402 Insufficient Balance 停止，只读余额也返回不可用，≥50目标未达标。需恢复余额或同模型备用凭据后继续，未知 reservation 不能自动归零或重发。测试 state/profile 隔离不等于 provider 账户隔离。R5 的 funding 来源、动作/拒绝/恢复分项非空覆盖与独立经济验收，以及 R6 非空14天安全观察仍未完成；不能据连接成功启用生产 live。Sub2API WS 已通过真实工具调用，但价格/账单尚未核验，sub2api: alias 的交易成本闸仍关闭。
+**本轮来源变更（2026-10-03）**：负责人已指定 `~/.codex/config.toml` 的 `ai.teacherli.net`，凭据使用 `.env` 中的 `SUB2API_KEY`，模型保持 `gpt-6-luna/max`，优先 Responses WS；不再以 DeepSeek 凑 ≥50 条。本地测试 profile/DB 隔离，provider 账户隔离尚未证实。测试费用按官方参考上界预留，网关实付账单仍未核验；该价格行仅注入测试 DB。历史 DeepSeek 402 和未决 reservation 保留，不自动归零或重发。R5 工程样本门槛、动作/拒绝/恢复非空分项和独立经济验收仍按 §10 分别报告；生产 funding 来源与 R6 非空 14 天观察未完成，不能据连接成功启用生产 live。最新执行状态与原始证据见 `docs/real-integration-progress-2026-10-03.md`。
 
 **静态对照状态**：single/critique 付费对照已由负责人明确取消，相关 outcome/Critic 指标不产生结论；若未来重新启用该实验，必须先冻结指标阈值、PIT manifest、预算与新的预注册协议。当前选择 critique 不得表述为相对 single 已验证更优。
 
@@ -466,7 +466,7 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 
 **2026-10-03 真实工程测试进度**：早期 6 条模型判断/19 次调用已保留完整 usage、失败和原始脱敏 trace，估算合计 0.202095972 USD；其中指定 Flash/high/32k 的 2 条判断完成。
 HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已完成非空仓位 + 原生 SL/TP 的 merged 查询、保留保护撤单、reduce-only 平仓及空仓后撤保护。
-真实连接还暴露并修复 defaultType、symbol 传递、TPSL close-only 归一化、保护覆盖验证与 ccxt 最小量单位问题。生产 journal 非空对账与 runtime 重建现已通过；Responses 采样因402余额不足未达≥50，资金费和经济/长期门槛仍须继续。
+真实连接还暴露并修复 defaultType、symbol 传递、TPSL close-only 归一化、保护覆盖验证与 ccxt 最小量单位问题。生产 journal 非空对账与 runtime 重建现已通过；后续模型连接测试已切换至 Luna/max WS，历史 DeepSeek 402 原文保留，资金费和经济/长期门槛仍须继续。
 
 **2026-09-23 R6 本轮准备复核**：负责人要求本轮跳过 R5，直接验证实盘 R6；这是缩小本轮流程，不是 R5 判断质量或经济闸通过。使用新注入的 HTX 凭据完成只读预检：USDT 永续权益 24.904350154514756，远端与本地均为空仓、零挂单，因而仍没有“非空持仓 + 算法保护单”的对账证据。负责人要求本轮回撤不超过 2%，按该时点权益为 0.49808700309029513 USDT；公开盘口与真实账户只读预检下，最小一张 ADA、DOGE 合约名义额分别约 2.55、10.29 USDT，均高于本轮额度。止损触发/成交不能保证价格，所以本轮没有发送实盘订单，也不能开始 R6 的非空 14 天观察。当前默认 `maxDrawdownUsd=2.5` 及仅按已结算结果计算的风险状态不能当作这个 2% 约束已被执行。完整只读报告与逐步日志保存在当前账户权限受限的 `~/.dsh/trading/r6-validation-2026-09-23/`。
 

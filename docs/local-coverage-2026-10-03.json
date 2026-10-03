@@ -66,5 +66,43 @@
   "limitations": [
     "Coverage is unit/loopback coverage; separate real provider/venue/startup evidence is not included",
     "Percentages do not demonstrate R5 economic quality or R6 long observation"
-  ]
+  ],
+  "latest": {
+    "files": 77,
+    "tests": 867,
+    "total": {
+      "lines": {
+        "total": 8481,
+        "covered": 7388,
+        "skipped": 0,
+        "pct": 87.11
+      },
+      "statements": {
+        "total": 9855,
+        "covered": 8175,
+        "skipped": 0,
+        "pct": 82.95
+      },
+      "functions": {
+        "total": 1614,
+        "covered": 1461,
+        "skipped": 0,
+        "pct": 90.52
+      },
+      "branches": {
+        "total": 9737,
+        "covered": 7442,
+        "skipped": 0,
+        "pct": 76.43
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    },
+    "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
+    "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/cache-identity-coverage-867.log"
+  }
 }

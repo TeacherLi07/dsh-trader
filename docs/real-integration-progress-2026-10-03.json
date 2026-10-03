@@ -1,6 +1,6 @@
 {
   "date": "2026-10-03",
-  "status": "blocked_on_provider_balance",
+  "status": "teacherli_strict_schema_validation_in_progress",
   "model": "deepseek-flash",
   "preferredApi": "responses",
   "reasoningEffort": "high",
@@ -374,5 +374,19 @@
     "remoteOrders": 0,
     "executedActions": 0,
     "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/final-htx-preflight.json"
+  },
+  "legacyDeepSeekStatus": "blocked_on_provider_balance",
+  "latestUpdate": {
+    "updatedAt": "2026-10-03T08:57:55.481838+00:00",
+    "source": "https://ai.teacherli.net",
+    "model": "gpt-6-luna",
+    "reasoningEffort": "max",
+    "api": "responses-websocket",
+    "deepseekSampleTopUpCancelled": true,
+    "evidence": "r5-luna-teacherli-2026-10-03.json",
+    "invoiceVerified": false,
+    "status": "cache_identity_validation_in_progress",
+    "validLunaCritiqueSamples": 3,
+    "unknownOutcomesPreserved": true
   }
 }

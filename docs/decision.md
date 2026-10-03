@@ -1968,3 +1968,19 @@ Sub2API WS 使用独立 adapter，复用 OpenAI ResponsesWS 与 pi-ai 的消息/
 最终批量计划52条，完成38条后因DeepSeek余额不足停止；另1条同运行时恢复探针完成，重启重放0次模型调用。
 不通过换模型或删除未决reservation凑数量；生产保持paper，独立经济段、资金费与长期观察仍未通过。
 数据、失败、成本预留和覆盖率见 [连接汇总](real-integration-progress-2026-10-03.md)。
+
+
+## 29. Luna/max 的真实 WS 与 schema 失败（2026-10-03）
+
+负责人将走量切至 Codex TOML 中的 ai.teacherli.net，使用 SUB2API_KEY 与固定 gpt-6-luna/max；停止 DeepSeek 样本补量。测试 DB 按官方价格保守预留，网关账单未核验。
+
+复核 DSH OAuth 与第三方 Sub2API：共享 Responses serializer/processor 与顶层 instructions 可复用；OAuth JWT/account header、自动重连和 SSE fallback 不适用于本测试的网关凭据和未知费用边界。真实简单工具/多轮已通过。额外修复 max 白名单、reasoning temperature、缺失 package exports；非空 catalog 的 DSH 真启动现纳入脚本。
+
+完整链仍失败：Luna 将 plan 子字段放在 envelope 顶层，明确 repair 能修 draft，但 final 又复现；不接受额外字段。另有一条在 300 秒上限下生成未完成而断线，未知 reservation 保留。测试超时可冻结为15分钟，仍有费用/token 上限。下一步核验 strict 工具协议，不能放宽 schema 或只允许 NO_TRADE 来制造成功。具体分母与原始日志哈希见 [Luna实测](r5-luna-teacherli-2026-10-03.md)。
+
+
+### 29.1 Codex缓存调查与会话亲和性
+
+Luna子代理完成只读调查，root复算API usage：10次真实input496944、cached6656，账本680742包含183798未决预留，不能作缓存率分母。4次hit各1664，首可见tool token中位43.464秒；reasoning占输出约77.2%，数据不足以把prefill与max推理精确拆开。
+
+Codex credits无单独cache-write费，API价目及网关账单分开报告。修复一个run内阶段/repair随机session：以runId共享provider会话，继续每次传完整事实，由OpenAI管理KV；没有previous_response_id或本地答案缓存。原未决费用和失败保持。原始逐请求证据、官方出处与验证范围见 [缓存调查](codex-cache-investigation-2026-10-03.md)。

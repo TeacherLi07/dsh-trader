@@ -53,7 +53,7 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
 
 把 `trade-supervisor.l3` 设为 `provider: sub2api-openai-ws, model: sub2api:gpt-6-luna` 后，DSH route 使用 `sub2api:gpt-6-luna` 记账，网关收到 `wireModelId: gpt-6-luna`。Sub2API key 只通过 `apiKeyEnv: SUB2API_KEY` reference 解析。adapter 发 `OpenAI-Beta: responses_websockets=2026-02-06`，使用 `HttpsProxyAgent` 读取 HTTPS proxy 环境变量；loopback 地址绕过代理。
 
-reasoning `none` / `xhigh` / `max` 会原样写进 `reasoning.effort`。reasoning 不是 `none` 时会丢弃工作流给出的 `temperature: 0`，并始终不发送 `top_p`；`none` 可以保留 temperature 等普通采样选项。
+reasoning `none` / `xhigh` / `max` 会原样写进 `reasoning.effort`。reasoning 不是 `none` 时会丢弃工作流给出的 `temperature: 0`，并始终不发送 `top_p`；`none` 可以保留 temperature。
 
 OpenAI SDK 自动重连关闭，DSH provider retry policy 的 `maxRetries` 为 0；此 WS route 没有 HTTP fallback。请求发送后若未收到 `response.completed`、`response.incomplete` 或 `response.failed`，adapter 返回 `OUTCOME_UNKNOWN` 并停止，绝不重新发送 `response.create`。已解析的 API key 会从流错误文本中精确脱敏。
 
@@ -69,3 +69,10 @@ OpenAI SDK 自动重连关闭，DSH provider retry policy 的 `maxRetries` 为 0
 - [OpenAI Node SDK Responses WS](https://github.com/openai/openai-node/blob/main/docs/responses.md)：官方 WebSocket client/events。
 
 Loopback WS 服务模拟覆盖了非空 `response.create`、pi-ai 事件处理、未终结断线无重连/HTTP 重发、错误中 fake key 脱敏与 usage 完整性。真实 DeepSeek/Sub2API 连接与网关账单仍由主 agent 在预算/隔离凭据护栏内验证。
+
+
+## Codex CLI 网关标识与 strict 工具
+
+Sub2API WS 请求使用配套 `codex_cli_rs` UA/originator/version，默认版本0.160.0可用 `codexVersion` 配置。会话身份从 DSH `sessionId` 读取，缺省生成UUID；session-id/thread-id/x-client-request-id 与 prompt_cache_key、client_metadata 共用身份。API key 仍由网关 credential ref 解析。指纹来源与真实往返见 [Luna验收](r5-luna-teacherli-2026-10-03.md)。
+
+`strictTools: true` 可开启服务端 strict 结构。只对互斥 discriminator 的 oneOf 做等价 anyOf 转换，复用SDK required/closed-object 处理，optional null 仅还原原schema中允许缺省的字段。必填null/未知字段仍交原校验拒绝。目标服务端实测不支持uniqueItems，该约束保留在原工具schema与本地计划校验，派生wire只约束服务端支持的结构；原执行合同始终要验。授权Luna测试已开启，通用provider默认关闭，没有失败自动降级。

@@ -1,0 +1,509 @@
+{
+  "updatedAt": "2026-10-03T11:09:06.971303+00:00",
+  "status": "cache_identity_validation_in_progress",
+  "endpoint": "https://ai.teacherli.net",
+  "credentialReference": "SUB2API_KEY",
+  "model": "gpt-6-luna",
+  "reasoningEffort": "max",
+  "transport": "responses-websocket",
+  "gatewayInvoiceVerified": false,
+  "probes": [
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-ws-v1",
+      "startedAt": 1791015318181,
+      "finishedAt": 1791015326204,
+      "wire": {
+        "submittedRequests": 2,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": [
+          "gpt-6-luna"
+        ]
+      },
+      "knownUsageCalls": 2,
+      "officialStandardReferenceUsd": 5.0900000000000004e-05,
+      "wsTraceSha256": "d2bada2357da8f8f224184de7a2e5611fd05ed2dfe1ef2a49ef3cd9dee8c47b6",
+      "passed": true,
+      "rounds": [
+        {
+          "kind": "tool",
+          "usage": {
+            "inputTokens": 153,
+            "outputTokens": 19,
+            "totalTokens": 172
+          }
+        },
+        {
+          "kind": "tool-result-history",
+          "usage": {
+            "inputTokens": 66,
+            "outputTokens": 39,
+            "totalTokens": 105,
+            "reasoningTokens": 30
+          }
+        }
+      ],
+      "officialUpperReferenceUsd": 9.825e-05
+    },
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-ws-instructions",
+      "startedAt": 1791016790541,
+      "finishedAt": 1791016798832,
+      "wire": {
+        "submittedRequests": 2,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": [
+          "gpt-6-luna"
+        ]
+      },
+      "knownUsageCalls": 2,
+      "officialStandardReferenceUsd": 4.24e-05,
+      "wsTraceSha256": "a13b3dc5a49a5b095a3ba8c6927923203a693b625cddf942d03b1423e315c639",
+      "passed": true,
+      "rounds": [
+        {
+          "kind": "tool",
+          "usage": {
+            "inputTokens": 153,
+            "outputTokens": 19,
+            "totalTokens": 172
+          }
+        },
+        {
+          "kind": "tool-result-history",
+          "usage": {
+            "inputTokens": 66,
+            "outputTokens": 22,
+            "totalTokens": 88,
+            "reasoningTokens": 13
+          }
+        }
+      ],
+      "officialUpperReferenceUsd": 8.55e-05
+    }
+  ],
+  "critiqueAttempts": [
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-critique-v1",
+      "startedAt": 1791015445657,
+      "finishedAt": 1791015571782,
+      "wire": {
+        "submittedRequests": 2,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": [
+          "gpt-6-luna"
+        ]
+      },
+      "knownUsageCalls": 2,
+      "officialStandardReferenceUsd": 0.012647100000000001,
+      "wsTraceSha256": "a0cb58c0b134e28314abb099f32da2927a4859f1b08a49eaf6c5a01b55b63f0e",
+      "status": "failed",
+      "runs": [
+        {
+          "runId": "run-80382825ebf04da524a7d25156bacb410eb5bef1bcd400eeaed2151c5c000d5d",
+          "status": "review",
+          "usageCostResolved": true,
+          "failure": "DecisionOutputFailure: envelope 包含未授权字段",
+          "repairCalls": 1,
+          "stages": [
+            "strategist",
+            "strategist"
+          ]
+        }
+      ],
+      "unknownUsageCalls": 0,
+      "knownUpperReferenceUsd": 0.028872250000000002,
+      "unresolvedUpperReservationUsd": 0,
+      "persistentWorkerExercised": false,
+      "triggerGuardsExercised": false
+    },
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-critique-v2",
+      "startedAt": 1791015881581,
+      "finishedAt": 1791016047598,
+      "wire": {
+        "submittedRequests": 2,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": [
+          "gpt-6-luna"
+        ]
+      },
+      "knownUsageCalls": 2,
+      "officialStandardReferenceUsd": 0.0137761,
+      "wsTraceSha256": "cc27e1f3a1e215801cc63a255434ad12cd37bf45f9bddbff4fc580f0d0ae5d38",
+      "status": "failed",
+      "runs": [
+        {
+          "runId": "run-c154b3d3fc0fbcc965dd029db30501418411ddb24b36a17269db8374584bc840",
+          "status": "review",
+          "usageCostResolved": true,
+          "failure": "DecisionOutputFailure: envelope 包含未授权字段：[\"commitments\",\"forbidden\",\"noTrade\"]；顶层允许字段：outcome, thesis, rejectedAlternatives, claims, uncertainties, confidence, riskFraction, immediateAction, plan, critiqueResponses",
+          "repairCalls": 1,
+          "stages": [
+            "strategist",
+            "strategist"
+          ]
+        }
+      ],
+      "unknownUsageCalls": 0,
+      "knownUpperReferenceUsd": 0.03059725,
+      "unresolvedUpperReservationUsd": 0,
+      "persistentWorkerExercised": false,
+      "triggerGuardsExercised": false
+    },
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-critique-v3",
+      "startedAt": 1791016273562,
+      "finishedAt": 1791016624449,
+      "wire": {
+        "submittedRequests": 1,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": []
+      },
+      "knownUsageCalls": 0,
+      "officialStandardReferenceUsd": 0,
+      "wsTraceSha256": "72f0620e417ee978d810adb61b553382930f2108e422dd26c55d0c2cdc28abde",
+      "status": "failed",
+      "runs": [
+        {
+          "runId": "run-19f545de3aa96a7fe7f71a7bbc5b84e9e1fa71fa31900e985eb98732b96a9aff",
+          "status": "review",
+          "usageCostResolved": false,
+          "failure": "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；OUTCOME_UNKNOWN: Sub2API WebSocket ended without a confirmed terminal response; provider outcome and cost are unresolved (Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved)",
+          "repairCalls": 0,
+          "stages": [
+            "strategist"
+          ]
+        }
+      ],
+      "unknownUsageCalls": 1,
+      "knownUpperReferenceUsd": 0,
+      "unresolvedUpperReservationUsd": 0.06320200000000001,
+      "persistentWorkerExercised": false,
+      "triggerGuardsExercised": false
+    },
+    {
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-critique-v4",
+      "startedAt": 1791017080084,
+      "finishedAt": 1791017378741,
+      "wire": {
+        "submittedRequests": 4,
+        "allWireModelsCorrect": true,
+        "allWireEffortsMax": true,
+        "samplingParametersAbsent": true,
+        "reportedTerminalModels": [
+          "gpt-6-luna"
+        ]
+      },
+      "knownUsageCalls": 4,
+      "officialStandardReferenceUsd": 0.027062700000000002,
+      "wsTraceSha256": "b13b942fd72c65298cdcd3775f42d9844b40db19560bd2d7e933ba9b280f4bb8",
+      "status": "failed",
+      "runs": [
+        {
+          "runId": "run-b8e868fdb5a5db9f6f19acbfecfe46c7bd3d35c3fe3f848c6c7086730be7dcf7",
+          "status": "review",
+          "usageCostResolved": true,
+          "failure": "DecisionOutputFailure: envelope 包含未授权字段：[\"commitments\",\"forbidden\",\"noTrade\"]；顶层允许字段：outcome, thesis, rejectedAlternatives, claims, uncertainties, confidence, riskFraction, immediateAction, plan, critiqueResponses",
+          "repairCalls": 1,
+          "stages": [
+            "strategist",
+            "strategist",
+            "risk-critic",
+            "strategist"
+          ]
+        }
+      ],
+      "unknownUsageCalls": 0,
+      "knownUpperReferenceUsd": 0.06049725,
+      "unresolvedUpperReservationUsd": 0,
+      "persistentWorkerExercised": false,
+      "triggerGuardsExercised": false
+    }
+  ],
+  "unknownRequestsAutomaticallyResubmitted": 0,
+  "realExchangeOrdersSubmitted": 0,
+  "totals": {
+    "knownUsageCalls": 12,
+    "unknownUsageCalls": 1,
+    "officialStandardReferenceUsd": 0.0535792,
+    "knownOfficialUpperReferenceUsd": 0.12015050000000001,
+    "unresolvedUpperReservationUsd": 0.06320200000000001,
+    "completedCritiqueSamples": 0,
+    "failedCritiqueSamples": 4
+  },
+  "startup": {
+    "status": "passed",
+    "broker": "paper",
+    "commands": [
+      "halt",
+      "resume"
+    ],
+    "halt": {
+      "kind": "success",
+      "text": "已暂停交易并撤销普通挂单，保护单保留。"
+    },
+    "resume": {
+      "kind": "success",
+      "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+    },
+    "equityQuote": 24.914,
+    "modelCalls": 0,
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "command": "dsh --profile trade",
+    "isolatedProfile": true,
+    "output": ""
+  },
+  "localVerification": {
+    "files": 76,
+    "tests": 855,
+    "totalCoverage": {
+      "lines": {
+        "total": 8293,
+        "covered": 7223,
+        "skipped": 0,
+        "pct": 87.09
+      },
+      "statements": {
+        "total": 9612,
+        "covered": 7991,
+        "skipped": 0,
+        "pct": 83.13
+      },
+      "functions": {
+        "total": 1575,
+        "covered": 1429,
+        "skipped": 0,
+        "pct": 90.73
+      },
+      "branches": {
+        "total": 9466,
+        "covered": 7259,
+        "skipped": 0,
+        "pct": 76.68
+      },
+      "branchesTrue": {
+        "total": 0,
+        "covered": 0,
+        "skipped": 0,
+        "pct": 100
+      }
+    }
+  },
+  "limitations": [
+    "All attempts and schema failures are retained; no completed full Luna critique sample yet",
+    "W2/W3 real queue and safety guards not reached because harness stops at first failure",
+    "Reference prices are official estimates, not verified gateway charges",
+    "Provider-account isolation is not asserted",
+    "R5 economic test, funding resolver and R6 long observation remain incomplete"
+  ],
+  "terminalFailureResume": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-luna-critique-v4",
+    "runId": "run-b8e868fdb5a5db9f6f19acbfecfe46c7bd3d35c3fe3f848c6c7086730be7dcf7",
+    "replayed": true,
+    "providerInvocations": 0,
+    "wsSubmissions": 0,
+    "providerHttpCalls": 0,
+    "resultStillReview": true,
+    "originalFailurePreserved": false,
+    "readonlyHtxCalls": 48
+  },
+  "artifactScan": {
+    "at": "2026-10-03T08:59:52.018Z",
+    "scope": "all finished integration artifacts, docs, built lib and original model.logs; .env/editor secret sources excluded",
+    "credentialReferences": 4,
+    "files": 674,
+    "bytes": 430626488,
+    "symlinksSkipped": 0,
+    "exactOrEncodedCredentialHits": 0,
+    "hitFiles": [],
+    "privatePermissionViolations": [],
+    "permissionsRestrictedWithoutContentChanges": 103
+  },
+  "codexFingerprint": {
+    "implemented": true,
+    "version": "0.160.0",
+    "originator": "codex_cli_rs",
+    "headers": [
+      "User-Agent",
+      "originator",
+      "version",
+      "session-id",
+      "thread-id",
+      "x-client-request-id"
+    ],
+    "body": [
+      "prompt_cache_key",
+      "client_metadata.session_id",
+      "client_metadata.thread_id"
+    ],
+    "loopbackHandshakeVerified": true,
+    "gatewayContractPassed": true,
+    "fullOriginalEnvelopeValidated": true,
+    "submittedRequests": 2,
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-codex-strict-contract-v3",
+    "officialUpperReferenceUsd": 0.0006855,
+    "serverClassificationLogAvailable": false
+  },
+  "strictSchemaCompatibility": {
+    "literalTypesAdded": true,
+    "wireShapeStrict": true,
+    "uniqueItemsEnforcedLocallyAgainstOriginalSchema": true,
+    "originalUniqueItemsConstraintRetained": true,
+    "negativeDuplicateRegression": true,
+    "rejectedProbeDirectories": [
+      "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-codex-strict-contract",
+      "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-codex-strict-contract-v2"
+    ]
+  },
+  "terminalFailureResumeAfterFix": {
+    "passed": true,
+    "sourceDatabasesUnmodified": true,
+    "results": [
+      {
+        "source": "teacherli-luna-critique-v3",
+        "runId": "run-19f545de3aa96a7fe7f71a7bbc5b84e9e1fa71fa31900e985eb98732b96a9aff",
+        "replayed": true,
+        "reasonExact": true,
+        "providerInvocations": 0,
+        "budgetUnchanged": true,
+        "status": "review"
+      },
+      {
+        "source": "teacherli-luna-critique-v4",
+        "runId": "run-b8e868fdb5a5db9f6f19acbfecfe46c7bd3d35c3fe3f848c6c7086730be7dcf7",
+        "replayed": true,
+        "reasonExact": true,
+        "providerInvocations": 0,
+        "budgetUnchanged": true,
+        "status": "review"
+      }
+    ]
+  },
+  "activeCritique": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-codex-critique-v5",
+    "status": "stopped_on_unknown_provider_outcome",
+    "requestedSamples": 6,
+    "knownUsageCalls": 10,
+    "providerWsRequests": 11,
+    "validFullWorkflowSamples": 3,
+    "failedSamples": 1,
+    "originalSchemaValidated": true,
+    "schemaRepairCalls": 0,
+    "actualInputTokens": 496944,
+    "cachedTokens": 6656,
+    "standardOfficialReferenceUsd": 0.06500636,
+    "knownOfficialUpperReferenceUsd": 0.14657162,
+    "unresolvedUpperReservationUsd": 0.062333499999999986,
+    "triggers": [
+      {
+        "id": "connection-df800727-874c-4220-a7b5-5fe5aab93ecd-1",
+        "purpose": "commitment",
+        "state": "done",
+        "attempts": 1
+      },
+      {
+        "id": "connection-df800727-874c-4220-a7b5-5fe5aab93ecd-2",
+        "purpose": "novelty",
+        "state": "done",
+        "attempts": 1
+      }
+    ],
+    "runs": [
+      {
+        "runId": "run-ea26cb8a15341f7f93cd1ff0908e5d9918e1a33cfa3d284a0d91658b1960928c",
+        "status": "completed",
+        "outcome": "no_trade",
+        "failure": null,
+        "repairCalls": 0
+      },
+      {
+        "runId": "run-5c7a5b7abd0db7f7bda3604d09993e561834b5f9ebb945acea0bfcd14d3e3b7d",
+        "status": "review",
+        "outcome": "review",
+        "failure": null,
+        "repairCalls": 0
+      },
+      {
+        "runId": "run-01b1f294ad6b651c4cf329d9c58b71ace05cb68f0d7f66c72d8d942bf8709fad",
+        "status": "completed",
+        "outcome": "no_trade",
+        "failure": null,
+        "repairCalls": 0
+      },
+      {
+        "runId": "run-9b238d83c5dfb90d8e93cd754cae9b1374bc6d331405bf7b2302914638d7bf5c",
+        "status": "review",
+        "outcome": "review",
+        "failure": "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；OUTCOME_UNKNOWN: Sub2API WebSocket ended without a confirmed terminal response; provider outcome and cost are unresolved (Sub2API WebSocket closed after response.create without a terminal event; provider outcome and cost are unresolved)",
+        "repairCalls": 0
+      }
+    ],
+    "automaticResubmissions": 0,
+    "realExchangeOrdersSubmitted": 0
+  },
+  "safetyProbe": {
+    "passed": true,
+    "source": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-codex-critique-v5/paper.sqlite",
+    "originalHash": "0bdf18bfbb8109e658bb6fb585beb63a8e39e80614856f1a262a26a0e1671d9d",
+    "sourceRuns": 4,
+    "sourceDbUnmodified": true,
+    "providerCallbacks": 0,
+    "providerRequests": 0,
+    "budgetUnchanged": true,
+    "realExchangeOrdersSubmitted": 0,
+    "cases": [
+      {
+        "name": "expired",
+        "state": "expired",
+        "outcome": "idle",
+        "reason": "触发器在处理前过期",
+        "audits": [
+          "trigger.expired"
+        ]
+      },
+      {
+        "name": "no-budget",
+        "state": "failed",
+        "outcome": "failed",
+        "reason": "[attempt 1] W2 预算拒绝（小时 2/3，今日 2/8）：未配置正数日预算，停止模型调用",
+        "audits": [
+          "trigger.attempt_terminal",
+          "trigger.wake_suppressed"
+        ]
+      },
+      {
+        "name": "invalidation",
+        "state": "done",
+        "outcome": "frozen",
+        "reason": "invalidation P0 已冻结 ADA/USDT:USDT；没有模型调用",
+        "audits": [
+          "trigger.p0_frozen"
+        ]
+      }
+    ]
+  },
+  "cacheInvestigation": "codex-cache-investigation-2026-10-03.json",
+  "nextValidation": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6",
+    "status": "running",
+    "codeCommit": "1ba3787",
+    "samples": 6,
+    "totalBudgetUsd": 1,
+    "maxTokens": 32768,
+    "reasoningEffort": "max",
+    "sessionScope": "one stable identifier per run"
+  }
+}

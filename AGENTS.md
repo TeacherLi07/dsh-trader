@@ -20,7 +20,7 @@
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
 **当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 原验收使用 stub；本轮真实连接证据见 `docs/real-integration-progress-2026-10-03.md`，仍不代表经济效果。负责人选择 `critique` 为默认，`trade-supervisor.decisionStrategy` 可切回 `single`；付费 single/critique 对照已取消，选择不代表效果证据。R5 runner 的离线护栏已通过本地测试；当前仍是 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
-**下一步**：本轮已授权 `.env` 凭据与保守真实测试（Flash/high/32768）。最终批量完成 38 条，另有同运行时版本的 1 条恢复探针；DeepSeek 402/余额不可用阻塞 ≥50 条目标，未知 reservation 保留，不重发。HTX 生产 runtime 已通过非空持仓、merged 保护、journal 对账和重建恢复；Sub2API WS 真实工具调用已通过。生产 funding resolver、独立经济验收、Sub2API 价格和 R6 长期观察仍未完成，默认保持 paper。
+**下一步**：负责人已将走量测试切换到 Codex 配置的 `ai.teacherli.net`、`SUB2API_KEY`、`gpt-6-luna/max`，优先 Responses WS；不再为凑样本继续请求 DeepSeek。网关官方参考价只用于授权测试，未宣称网关账单已核验。HTX 生产 runtime 非空持仓/merged 保护/journal/重建恢复已通过；最新 provider 与模型链证据继续写入 `docs/real-integration-progress-2026-10-03.md`。生产 funding resolver、独立经济验收和 R6 长期观察仍未完成，默认 paper。
 
 **已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与审计均已接线。SR1/SR2 收紧未成交挂单敞口、远端保护、部分成交恢复、执行 API 暴露和 live arm。R1–R4 建立 DecisionContext、结构化判断、eligibility、统一执行及持久 W2/W3 worker；R2 捕获过固定 PIT 请求，R3/R4 工程证据使用 stub。旧多 agent 判断链已删除。R5 已有真实调用，数量与经济验收仍未达标。
 
@@ -170,7 +170,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 - **P3 未做**：当前仍是 `paper`；`live_confirm` 已从目标计划删除，P3 直接在 R5 达标后以小额、硬限额、
   显式 arm 的 `live_auto` 进行。
 - **剩余外部依赖**：真 HTX“有持仓 + 算法保护单”的 merged 对账（生产组合根使用 `HtxBroker`，
-  单测覆盖；需用已有 key 做非空实测）。
+  单测覆盖；生产 runtime 非空实测见 `docs/r6-runtime-connection-2026-10-03.md`，14 天长期观察仍缺）。
   P2 ①②④ 已用持久化模拟 venue 验证（`docs/p2-fault-injection-2026-09-15.md`）；旧 watchdog 实现与脚本已删除，结果仅作历史归档；部署禁止启动外部撤单进程。
 - 宏观日历、新闻、社媒、链上供应商与策略自进化均不在当前计划；不要保留名义开关或未接线角色。
 

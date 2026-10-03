@@ -45,7 +45,7 @@
 | R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档（当前 schema v8）；固定 PIT fixture 的 context/request 为 107,128 / 119,243 字符，request 上限 180,000，UTF-8 输入预算保守上界 123,751 tokens；非空样本含行情、benchmark、衍生品、组合/保护、计划与 outcome；缺失/过期/暖机、PIT、脱敏和超长拒发均通过；复验见 `../docs/r2-decision-context-2026-09-21.md`。只捕获请求，未调用模型 |
 | R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；`trade-supervisor.decisionStrategy` 默认 `critique`，可切回 `single`；付费对照未执行，不代表效果差异；stub 工程证据见 `../docs/r3-decision-envelope-2026-09-21.md`（外部模型调用 0） |
 | R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；结算对未知成本 fail-closed，但生产 funding resolver 尚未接入，经济验收仍受阻；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `../docs/r4-trigger-worker-2026-09-21.md`（外部模型调用 0） |
-| R5 | 真实 critique 与 forward-paper 效果验收 | ⬜ 负责人选择 critique，付费 single/critique 对照取消；静态 runner 与离线护栏保留但未执行。已授权并进行真实 Responses 测试；≥50目标因402余额不足未达标，独立经济证据和 funding resolver仍缺。实测见 [`连接进度`](../docs/real-integration-progress-2026-10-03.md)；选择不代表相对 single 的效果结论。说明见 [`docs/r5-runner.md`](../docs/r5-runner.md)，lesson 默认关闭 |
+| R5 | 真实 critique 与 forward-paper 效果验收 | ⬜ 负责人选择 critique，付费 single/critique 对照取消；静态 runner 与离线护栏保留但未执行。已授权并进行真实 Responses 测试；DeepSeek 样本补量已取消，后续走量使用授权 ai.teacherli.net 的 Luna/max Responses WS；独立经济证据和 funding resolver仍缺。实测见 [`连接进度`](../docs/real-integration-progress-2026-10-03.md)；选择不代表相对 single 的效果结论。说明见 [`docs/r5-runner.md`](../docs/r5-runner.md)，lesson 默认关闭 |
 | R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，需同时设置 `TRADER_MODE=live_auto`、独立 `TRADER_LIVE_ARMED=1`、两项凭据及全部非空限额；缺凭据不降级；逐单 `live_confirm` 与自进化不在当前架构 |
 
 ## 开发
