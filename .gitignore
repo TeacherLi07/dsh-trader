@@ -17,6 +17,8 @@ coverage/
 !.env.example
 # DSH loads this repo-local file when started from dsh-trader/; never commit credentials.
 /dsh-trader/.env
+# 编辑器临时文件仍可能含实际凭据，保留文件但禁止误加入提交。
+/dsh-trader/.env.*
 
 # logs / os
 *.log

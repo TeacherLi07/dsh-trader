@@ -7,7 +7,7 @@ const path = process.env.TRADER_TEST_HTTP_LOG
 if (path) {
   if (existsSync(path)) throw new Error('HTTP trace exists; use a new path to preserve evidence')
   writeFileSync(path, '', { flag: 'wx', mode: 0o600 })
-  const secrets = [process.env.TRADER_API_KEY, process.env.TRADER_API_SECRET, process.env.DEEPSEEK_API_KEY].filter(Boolean)
+  const secrets = [process.env.TRADER_API_KEY, process.env.TRADER_API_SECRET, process.env.DEEPSEEK_API_KEY, process.env.SUB2API_KEY].filter(Boolean)
   const safe = (value) => {
     let text = JSON.stringify(sanitizeModelTrace(value))
     for (const secret of secrets) text = text.replaceAll(secret, '[REDACTED]').replaceAll(encodeURIComponent(secret), '[REDACTED]')

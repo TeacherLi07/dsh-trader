@@ -108,6 +108,21 @@ export const DEEPSEEK_PRICE_SEED: readonly ModelPrice[] = [
   { model: 'deepseek-v4-pro', effectiveFrom: Date.UTC(2026, 8, 14), tier: 'off_peak', cachedInPerMtok: 0.022, inPerMtok: 0.66, outPerMtok: 1.98, source: PRICING_SOURCE },
 ]
 
+export const LUNA_GATEWAY_MODEL = 'sub2api:gpt-6-luna' as const
+
+/**
+ * 负责人授权按官方价格估算网关测试，不把它当成已核验网关账单。
+ * 现有账本不单列 cache write，取官方长上下文输入/写缓存上界，避免按普通输入价低估。
+ */
+export function lunaGatewayReferencePrice(effectiveFrom: number): ModelPrice {
+  if (!Number.isSafeInteger(effectiveFrom) || effectiveFrom < 0) throw new Error('参考价生效时间必须为非负毫秒整数')
+  return {
+    model: LUNA_GATEWAY_MODEL, effectiveFrom, tier: 'any',
+    inPerMtok: 0.25, cachedInPerMtok: 0.02, outPerMtok: 0.75,
+    source: 'https://developers.openai.com/api/docs/models/gpt-6-luna (2026-10-03; official standard long-context/cache-write upper reference; gateway invoice unverified)',
+  }
+}
+
 export interface BudgetState {
   readonly spentUsd: number
   readonly estimatedUsd: number

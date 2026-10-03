@@ -1,34 +1,29 @@
 #!/usr/bin/env node
-/** 已配置 Sub2API 的一次有界 WS 工具调用；不注入交易 runtime，不猜测网关价格。 */
+/** Codex 中授权的 Luna/max 网关 WS 工具往返；不注入交易 runtime，按官方参考估算而非声称实付。 */
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import CredentialsLocal from '@deepseek-ai/dsh-credentials-local'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { ResponsesWS } from 'openai/resources/responses/ws'
+import { estimateCost, lunaGatewayReferencePrice } from '../lib/cost.js'
+import { readLunaGatewayConfig, lunaProviderConfig, traceResponsesWs } from './model-connection-config.mjs'
 import * as WsProvider from '../lib/plugins/sub2api-responses-ws.js'
 
-const require = createRequire(import.meta.resolve('@deepseek-ai/dsh-credentials-local'))
-const { parse } = require('yaml')
 const output = resolve(process.argv[2] ?? '/tmp/sub2api-connection-check')
 mkdirSync(output, { recursive: true, mode: 0o700 })
 assert.equal(statSync(output).mode & 0o077, 0, 'private output directory required')
 const reportPath = join(output, 'report.json')
 assert.ok(!existsSync(reportPath), 'refuse to overwrite evidence')
 const home = process.env.DSH_HOME ?? '/home/ubuntu/.dsh'
-const settings = parse(readFileSync(join(home, 'settings.yaml'), 'utf8'))
-const configured = settings['llm-pi-ai']?.providers?.['sub2api-openai']
-assert.ok(configured?.baseURL && configured.apiKeyEnv, 'configured Sub2API endpoint/ref required')
-const wireModelId = 'gpt-5.6-sol'
-const metadata = configured.models?.find((model) => model.id === wireModelId)
-assert.ok(metadata, 'configured gateway model required')
+const configured = readLunaGatewayConfig(process.argv[3])
+const price = lunaGatewayReferencePrice(Date.now())
 const report = { startedAt: Date.now(), provider: WsProvider.SUB2API_RESPONSES_WS_PROVIDER,
-  model: `sub2api:${wireModelId}`, maxTokens: 512, reasoningEffort: 'high',
-  costKnown: false, gatewayPriceVerified: false, realExchangeOrdersSubmitted: 0,
-  submittedRequests: 0, chunks: [], passed: false }
+  model: configured.model, endpoint: configured.baseURL, sourceConfig: configured.sourceConfig,
+  maxTokens: 8192, reasoningEffort: configured.reasoningEffort,
+  referencePrice: price, costKnown: false, gatewayPriceVerified: false, realExchangeOrdersSubmitted: 0,
+  submittedRequests: 0, chunks: [], rounds: [], passed: false }
 let key
 const redact = (value) => {
   let text = JSON.stringify(value)
@@ -37,22 +32,12 @@ const redact = (value) => {
 }
 const log = (kind, detail) => appendFileSync(join(output, 'ws.jsonl'),
   JSON.stringify(redact({ at: Date.now(), kind, detail })) + '\n', { mode: 0o600 })
-const originalSend = ResponsesWS.prototype.send
-const originalStream = ResponsesWS.prototype.stream
-ResponsesWS.prototype.send = function (event) {
-  if (event.type === 'response.create') report.submittedRequests += 1
-  log('send', event)
-  return originalSend.call(this, event)
-}
-ResponsesWS.prototype.stream = function (...args) {
-  const stream = originalStream.apply(this, args)
-  return { async *[Symbol.asyncIterator]() {
-    for await (const event of stream) {
-      log('event', event.type === 'error' ? { type: event.type, error: String(event.error) } : event)
-      yield event
-    }
-  } }
-}
+const restoreWs = await traceResponsesWs(log, (event) => {
+  report.submittedRequests += 1
+  assert.equal(event.model, configured.wireModelId)
+  assert.equal(event.reasoning?.effort, 'max', 'reasoning effort must reach wire unchanged')
+  assert.equal(event.temperature, undefined, 'reasoning model sampling compatibility')
+})
 const ctx = new Context()
 let llmFiber, credentialsFiber, providerFiber
 try {
@@ -62,16 +47,11 @@ try {
   key = resolved.value
   report.credentialSource = resolved.source
   llmFiber = await ctx.plugin(LlmRuntime)
-  providerFiber = await ctx.plugin({ apply: WsProvider.apply, inject: WsProvider.inject }, {
-    enabled: true, baseURL: configured.baseURL, apiKeyEnv: configured.apiKeyEnv, connectTimeoutMs: 10_000,
-    models: [{ id: report.model, wireModelId, name: metadata.name ?? wireModelId,
-      contextWindow: metadata.contextWindow, maxTokens: report.maxTokens,
-      reasoningEfforts: ['high'], defaultReasoningEffort: 'high' }],
-  })
+  providerFiber = await ctx.plugin({ apply: WsProvider.apply, inject: WsProvider.inject }, lunaProviderConfig(configured, report.maxTokens))
   const models = await ctx.llm.listModels(report.provider)
   assert.ok(models.some((model) => model.id === report.model), 'WS route model registration required')
   for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
-    maxTokens: report.maxTokens, signal: AbortSignal.timeout(60_000),
+    maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
     system: 'Use the submit_connection_result tool exactly once with status OK. No other output.',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm this WebSocket Responses connection.' }] }],
     tools: [{ name: 'submit_connection_result', description: 'Return connection status only; no side effects.',
@@ -83,9 +63,31 @@ try {
   assert.equal(JSON.parse(tool.block.arguments).status, 'OK')
   const usage = report.chunks.find((chunk) => chunk.type === 'usage')?.usage
   assert.ok(usage && usage.totalTokens > 0, 'nonempty authoritative usage required')
+  report.rounds.push({ kind: 'tool', usage })
+  const history = createAssistantMessage({ content: [tool.block], source: { provider: report.provider, model: report.model } })
+  const followup = []
+  for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
+    maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
+    system: 'After receiving the connection tool result, reply CONNECTION_OK exactly.',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm the connection via the status tool.' }] },
+      history, createToolResultMessage({ callId: tool.block.id, isError: false,
+        content: [{ type: 'text', text: '{"status":"OK"}' }] })],
+  })) { followup.push(chunk); log('followup.chunk', chunk) }
+  const followupUsage = followup.find((chunk) => chunk.type === 'usage')?.usage
+  assert.ok(followupUsage?.totalTokens > 0, 'nonempty multi-turn terminal usage required')
+  assert.ok(followup.some((chunk) => chunk.type === 'block-end' && chunk.block.type === 'text' &&
+    chunk.block.text.includes('CONNECTION_OK')), 'real tool result must be consumed in second turn')
+  report.rounds.push({ kind: 'tool-result-history', usage: followupUsage, chunks: followup })
   report.usage = usage
+  report.referenceEstimateUsd = report.rounds.reduce((sum, row) => {
+    const cost = estimateCost({ tokensIn: row.usage.inputTokens + (row.usage.cacheReadTokens ?? 0) + (row.usage.cacheWriteTokens ?? 0),
+      tokensCached: row.usage.cacheReadTokens ?? 0,
+      tokensOut: row.usage.outputTokens }, [price], report.model, report.startedAt)
+    assert.equal(cost.known, true)
+    return sum + cost.usd
+  }, 0)
   assert.equal(report.chunks.at(-1)?.reason?.kind, 'tool-calls')
-  assert.equal(report.submittedRequests, 1, 'no resubmission permitted')
+  assert.equal(report.submittedRequests, 2, 'one submission per turn; no resubmission permitted')
   report.passed = true
 } catch (error) {
   report.error = String(error)
@@ -95,9 +97,8 @@ try {
   await providerFiber?.dispose()
   await llmFiber?.dispose()
   await credentialsFiber?.dispose()
-  ResponsesWS.prototype.send = originalSend
-  ResponsesWS.prototype.stream = originalStream
+  restoreWs()
 }
 console.log(JSON.stringify(redact({ passed: report.passed, submittedRequests: report.submittedRequests,
-  usage: report.usage, costKnown: report.costKnown, error: report.error }), null, 2))
+  usage: report.usage, referenceEstimateUsd: report.referenceEstimateUsd, costKnown: report.costKnown, error: report.error }), null, 2))
 if (!report.passed) process.exitCode = 1
