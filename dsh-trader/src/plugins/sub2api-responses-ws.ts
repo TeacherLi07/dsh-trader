@@ -48,7 +48,7 @@ export const inject = ['llm', 'credentials']
 
 export const SUB2API_RESPONSES_WS_PROVIDER = 'sub2api-openai-ws' as const
 const OPENAI_RESPONSES_WS_BETA = 'responses_websockets=2026-02-06'
-const ALLOWED_REASONING_EFFORTS = ['minimal', 'low', 'medium', 'high'] as const
+const ALLOWED_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export type ResponsesReasoningEffort = (typeof ALLOWED_REASONING_EFFORTS)[number]
 
@@ -86,7 +86,7 @@ const modelSchema = z.object({
 export const Config = z.object({
   enabled: z.boolean().default(false),
   baseURL: z.string().default(''),
-  apiKeyEnv: z.string().default('SUB2API_OPENAI_API_KEY'),
+  apiKeyEnv: z.string().default('SUB2API_KEY'),
   connectTimeoutMs: z.number().default(10_000),
   models: z.array(modelSchema).default([]),
 })
@@ -207,8 +207,8 @@ function piModel(model: ResolvedSub2ApiWsModel, baseURL: string): PiAiModel<'ope
     api: 'openai-responses',
     provider: 'openai',
     baseUrl: baseURL,
-    reasoning: model.reasoningEfforts.length > 0,
-    thinkingLevelMap: Object.fromEntries(model.reasoningEfforts.map((effort) => [effort, effort])),
+    reasoning: model.reasoningEfforts.some((effort) => effort !== 'none'),
+    thinkingLevelMap: Object.fromEntries(model.reasoningEfforts.map((effort) => [effort === 'none' ? 'off' : effort, effort])),
     input: ['text'],
     // pi-ai 的临时响应对象要求 cost 描述；此值不离开 adapter，项目账本仍独立按 route model 查价。
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -423,6 +423,11 @@ function makeResponseCreateEvent(
   if (effort !== undefined && !configuredModel.reasoningEfforts.includes(effort as ResponsesReasoningEffort)) {
     throw new LlmError(`Sub2API model does not support requested reasoning effort ${effort}`, 'UNSUPPORTED_REASONING_EFFORT')
   }
+  const reasoningEnabled = effort !== undefined && effort !== 'none'
+  // SDK 联合类型可能落后于网关支持的值，因此保留经过配置白名单验证的原始 wire 值。
+  const reasoning = effort === undefined
+    ? undefined
+    : { effort: effort as unknown as NonNullable<ResponsesClientEvent['reasoning']>['effort'] }
   return {
     type: 'response.create',
     model: configuredModel.wireModelId,
@@ -430,9 +435,9 @@ function makeResponseCreateEvent(
     store: false,
     truncation: 'disabled',
     max_output_tokens: options.maxTokens ?? configuredModel.maxTokens,
-    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    ...(options.temperature === undefined || reasoningEnabled ? {} : { temperature: options.temperature }),
     ...(tools.length === 0 ? {} : { tools, tool_choice: 'required', parallel_tool_calls: false }),
-    ...(effort === undefined ? {} : { reasoning: { effort: effort as ResponsesReasoningEffort } }),
+    ...(reasoning === undefined ? {} : { reasoning }),
   }
 }
 

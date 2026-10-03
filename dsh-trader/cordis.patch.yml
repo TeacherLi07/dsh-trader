@@ -51,7 +51,7 @@
       config:
         enabled: false
         baseURL: ''
-        apiKeyEnv: SUB2API_OPENAI_API_KEY
+        apiKeyEnv: SUB2API_KEY
         connectTimeoutMs: 10000
         models: []
 

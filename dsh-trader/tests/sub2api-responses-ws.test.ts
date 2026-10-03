@@ -19,6 +19,7 @@ import {
   SUB2API_RESPONSES_WS_PROVIDER,
   Sub2ApiResponsesWebSocketAdapter,
   resolveResponsesWebSocketProxy,
+  type ResponsesReasoningEffort,
   type Sub2ApiResponsesWsConfig,
 } from '../src/plugins/sub2api-responses-ws.js'
 
@@ -98,20 +99,26 @@ function multiTurnHistoryOptions(): GenerateOptions {
   })
 }
 
-function adapter(baseURL: string, onResolve?: () => void): Sub2ApiResponsesWebSocketAdapter {
+function adapter(
+  baseURL: string,
+  onResolve?: () => void,
+  modelId = MODEL_ALIAS,
+  wireModelId = WIRE_MODEL_ID,
+  effort: ResponsesReasoningEffort = 'high',
+): Sub2ApiResponsesWebSocketAdapter {
   const config: Sub2ApiResponsesWsConfig = {
     enabled: true,
     baseURL,
-    apiKeyEnv: 'SUB2API_OPENAI_API_KEY',
+    apiKeyEnv: 'SUB2API_KEY',
     connectTimeoutMs: 3_000,
     models: [{
-      id: MODEL_ALIAS,
-      wireModelId: WIRE_MODEL_ID,
-      name: 'Gateway GPT 5.6 Sol',
+      id: modelId,
+      wireModelId,
+      name: 'Gateway GPT model',
       contextWindow: 262_144,
       maxTokens: 65_536,
-      reasoningEfforts: ['high'],
-      defaultReasoningEffort: 'high',
+      reasoningEfforts: [effort],
+      defaultReasoningEffort: effort,
     }],
   }
   return new Sub2ApiResponsesWebSocketAdapter(config, {
@@ -280,6 +287,26 @@ describe('Sub2API Responses WebSocket provider', () => {
     expect(chunks.some((chunk) => chunk.type === 'usage' && chunk.usage.totalTokens === 28)).toBe(true)
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
     expect(model.providerRetryPolicy(SUB2API_RESPONSES_WS_PROVIDER)).toMatchObject({ mode: 'normal', maxRetries: 0 })
+  })
+
+  it.each(['none', 'xhigh', 'max'] as const)('preserves %s reasoning effort on the wire and filters sampling', async (effort) => {
+    const modelAlias = 'sub2api:gpt-6-luna'
+    const gateway = await startGateway((socket) => sendTextResponse(socket, {
+      input_tokens: 28, output_tokens: 3, total_tokens: 31,
+      input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 1 },
+    }))
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL, undefined, modelAlias, 'gpt-6-luna', effort).stream(
+      requestOptions({ model: modelAlias, reasoningEffort: ReasoningEffortId(effort) }),
+    )) chunks.push(chunk)
+
+    const request = gateway.requests[0] as Record<string, unknown>
+    expect(request['model']).toBe('gpt-6-luna')
+    expect(request['reasoning']).toEqual({ effort })
+    expect(request).not.toHaveProperty('top_p')
+    if (effort === 'none') expect(request['temperature']).toBe(0)
+    else expect(request).not.toHaveProperty('temperature')
+    expect(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text.includes('SAFE_REPLY'))).toBe(true)
   })
 
   it('serializes non-empty assistant/tool-result history before the current user turn', async () => {

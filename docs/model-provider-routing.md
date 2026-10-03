@@ -27,6 +27,8 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
 
 公开 DSH `@godd6366/dsh-sub2api` 插件把 `llm-sub2api:` settings 翻译到 DSH `llm-pi-ai` route；其 `sub2api-openai` 使用 generic `openai-responses` HTTP/SSE adapter。Sub2API gateway 本身另有标准 Responses WebSocket v2 ingress，本项目提供 `sub2api-openai-ws` 作为单独 DSH LLM provider route。
 
+已检查 DSH ChatGPT OAuth 的 `openai-codex-responses`：它要求 OAuth JWT 与 chatgpt-account-id，且原生实现有重连和 SSE fallback。网关 API key 不能替代该 OAuth 会话。这里复用其共享的 Responses 序列化与流处理，认证仍使用 gateway credential ref。
+
 此 route 使用官方 OpenAI Node SDK `ResponsesWS` 负责 WebSocket transport，复用 pi-ai 的 Responses message/tool serializer 和 terminal event processor。通用 `openai-responses` 的 `transport: websocket` 不会被读取，不能用来打开 WS。
 
 输入转换遵循 DSH `dsh-llm-pi-ai` 的历史转换方式，支持 system/user/assistant 与 tool-result 文本多轮历史；图片和文件内容明确拒绝，等接入 attachment converter 后再声明支持。
@@ -37,19 +39,21 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
   config:
     enabled: true
     baseURL: https://sub2api.example
-    apiKeyEnv: SUB2API_OPENAI_API_KEY
+    apiKeyEnv: SUB2API_KEY
     connectTimeoutMs: 10000
     models:
-      - id: sub2api:gpt-6
-        wireModelId: gpt-6
-        name: Gateway GPT-6
-        contextWindow: 262144
+      - id: sub2api:gpt-6-luna
+        wireModelId: gpt-6-luna
+        name: Gateway GPT-6 Luna
+        contextWindow: 1050000
         maxTokens: 32768
-        reasoningEfforts: [high]
-        defaultReasoningEffort: high
+        reasoningEfforts: [none, xhigh, max]
+        defaultReasoningEffort: max
 ```
 
-把 `trade-supervisor.l3` 设为 `provider: sub2api-openai-ws, model: sub2api:gpt-6` 后，DSH route 使用 `sub2api:gpt-6` 记账，网关收到 `wireModelId: gpt-6`。Sub2API key 只通过 `apiKeyEnv` reference 解析。adapter 发 `OpenAI-Beta: responses_websockets=2026-02-06`，使用 `HttpsProxyAgent` 读取 HTTPS proxy 环境变量；loopback 地址绕过代理。
+把 `trade-supervisor.l3` 设为 `provider: sub2api-openai-ws, model: sub2api:gpt-6-luna` 后，DSH route 使用 `sub2api:gpt-6-luna` 记账，网关收到 `wireModelId: gpt-6-luna`。Sub2API key 只通过 `apiKeyEnv: SUB2API_KEY` reference 解析。adapter 发 `OpenAI-Beta: responses_websockets=2026-02-06`，使用 `HttpsProxyAgent` 读取 HTTPS proxy 环境变量；loopback 地址绕过代理。
+
+reasoning `none` / `xhigh` / `max` 会原样写进 `reasoning.effort`。reasoning 不是 `none` 时会丢弃工作流给出的 `temperature: 0`，并始终不发送 `top_p`；`none` 可以保留 temperature 等普通采样选项。
 
 OpenAI SDK 自动重连关闭，DSH provider retry policy 的 `maxRetries` 为 0；此 WS route 没有 HTTP fallback。请求发送后若未收到 `response.completed`、`response.incomplete` 或 `response.failed`，adapter 返回 `OUTCOME_UNKNOWN` 并停止，绝不重新发送 `response.create`。已解析的 API key 会从流错误文本中精确脱敏。
 
