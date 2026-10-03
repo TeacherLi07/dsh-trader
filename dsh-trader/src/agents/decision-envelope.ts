@@ -395,7 +395,9 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
   if (!isRecord(value)) return { ok: false, errors: ['envelope 必须是对象'] }
   const allowed = ['outcome', 'thesis', 'rejectedAlternatives', 'claims', 'uncertainties', 'confidence', 'riskFraction', 'immediateAction', 'plan', 'critiqueResponses']
   const errors: string[] = []
-  if (!hasOnlyKeys(value, allowed)) errors.push('envelope 包含未授权字段')
+  const unauthorized = Object.keys(value).filter((key) => !allowed.includes(key))
+  // 修复请求需要具体字段名；只给泛化错误会让模型原样重交错误工件。未知字段仍一律拒绝。
+  if (unauthorized.length > 0) errors.push(`envelope 包含未授权字段：${JSON.stringify(unauthorized)}；顶层允许字段：${allowed.join(', ')}`)
   if (!['act', 'no_trade', 'review'].includes(String(value['outcome']))) errors.push('outcome 非法')
   if (typeof value['thesis'] !== 'string' || value['thesis'].trim() === '' || value['thesis'].length > 8_000) errors.push('thesis 无效')
   if (!isStringArray(value['rejectedAlternatives'], 20, 2_000)) errors.push('rejectedAlternatives 无效')

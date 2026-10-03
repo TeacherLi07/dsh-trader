@@ -85,6 +85,14 @@ function candidate(over: Record<string, unknown> = {}) {
 }
 
 describe('DecisionEnvelope R3 validation', () => {
+  it('顶层误放 plan 字段仍拒绝，并向唯一 repair 提供具体字段名', () => {
+    const parsed = parseDecisionEnvelopeCandidate(candidate({ forbidden: ['open'], noTrade: true }), context())
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) throw Error('非空错误候选不应通过')
+    expect(parsed.errors.join(' ')).toContain('["forbidden","noTrade"]')
+    expect(parsed.errors.join(' ')).toContain('顶层允许字段')
+  })
+
   it('binds identity in code, validates evidence pointers and grants only a fresh eligible risk gate', () => {
     const frozen = context()
     const parsed = parseDecisionEnvelopeCandidate(candidate(), frozen)

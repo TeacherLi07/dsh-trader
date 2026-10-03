@@ -102,6 +102,23 @@ describe('R3 Decision workflow', () => {
     expect(result.final?.critiqueResponses).toMatchObject([{ critiqueId: 'crit-stop', disposition: 'accept' }])
   })
 
+  it('实测误放字段进入明确 repair，字段清单来自当前工具而不混入 critic', async () => {
+    const valid = envelope({ outcome: 'no_trade', immediateAction: { action: 'noop' } })
+    const critic = { issues: [], uncertainties: [] }
+    const model = new FakeDecisionModel([{ ...valid, forbidden: ['open'], noTrade: true }, valid, critic, valid])
+    const result = await runDecisionWorkflowStages({ strategy: 'critique', context: context(), model, route })
+    expect(result.calls).toHaveLength(4)
+    expect(result.repairCalls).toBe(1)
+    expect(result.failure).toBeUndefined()
+    expect(JSON.stringify(model.requests[1])).toContain('forbidden')
+    expect(JSON.stringify(model.requests[1])).toContain('noTrade')
+    const strategist = model.requests[0]?.messages[0]?.content
+    const riskCritic = model.requests[2]?.messages[0]?.content
+    expect(JSON.stringify(strategist)).toContain('顶层字段：outcome, thesis')
+    expect(JSON.stringify(riskCritic)).toContain('顶层字段：issues, uncertainties')
+    expect(JSON.stringify(riskCritic)).not.toContain('顶层字段：outcome')
+  })
+
   it('结构错误最多触发一次 repair，仍错误则返回 failure 而不生成 final', async () => {
     const model = new FakeDecisionModel([{}, { outcome: 'act' }])
     const result = await runDecisionWorkflowStages({ strategy: 'single', context: context(), model, route })

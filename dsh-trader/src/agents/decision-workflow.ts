@@ -76,7 +76,7 @@ interface ToolSchema {
   readonly parameters: Record<string, unknown>
 }
 
-export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v3' as const
+export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v4' as const
 const ENVELOPE_NAME = DECISION_ENVELOPE_TOOL.name
 
 const CRITIQUE_TOOL: ToolSchema = {
@@ -189,7 +189,8 @@ async function callStructuredTool(input: {
   const request = renderDecisionRequest(input.context, {
     maxChars: input.route.maxChars,
     promptVersion,
-    instructions: `${input.instructions}\n\n${OUTPUT_CONTRACT}`,
+    // 明确当前工具的顶层边界，防止模型把 plan 的嵌套字段提升到 envelope。
+    instructions: `${input.instructions}\n\n${OUTPUT_CONTRACT}\n本次工具只允许以下顶层字段：${Object.keys(input.tool.parameters['properties'] as Record<string, unknown>).join(', ')}。嵌套字段必须保留在其所属对象中。`,
     ...(input.materials === undefined ? {} : { materials: input.materials }),
     outputSchema: input.tool,
   })
