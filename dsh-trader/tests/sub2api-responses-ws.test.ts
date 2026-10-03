@@ -373,7 +373,9 @@ describe('Sub2API Responses WebSocket provider', () => {
     const planSchema = (planOptional['anyOf'] as Record<string, unknown>[]).find((schema) => schema['type'] === 'object')!
     const planProperties = planSchema['properties'] as Record<string, unknown>
     const forbidden = planProperties['forbidden'] as Record<string, unknown>
-    expect(forbidden['uniqueItems']).toBe(true)
+    expect(forbidden).not.toHaveProperty('uniqueItems')
+    expect(forbidden['description']).toContain('Items must be unique')
+    expect(DECISION_ENVELOPE_TOOL.parameters.properties.plan.properties.forbidden.uniqueItems).toBe(true)
     expect(((forbidden['items'] as Record<string, unknown>)['enum'] as unknown[]).sort()).toEqual([...ACTION_KINDS].sort())
 
     const toolEnd = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')

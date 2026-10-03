@@ -85,6 +85,20 @@ function candidate(over: Record<string, unknown> = {}) {
 }
 
 describe('DecisionEnvelope R3 validation', () => {
+  it('WS strict 的结构限制不替代原计划合同，非空 forbidden 重复仍拒绝', () => {
+    const forbidden = ['open', 'open']
+    const value = candidate({ outcome: 'no_trade', immediateAction: { action: 'noop' }, plan: {
+      thesis: '安全等待', confidence: 0.5, keyLevels: [], commitments: [],
+      invalidation: [{ id: 'inv', tf: '1h', when: 'position.qty > 0', then: { action: 'close' } }],
+      forbidden, noTrade: true,
+    } })
+    expect(forbidden.length).toBeGreaterThan(0)
+    const parsed = parseDecisionEnvelopeCandidate(value, context())
+    expect(parsed.ok).toBe(false)
+    if (parsed.ok) throw Error('重复约束不能被结构 decoder 放过')
+    expect(parsed.errors.join(' ')).toContain('forbidden 不得包含重复动作')
+  })
+
   it('顶层误放 plan 字段仍拒绝，并向唯一 repair 提供具体字段名', () => {
     const parsed = parseDecisionEnvelopeCandidate(candidate({ forbidden: ['open'], noTrade: true }), context())
     expect(parsed.ok).toBe(false)

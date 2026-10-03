@@ -150,6 +150,16 @@ function prepareStrictSchemaNode(value: unknown, path: string): JsonSchemaObject
     schema['properties'] = prepared
   }
 
+  // 上游实测拒绝 uniqueItems。原 schema 不变，调用方仍按原合同校验；wire 仅约束其支持的结构。
+  if (schema['uniqueItems'] !== undefined) {
+    if (schema['type'] !== 'array' || typeof schema['uniqueItems'] !== 'boolean') {
+      strictSchemaFailure(path, 'uniqueItems requires an array and a boolean constraint')
+    }
+    if (schema['uniqueItems'] === true) {
+      schema['description'] = [schema['description'], 'Items must be unique; the caller validates this against the original schema.'].filter(Boolean).join(' ')
+    }
+    delete schema['uniqueItems']
+  }
   const items = schema['items']
   if (items !== undefined) {
     if (Array.isArray(items)) strictSchemaFailure(path + '.items', 'tuple schemas are unsupported')
