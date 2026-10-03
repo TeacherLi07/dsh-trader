@@ -417,7 +417,8 @@ function makeResponseCreateEvent(
   model: PiAiModel<'openai-responses'>,
 ): ResponsesClientEvent {
   const context = toPiAiContext(options)
-  const input = convertResponsesMessages(model, context, new Set(['openai']))
+  // 与 DSH ChatGPT OAuth route 一致：系统指令写入 Responses.instructions，输入转换跳过同一份系统提示。
+  const input = convertResponsesMessages(model, context, new Set(['openai']), { includeSystemPrompt: false })
   const tools = context.tools === undefined ? [] : convertResponsesTools(context.tools, { supportsStrictMode: false })
   const effort = options.reasoningEffort?.toString() ?? configuredModel.defaultReasoningEffort
   if (effort !== undefined && !configuredModel.reasoningEfforts.includes(effort as ResponsesReasoningEffort)) {
@@ -431,6 +432,7 @@ function makeResponseCreateEvent(
   return {
     type: 'response.create',
     model: configuredModel.wireModelId,
+    ...(context.systemPrompt === undefined ? {} : { instructions: context.systemPrompt }),
     input,
     store: false,
     truncation: 'disabled',

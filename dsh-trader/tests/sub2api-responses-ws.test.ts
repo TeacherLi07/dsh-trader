@@ -279,7 +279,10 @@ describe('Sub2API Responses WebSocket provider', () => {
       store: false,
       tool_choice: 'required',
     })
-    expect((gateway.requests[0] as { input?: unknown[] }).input?.length).toBeGreaterThan(0)
+    const submitted = gateway.requests[0] as { instructions?: string; input: Array<Record<string, unknown>> }
+    expect(submitted.instructions).toBe('Return one structured decision.')
+    expect(submitted.input.length).toBeGreaterThan(0)
+    expect(submitted.input.some(item => item['role'] === 'developer' || item['role'] === 'system')).toBe(false)
     expect((gateway.requests[0] as { tools?: unknown[] }).tools).toHaveLength(1)
     expect((gateway.requests[0] as { tools?: Array<Record<string, unknown>> }).tools?.[0]).not.toHaveProperty('strict')
     expect(selectPrice(DEEPSEEK_PRICE_SEED, MODEL_ALIAS, Date.UTC(2026, 9, 3))).toBeUndefined()

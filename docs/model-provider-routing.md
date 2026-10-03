@@ -27,7 +27,7 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
 
 公开 DSH `@godd6366/dsh-sub2api` 插件把 `llm-sub2api:` settings 翻译到 DSH `llm-pi-ai` route；其 `sub2api-openai` 使用 generic `openai-responses` HTTP/SSE adapter。Sub2API gateway 本身另有标准 Responses WebSocket v2 ingress，本项目提供 `sub2api-openai-ws` 作为单独 DSH LLM provider route。
 
-已检查 DSH ChatGPT OAuth 的 `openai-codex-responses`：它要求 OAuth JWT 与 chatgpt-account-id，且原生实现有重连和 SSE fallback。网关 API key 不能替代该 OAuth 会话。这里复用其共享的 Responses 序列化与流处理，认证仍使用 gateway credential ref。
+已检查 DSH ChatGPT OAuth 的 `openai-codex-responses`：它要求 OAuth JWT 与 chatgpt-account-id，且原生实现有重连和 SSE fallback。网关 API key 不能替代该 OAuth 会话。这里复用其共享的 Responses 序列化与流处理，并将系统提示写入顶层 `instructions`，认证仍使用 gateway credential ref。
 
 此 route 使用官方 OpenAI Node SDK `ResponsesWS` 负责 WebSocket transport，复用 pi-ai 的 Responses message/tool serializer 和 terminal event processor。通用 `openai-responses` 的 `transport: websocket` 不会被读取，不能用来打开 WS。
 
