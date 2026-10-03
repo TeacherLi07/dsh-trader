@@ -5,6 +5,7 @@ import {
   evaluateDecisionEligibility,
   materializeDecisionPlan,
   parseDecisionEnvelopeCandidate,
+  type DecisionEnvelopeCandidate,
 } from '../src/agents/decision-envelope.js'
 
 const AS_OF = 1_700_000_000_000
@@ -196,18 +197,19 @@ describe('DecisionEnvelope R3 validation', () => {
 
   it('refuses to materialize a PM-conditioned plan card before PM DSL context and independent open gate exist', () => {
     const frozen = context({ predictionAvailable: true })
-    const parsed = parseDecisionEnvelopeCandidate(candidate({
+    const draft = candidate({
       immediateAction: undefined,
       plan: {
         thesis: '依赖 PM 概率的未来承诺', confidence: 0.7, keyLevels: [], noTrade: false, forbidden: [],
         invalidation: [{ id: 'inv', tf: '1h', when: 'bar.close < 90', then: { action: 'close' } }],
         commitments: [{ id: 'open', seq: 1, tf: '1h', when: 'pm.future_event.prob > 0.7', then: openAction }],
       },
-    }), frozen)
-    expect(parsed.ok).toBe(true)
-    if (!parsed.ok) return
+    })
+    const parsed = parseDecisionEnvelopeCandidate(draft, frozen)
+    expect(parsed.ok).toBe(false)
+    if (!parsed.ok) expect(parsed.errors.join('\n')).toContain('独立开仓 gate 尚未验收')
 
-    const envelope = bindDecisionEnvelope(parsed.candidate, { runId: 'run-pm-plan', context: frozen })
+    const envelope = bindDecisionEnvelope(draft as DecisionEnvelopeCandidate, { runId: 'run-pm-plan', context: frozen })
     const result = materializeDecisionPlan(envelope, {
       planId: 'pc-pm-blocked', createdAt: AS_OF, windowEndsAt: AS_OF + 3_600_000,
     })

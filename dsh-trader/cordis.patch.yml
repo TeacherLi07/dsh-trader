@@ -113,7 +113,7 @@
       config:
         l3: { provider: deepseek-official, model: deepseek-flash }
         decisionStrategy: critique # 可显式改为 single；变更前先排空/核对 running 与 claimed 触发器
-        maxOutputTokens: 1024
+        maxOutputTokens: 32768
         wakeLimits:
           judgmentPerHour: 3
           judgmentPerDay: 8

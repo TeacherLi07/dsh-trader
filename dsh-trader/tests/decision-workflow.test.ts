@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { freezeDecisionContext } from '../src/agents/decision-context.js'
 import type { DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.js'
+import { compileExpression } from '../src/plan/dsl.js'
 import { runDecisionWorkflowStages, toLedgerUsage, type DecisionModel, type DecisionWorkflowResume } from '../src/agents/decision-workflow.js'
 
 const AS_OF = 1_700_000_000_000
@@ -56,6 +57,27 @@ class FakeDecisionModel implements DecisionModel {
 const route = { provider: 'test-provider', model: 'test-model', maxTokens: 512, maxChars: 50_000 }
 
 describe('R3 Decision workflow', () => {
+  it('发给模型的 DSL 示例可由实际编译器求值，不要求 JavaScript 布尔语法', async () => {
+    const model = new FakeDecisionModel([envelope()])
+    await runDecisionWorkflowStages({ strategy: 'single', context: context(), model, route })
+    const request = JSON.stringify(model.requests[0])
+    const example = 'position.qty == 0 and rsi14 < 30'
+    expect(request).toContain(example)
+    const evaluate = compileExpression(example)
+    expect(evaluate({ get: (path) => path === 'position.qty' ? 0 : path === 'rsi14' ? 20 : undefined, call: () => undefined })).toEqual({ ok: true, value: true })
+  })
+
+  it('保留 provider finish 的原始错误码与诊断，不能只留下泛化 error', async () => {
+    const model: DecisionModel = { async *stream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'MISSING_CREDENTIAL', message: 'fixture provider credential ref unavailable' } } } as StreamChunk
+    } }
+    const result = await runDecisionWorkflowStages({ strategy: 'single', context: context(), model, route })
+    expect(result.calls).toHaveLength(1)
+    expect(result.failure).toContain('MISSING_CREDENTIAL')
+    expect(result.failure).toContain('fixture provider credential ref unavailable')
+    expect(result.calls[0]?.response['finish']).toMatchObject({ kind: 'error', failure: { code: 'MISSING_CREDENTIAL' } })
+  })
+
   it('single submits one structured request using the frozen R2 request renderer', async () => {
     const model = new FakeDecisionModel([envelope()])
     const result = await runDecisionWorkflowStages({ strategy: 'single', context: context(), model, route })
@@ -87,6 +109,31 @@ describe('R3 Decision workflow', () => {
     expect(result.calls).toHaveLength(2)
     expect(result.final).toBeUndefined()
     expect(result.failure).toContain('thesis')
+  })
+
+  it.each([
+    { when: '下一根收盘突破阻力时', seq: 1 },
+    { when: 'unknown.metric > 1', seq: 1 },
+    { when: 'bar.close > 110', seq: 0 },
+  ])('不可执行的计划在阶段提交前拒绝并进入一次结构修复：%j', async ({ when, seq }) => {
+    const invalid = envelope({ outcome: 'review', immediateAction: undefined, plan: {
+      thesis: '等待', confidence: 0.5, keyLevels: [], forbidden: [], noTrade: true,
+      invalidation: [{ id: 'invalidate', tf: '1h', when: 'bar.close < 90', then: { action: 'noop' } }],
+      commitments: [{ id: 'wait', seq, tf: '1h', when, then: { action: 'noop' } }],
+    } })
+    const fixed = envelope({ outcome: 'no_trade', immediateAction: undefined })
+    const model = new FakeDecisionModel([invalid, fixed])
+    const persisted: unknown[] = []
+    const result = await runDecisionWorkflowStages({
+      strategy: 'single', context: context(), model, route,
+      onStage: async (_stage, artifact) => { persisted.push(artifact) },
+    })
+    expect(result.failure).toBeUndefined()
+    expect(model.requests).toHaveLength(2)
+    expect(result.repairCalls).toBe(1)
+    expect(persisted).toHaveLength(1)
+    expect(result.final?.outcome).toBe('no_trade')
+    expect(result.final?.plan).toBeUndefined()
   })
 
   it('持久阶段可恢复：已有 critique 的 run 只重跑 final', async () => {

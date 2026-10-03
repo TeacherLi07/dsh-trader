@@ -80,9 +80,9 @@ function routeOf(config: SupervisorConfig): DecisionModelRoute {
   if (provider === undefined || provider.trim() === '' || model === undefined || model.trim() === '') {
     throw new Error('trade-supervisor 需要固定的 strategist l3 provider/model')
   }
-  const maxTokens = config.maxOutputTokens ?? 1_024
-  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 8_192) {
-    throw new Error('maxOutputTokens 必须是 1..8192 的整数')
+  const maxTokens = config.maxOutputTokens ?? 32_768
+  if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 65_536) {
+    throw new Error('maxOutputTokens 必须是 1..65536 的整数')
   }
   return {
     provider,

@@ -19,6 +19,7 @@ import {
   type DecisionEnvelopeCandidate,
 } from './decision-envelope.js'
 import { fingerprint } from '../util/canonical.js'
+import { V0_ALLOWED_PATHS } from '../plan/evaluate.js'
 
 export type DecisionStrategy = 'single' | 'critique'
 
@@ -75,7 +76,7 @@ interface ToolSchema {
   readonly parameters: Record<string, unknown>
 }
 
-export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v1' as const
+export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v3' as const
 const ENVELOPE_NAME = DECISION_ENVELOPE_TOOL.name
 
 const CRITIQUE_TOOL: ToolSchema = {
@@ -122,6 +123,14 @@ const STAGE_INSTRUCTIONS = {
 const REPAIR_INSTRUCTION = [
   '上一份结构化输出未通过代码校验。请只修复下列 shape/reference 问题，保留原判断；不要扩大风险或补造事实。',
   '若无法修复，使用 outcome=review，并把不确定性写入 uncertainties。',
+].join('\n')
+
+const OUTPUT_CONTRACT = [
+  '输出保持简洁：只保留主要论点、至多 5 条关键 claims/风险问题，避免复述整份 context。',
+  '证据必须是指向真实非空叶子值的 JSON Pointer，例如 /sections/portfolio/value/account/equityQuote。禁止引用整个数组/对象或 null。',
+  '解释缺失时可引用具体 status 字符串或 missing 数组中的具体下标，例如 /sections/derivatives/missing/0；不要引用缺失值本身。',
+  'NO_TRADE/REVIEW 不需要强行生成计划。只有真正可执行的未来条件才输出 plan；invalidation 至少一项，commitment.seq 从 1 开始。',
+  `plan.when 只能是可执行 DSL。允许路径：${V0_ALLOWED_PATHS.join(', ')}。例如 bar.close < 0.25、position.qty == 0 and rsi14 < 30；布尔操作用 and/or/not，不支持 JavaScript 的 &&/||；禁止中文条件和 JSON Pointer。`,
 ].join('\n')
 
 export class DecisionBudgetDenied extends Error {
@@ -180,7 +189,7 @@ async function callStructuredTool(input: {
   const request = renderDecisionRequest(input.context, {
     maxChars: input.route.maxChars,
     promptVersion,
-    instructions: input.instructions,
+    instructions: `${input.instructions}\n\n${OUTPUT_CONTRACT}`,
     ...(input.materials === undefined ? {} : { materials: input.materials }),
     outputSchema: input.tool,
   })
@@ -216,9 +225,11 @@ async function callStructuredTool(input: {
   let toolCallCount = 0
   const responseParts: unknown[] = []
   let finishReason: string | null = null
+  let finish: unknown = null
   const responseTrace = (): Readonly<Record<string, unknown>> => ({
     parts: responseParts,
     finishReason,
+    finish,
     reportedUsage: usage,
   })
   try {
@@ -250,9 +261,10 @@ async function callStructuredTool(input: {
           output = undefined
         }
       }
-      if (chunk.type === 'finish') finishReason = chunk.reason.kind
+      if (chunk.type === 'finish') { finishReason = chunk.reason.kind; finish = chunk.reason }
       if (chunk.type === 'finish' && (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted')) {
-        throw new DecisionModelCallFailure(`模型阶段失败：${chunk.reason.kind}`)
+        const failure = chunk.reason.failure
+        throw new DecisionModelCallFailure(`模型阶段失败：${chunk.reason.kind}${failure === undefined ? '' : `；${failure.code}: ${failure.message}`}`)
       }
     }
     if (finishReason === null) throw new Error('模型流未提供明确 finish；调用结算状态未知')

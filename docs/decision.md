@@ -1941,3 +1941,15 @@ PaperBroker 曾把可用保证金返回 NULL，真实模型看到不完整账户
 
 买入、卖空和非空限价挂单回归均验证资金预留。提交前 pnpm verify 通过 72 文件 / 810 测试。
 此定义只描述 paper，不证明 HTX 保证金或经济效果。
+
+## 27. 2026-10-03：R3 真实输出在阶段边界修复
+
+真实模型曾输出自然语言 when 和 seq=0；阶段解析只检查外形，直到落库执行才发现计划不可编译。
+阶段解析现在复用现有 validatePlanCard，给整轮唯一 repair 机会保留正确的边界，不增加第二套 DSL。
+提示和 schema 明确 and/or/not、合法数值路径与叶子证据，测试直接用实际编译器验证提示中的例子。
+初版提示误写 &&/||，真实 Responses pilot 已失败并保留，修正后的 prompt 版本为 decision-r3-v3。
+
+按负责人要求，输出上限提高到 32768，允许显式配置至 65536；预算仍按最大输出预留。
+provider finish 的原始 code/message 进入持久工件，避免 INVALID_CONFIG 被泛化成 error 而无法诊断。
+提交前 pnpm verify 通过 72 文件 / 810 测试。真实调用及失败记录汇总见
+[连接进展](real-integration-progress-2026-10-03.md)，此处本地验证不代表模型质量达标。

@@ -108,6 +108,10 @@ const ACTION_SCHEMA = {
   ],
 } as const
 
+const WHEN_SCHEMA = { type: 'string', minLength: 1,
+  description: '可执行 when DSL，不是自然语言或 JSON Pointer。例如 bar.close < 0.25、position.qty == 0 and rsi14 < 30。只用已提供的 DSL 数值路径、比较和 and/or/not；不支持 JavaScript 的 &&/||，未知路径或中文条件均会被拒绝。',
+} as const
+
 export const DECISION_ENVELOPE_TOOL = {
   name: 'submit_decision_envelope',
   description: '提交本轮唯一的类型化裁决；证据引用必须使用冻结 DecisionContext 的 JSON Pointer。',
@@ -138,13 +142,13 @@ export const DECISION_ENVELOPE_TOOL = {
           required: ['kind', 'price'],
         }, maxItems: 32 },
         invalidation: { type: 'array', maxItems: 32, items: { type: 'object', additionalProperties: false,
-          properties: { id: { type: 'string', minLength: 1 }, tf: { enum: TIMEFRAMES }, when: { type: 'string', minLength: 1 }, then: ACTION_SCHEMA },
+          properties: { id: { type: 'string', minLength: 1 }, tf: { enum: TIMEFRAMES }, when: WHEN_SCHEMA, then: ACTION_SCHEMA },
           required: ['id', 'tf', 'when', 'then'],
         } },
         commitments: { type: 'array', maxItems: 64, items: { type: 'object', additionalProperties: false,
           properties: {
-            id: { type: 'string', minLength: 1 }, seq: { type: 'integer', minimum: 0 }, tf: { enum: TIMEFRAMES },
-            when: { type: 'string', minLength: 1 }, then: ACTION_SCHEMA,
+            id: { type: 'string', minLength: 1 }, seq: { type: 'integer', minimum: 1 }, tf: { enum: TIMEFRAMES },
+            when: WHEN_SCHEMA, then: ACTION_SCHEMA,
             maxSlippageBps: { type: 'number', exclusiveMinimum: 0 }, cooldownMs: { type: 'integer', minimum: 0 },
           }, required: ['id', 'seq', 'tf', 'when', 'then'],
         } },
@@ -346,8 +350,8 @@ function openPlanDependencyIssues(context: DecisionContext, envelope: DecisionEn
   return issues
 }
 
-function isStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+function isStringArray(value: unknown, maxItems = Infinity, maxLength = Infinity): value is string[] {
+  return Array.isArray(value) && value.length <= maxItems && value.every((item) => typeof item === 'string' && item.length <= maxLength)
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
@@ -394,8 +398,8 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
   if (!hasOnlyKeys(value, allowed)) errors.push('envelope 包含未授权字段')
   if (!['act', 'no_trade', 'review'].includes(String(value['outcome']))) errors.push('outcome 非法')
   if (typeof value['thesis'] !== 'string' || value['thesis'].trim() === '' || value['thesis'].length > 8_000) errors.push('thesis 无效')
-  if (!isStringArray(value['rejectedAlternatives']) || value['rejectedAlternatives'].length > 20) errors.push('rejectedAlternatives 无效')
-  if (!isStringArray(value['uncertainties']) || value['uncertainties'].length > 40) errors.push('uncertainties 无效')
+  if (!isStringArray(value['rejectedAlternatives'], 20, 2_000)) errors.push('rejectedAlternatives 无效')
+  if (!isStringArray(value['uncertainties'], 40, 2_000)) errors.push('uncertainties 无效')
   if (typeof value['confidence'] !== 'number' || !Number.isFinite(value['confidence']) || value['confidence'] < 0 || value['confidence'] > 1) errors.push('confidence 必须在 [0,1] 内')
   if (typeof value['riskFraction'] !== 'number' || !Number.isFinite(value['riskFraction']) || value['riskFraction'] <= 0 || value['riskFraction'] > 1) errors.push('riskFraction 必须在 (0,1] 内')
 
@@ -416,6 +420,13 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
           actions.push(item['then'])
         }
         plan = draft as unknown as DecisionPlanDraft
+        // 在模型阶段验证 DSL/seq，才能使用整轮唯一修复机会；落库之后才发现不可执行已经太晚。
+        // 身份和实际窗口仍由代码在 materialize 时绑定，这里只复用内容校验合同。
+        const base = { ...plan, planId: `validate:${context.contextId}`, symbol: context.symbol,
+          createdAt: context.asOf, windowEndsAt: context.asOf + 1, author: 'model' as const, authority: 'model' as const }
+        const checked = validatePlanCard({ ...base, contentHash: computeContentHash(base) })
+        if (!checked.ok) errors.push(...checked.errors.map((error) => `plan.${error}`))
+        if ((typeof plan.thesis === 'string' && plan.thesis.length > 8_000) || plan.keyLevels.length > 32 || plan.invalidation.length > 32 || plan.commitments.length > 64) errors.push('plan 内容超过 schema 长度上限')
       }
     }
   }
@@ -430,11 +441,11 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
 
   let critiqueResponses: readonly CritiqueResponse[] | undefined
   if (value['critiqueResponses'] !== undefined) {
-    if (!Array.isArray(value['critiqueResponses']) || value['critiqueResponses'].some((item) =>
+    if (!Array.isArray(value['critiqueResponses']) || value['critiqueResponses'].length > 40 || value['critiqueResponses'].some((item) =>
       !isRecord(item) || !hasOnlyKeys(item, ['critiqueId', 'disposition', 'reason']) ||
       typeof item['critiqueId'] !== 'string' || item['critiqueId'].trim() === '' ||
       (item['disposition'] !== 'accept' && item['disposition'] !== 'reject') ||
-      typeof item['reason'] !== 'string' || item['reason'].trim() === '',
+      typeof item['reason'] !== 'string' || item['reason'].trim() === '' || item['reason'].length > 2_000,
     )) errors.push('critiqueResponses 形状非法')
     else critiqueResponses = value['critiqueResponses'] as CritiqueResponse[]
   }
@@ -461,12 +472,13 @@ export function parseDecisionEnvelopeCandidate(value: unknown, context: Decision
   if (errors.length > 0) return { ok: false, errors }
 
   const claims = value['claims']
-  if (!Array.isArray(claims)) return { ok: false, errors: ['claims 必须是数组'] }
+  if (!Array.isArray(claims) || claims.length > 40) return { ok: false, errors: ['claims 必须是不超过 40 项的数组'] }
   const evidenceIssues: string[] = []
   for (const [index, claim] of claims.entries()) {
     if (!isRecord(claim) || !hasOnlyKeys(claim, ['kind', 'statement', 'evidencePaths']) ||
         !['observation', 'inference', 'assumption'].includes(String(claim['kind'])) ||
-        typeof claim['statement'] !== 'string' || claim['statement'].trim() === '' || !isStringArray(claim['evidencePaths'])) {
+        typeof claim['statement'] !== 'string' || claim['statement'].trim() === '' || claim['statement'].length > 2_000 ||
+        !isStringArray(claim['evidencePaths'], 20) || claim['evidencePaths'].some((path) => path.trim() === '')) {
       return { ok: false, errors: [`claims[${index}] 形状非法`] }
     }
     if ((claim['kind'] === 'observation' || claim['kind'] === 'inference') && claim['evidencePaths'].length === 0) {

@@ -11,6 +11,7 @@ import {
 } from '../agents/decision-envelope.js'
 import {
   decisionWorkflowSummary,
+  DECISION_WORKFLOW_PROMPT_VERSION,
   DecisionBudgetDenied,
   runDecisionWorkflowStages,
   toLedgerUsage,
@@ -292,7 +293,7 @@ export async function runR5StaticExperiment(input: R5StaticRunnerInput): Promise
           primaryTimeframe: '1h',
           triggerSource: `R5:${manifest.experimentId}:${sample.windowId}:${strategy}`,
           modelVersion: `${manifest.route.provider}/${manifest.route.model}`,
-          promptVersion: 'decision-r3-v1',
+          promptVersion: DECISION_WORKFLOW_PROMPT_VERSION,
           createdAt: sample.context.asOf,
         })
       }
