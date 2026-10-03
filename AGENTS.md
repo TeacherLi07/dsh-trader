@@ -19,10 +19,10 @@
 | `dsh-trader/` | 全部代码（src / tests / scripts） |
 | `dsh-trader/README.md` | 人类向的状态表与快速开始 |
 
-**当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 只通过本地 stub 验收，不代表真实模型质量或经济效果。负责人选择 `critique` 为默认，`trade-supervisor.decisionStrategy` 可切回 `single`；付费 single/critique 对照已取消，选择不代表效果证据。R5 runner 的离线护栏已通过本地测试；当前仍是 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
-**下一步**：R5 仍需明确预算与凭据隔离授权后完成所选 critique 的真实 provider/forward-paper 运行、≥50 个非空执行链样本和独立经济验收；生产 settlement 未注入 funding resolver，净额因此保持 NULL，经济验收前还要接通并核验资金费来源。不以 stub 或模拟结果替代。R6 还需真实 HTX 验证“非空持仓 + 算法保护单”的 merged 对账及非空安全观察。当前改动不进行真实 LLM/交易所连接测试，这些项目继续阻塞。
+**当前阶段**：P0–P2、SR1/SR2 与 R1–R4 工程实现已完成；R3/R4 原验收使用 stub；本轮真实连接证据见 `docs/real-integration-progress-2026-10-03.md`，仍不代表经济效果。负责人选择 `critique` 为默认，`trade-supervisor.decisionStrategy` 可切回 `single`；付费 single/critique 对照已取消，选择不代表效果证据。R5 runner 的离线护栏已通过本地测试；当前仍是 `paper`，生产日预算未配置，因此 W1/W2/W3 fail-closed。
+**下一步**：本轮已授权 `.env` 凭据与保守真实测试（Flash/high/32768）。最终批量完成 38 条，另有同运行时版本的 1 条恢复探针；DeepSeek 402/余额不可用阻塞 ≥50 条目标，未知 reservation 保留，不重发。HTX 生产 runtime 已通过非空持仓、merged 保护、journal 对账和重建恢复；Sub2API WS 真实工具调用已通过。生产 funding resolver、独立经济验收、Sub2API 价格和 R6 长期观察仍未完成，默认保持 paper。
 
-**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与审计均已接线。SR1/SR2 收紧未成交挂单敞口、远端保护、部分成交恢复、执行 API 暴露和 live arm。R1–R4 建立 DecisionContext、结构化判断、eligibility、统一执行及持久 W2/W3 worker；R2 捕获过固定 PIT 请求，R3/R4 工程证据使用 stub。旧多 agent 判断链已删除。R5 未完成真实调用和经济验收。
+**已实现且保留的基础**：生产执行已收敛为 HTX 原生订单状态机（ccxt 仅作传输/metadata）；行情回补、特征/DSL/PM fail-closed、保护单、恢复、对账与审计均已接线。SR1/SR2 收紧未成交挂单敞口、远端保护、部分成交恢复、执行 API 暴露和 live arm。R1–R4 建立 DecisionContext、结构化判断、eligibility、统一执行及持久 W2/W3 worker；R2 捕获过固定 PIT 请求，R3/R4 工程证据使用 stub。旧多 agent 判断链已删除。R5 已有真实调用，数量与经济验收仍未达标。
 
 **永久硬边界**（完整版见 `plan.md` §1）：默认 `paper`；硬闸不可绕过；密钥绝不进 prompt；
 审计优先（被拒也要落库）；预测市场**只读、永不下单**；时钟必须注入；失败状态逐字保留。
@@ -132,7 +132,10 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
 | HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |
 | HTX 市价单部分/延迟成交 | `filledQty` 是累计张数，`acked/partial` 可能已产生真实仓位；只看终态会漏量/漏保护；持仓快照也可能暂时少于累计成交 | `CcxtBroker` 把张数换回基础币；快照不足时按真实累计 fill 推导保护覆盖量、冻结标的，保护失败则 reduce-only 平仓；缺量/均价保持 unknown |
-| HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 实测 `client_order_id` 由交易所生成=订单号，**不采用我们传的 id** | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()`；默认 `cancelAll` 保留保护单，只有远端确认空仓后才可显式撤；本地 stop intent 不证明远端仍有保护 |
+| HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 当前接口采用 15 位数字 client id，历史非数字 id 测试的未采用结论不适用 | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()`；默认 `cancelAll` 保留保护单，只有远端确认空仓后才可显式撤；本地 stop intent 不证明远端仍有保护 |
+| ccxt defaultType 实际在 options 中 | 只把 defaultType 放构造器顶层，余额显式 type 虽读 swap，不传 symbol 的挂单查询仍读现货；真实端点日志已复现 | HtxBroker 回填 exchange.options.defaultType；普通/算法 merged 和余额保持同账户 |
+| 当前 HTX v5 的数字 client id 与 TPSL | 当前接口采用 15 位数字普通/算法 client id；sl/tp 回报缺 reduce_only，不能把任意 trigger 当 close-only | 原生 algo_id/contract_code/type/position_side/volume/触发价共同证明 TPSL；stop 还需正确方向、足量与有效状态；详见 `docs/r6-real-broker-2026-10-03.md` |
+| HTX 主单不能带标量保护参数 | ccxt 的 stopLossPrice/takeProfitPrice/trailingPercent 会将普通开仓发到 v5/algo/order，真实生产链曾报 code 1067 | 主单只传普通字段；成交后独立挂保护并核验。不能靠添加 position_side 掩盖错误路由 |
 | 未成交开仓单也是敞口 | HTX 的 `totalExposureUsd` 只覆盖当前持仓；部分成交市价单的 `price/average` 不是剩余量的滑点上界 | 只用明确限价估值；市价余量或字段不全令 `pendingExposureUsd=null`，新增敞口 fail-closed |
 | 并发开仓共用旧账户快照 | 不同 client id 的两条路径可同时通过总敞口闸门 | agent、机械执行、撤单和迟到保护共用 journal 实例锁；开仓在锁内重读状态、落意图并执行 |
 | 成交手续费缺失 | `OrderAck.fee` 可缺失；按 0 结算会把未知成本伪装成零成本 | `fills.fee` 保持 null；结算延迟，周期回查同单成交明细，仅在订单号与计价币可核验时回填 |

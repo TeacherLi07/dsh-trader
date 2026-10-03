@@ -19,6 +19,10 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
 
 官方 DeepSeek 文档定义 `POST /responses`，并明确 `stream: true` 使用语义 SSE；没有文档化 WebSocket 传输，所以官方 route 固定走真实可用的 SSE。
 
+2026-10-03 用官方 OpenAI SDK 做仅握手探针：官方 /responses 与 /v1/responses 均返回 HTTP405，未发送 response.create。
+当前标准 Responses WS 握手不可用；这不推断其它未公开接口。真实输出走 SSE，原始探针结果见
+`docs/r5-provider-connections-2026-10-03.json`，HTTP/WS/模型流原文保留在私有测试目录。
+
 ## Sub2API Responses WebSocket
 
 公开 DSH `@godd6366/dsh-sub2api` 插件把 `llm-sub2api:` settings 翻译到 DSH `llm-pi-ai` route；其 `sub2api-openai` 使用 generic `openai-responses` HTTP/SSE adapter。Sub2API gateway 本身另有标准 Responses WebSocket v2 ingress，本项目提供 `sub2api-openai-ws` 作为单独 DSH LLM provider route。

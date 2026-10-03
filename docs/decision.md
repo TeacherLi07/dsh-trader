@@ -1953,3 +1953,18 @@ PaperBroker 曾把可用保证金返回 NULL，真实模型看到不完整账户
 provider finish 的原始 code/message 进入持久工件，避免 INVALID_CONFIG 被泛化成 error 而无法诊断。
 提交前 pnpm verify 通过 72 文件 / 810 测试。真实调用及失败记录汇总见
 [连接进展](real-integration-progress-2026-10-03.md)，此处本地验证不代表模型质量达标。
+
+## 28. 2026-10-03：独立 provider 与真实连接收尾
+
+交易判断复用 DSH LLM seam 与官方 pi-ai Responses provider；默认 DeepSeek Flash/high/32768。
+DeepSeek 官方文档仅列 SSE，两个标准 Responses URL 的只读 WS 握手均405，未发送生成请求。
+Sub2API WS 使用独立 adapter，复用 OpenAI ResponsesWS 与 pi-ai 的消息/工具序列化和终态处理；
+不依赖交易 DB、gate 或 runtime，来源 alias 防止误用官方价格。真实 WS 工具调用通过，网关费用仍未知。
+
+真实 HTX 生产链揭示主单携带标量 stopLossPrice 会被 ccxt 改路由到算法单，已删除主单传输中的
+这些字段，保留确认成交后的独立保护。非空 journal/merged 对账、runtime 重建及最终清理通过。
+旧 PM 验收脚本修正本机接收时间，估计量改为与具体快照对比，并新增非空概率跳变分母。
+
+最终批量计划52条，完成38条后因DeepSeek余额不足停止；另1条同运行时恢复探针完成，重启重放0次模型调用。
+不通过换模型或删除未决reservation凑数量；生产保持paper，独立经济段、资金费与长期观察仍未通过。
+数据、失败、成本预留和覆盖率见 [连接汇总](real-integration-progress-2026-10-03.md)。

@@ -335,6 +335,11 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 旧外部 watchdog 实现和脚本已删除，历史证据保留；命令 broker 只从执行组合根读取。
 构建先清理 lib/，避免删除的代码仍被旧产物带入运行包。离线真启动复现入口：`node scripts/offline-startup-check.mjs`。
 
+2026-10-03：负责人授权真实 provider/交易所测试并要求 deepseek-flash、thinking high 与较高 token 上限。
+开发探针使用 32,768 输出、最多 2,000 万日 token 和DeepSeek 合计 5 USD 测试预算（跨探针累计，剩余额度重新分配；Sub2API 网关账单未核验）；当前生产日预算仍未配置。
+paper 明确定义 1×毛敞口与未成交挂单的资金预留，用 equity 减 gross/pending exposure 得出模拟可用保证金，缺失在途估值仍保持未知。
+代码修补与实测进度见 [真实连接进度](docs/real-integration-progress-2026-10-03.md)。这些测试不是独立经济段或 R6 长期观察。
+
 ## 9. 重构范围
 
 项目没有历史兼容负担；允许删测试、删接口、删表、改 schema、改工具名，不保留双实现或 deprecated shim。
@@ -367,10 +372,10 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 | R2 | 完整而有界的 DecisionContext | ✅ 双时间 observation 覆盖 bar/feature/derivatives/spec；按 PIT 组装 9 分区 context 与最终请求；非空样本：192 根资产 bar、64 根 benchmark bar、32 对 benchmark returns、4 条衍生品观测、1 个结算 outcome、1 个持仓/挂单/计划承诺；当前 schema v8 渲染复验为 107,128 context / 119,243 request 字符及 123,751 UTF-8 保守输入 token 上界；正常空、读取失败脱敏、过期（含对账）、暖机、晚到数据、未来计划/对账/订单排除、未决意图溢出显式降级及配置化 maxChars 强制均有测试；验收：`scripts/r2-acceptance.mjs`，证据见 `docs/r2-decision-context-2026-09-21.md` |
 | SR1 | 2026-09-20 安全审查闭环 | ✅ 撤单默认保留保护单且逐张复核；本地 stop 不作为远端保护证据；未知/孤儿订单冻结；并发执行在账户锁内重读和串行化；市价余量未知估值进入硬闸；部分/延迟成交按真实量入账并续接保护/降级，位置快照滞后时按成交量保护或 reduce-only 降级，订单终态前不安排结算；缺成交量、均价或手续费不伪造为 0，缺手续费周期回查同单成交明细；启动对账失败时保留降险入口；W1 固定 UTC 6 窗；run 终态不可重写；验收：新增执行/上下文回归测试 + `pnpm verify` |
 | SR2 | 2026-09-21 执行 API 与 live 模式边界 | ✅ 包根/子路径不暴露 raw broker、动作执行器或 runtime；hard gate 独立检查 live arm 与完整限额；实盘缺凭据拒绝而不降级；paper waiver 显式并准确记入 config version；验收：`pnpm verify`、R1–R4 验收入口、真实 DSH paper 加载与 unarmed live_auto 拒绝 |
-| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。2026-10-02 修复跨重启的 repair 额度、已计费拒绝请求重发、恢复 final 回应复验、Critic shape 与无效 token 计数；本地证据见 `docs/r3-workspace-review-2026-10-02.md`。工程 stub 验收：`scripts/r3-acceptance.mjs`，证据 `docs/r3-decision-envelope-2026-09-21.md`；没有真实模型调用 |
-| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。2026-10-02 补修 W1 旧 attempt 回写与游标误推进，见 `docs/r4-window-recovery-2026-10-02.md`。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收：`scripts/r4-acceptance.mjs`，证据 `docs/r4-trigger-worker-2026-09-21.md`；没有真实模型调用 |
-| R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。R5 仍需预算授权后的真实 critique 运行、≥50 个非空执行链样本和独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
-| R6 | P3 小额 `live_auto` | ⬜ R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0。2026-10-02 删除废弃外部 watchdog/命令注册旁路并通过禁网络 DSH paper 真启动；仅为本地补修，见 `docs/r6-workspace-review-2026-10-02.md` |
+| R3 | 单次/三步 workflow + evidence/eligibility | ✅ 共用 renderer/schema；single/critique、最多一次 repair、run 阶段恢复、证据引用/资格检查与预算/usage 入账；旧 JudgmentPack/多分析师/副作用工具链删除。2026-10-02 修复跨重启的 repair 额度、已计费拒绝请求重发、恢复 final 回应复验、Critic shape 与无效 token 计数；本地证据见 `docs/r3-workspace-review-2026-10-02.md`。工程 stub 验收见 `scripts/r3-acceptance.mjs` / `docs/r3-decision-envelope-2026-09-21.md`；本轮真实 Responses/high/32768、DSL 阶段修复和 provider 诊断见 `docs/real-integration-progress-2026-10-03.md` |
+| R4 | 即时动作、W2/W3、结算与成本 | ✅ 即时与 DSL 共用 execute-action；W2/W3 claim、预算、频率、P0 freeze、退避/attempt ceiling、重启恢复、TTL 过期和 PM active-plan/PIT 映射已接线；结算区分真实成交/视界/paper 并对未知费用 fail-closed。2026-10-02 补修 W1 旧 attempt 回写与游标误推进，见 `docs/r4-window-recovery-2026-10-02.md`。生产 funding resolver 尚未接入，经济验收前仍阻塞（见 §12）。PM-triggered opening 在 R5 独立场内 gate 验收前保持 `decision_only`。工程 stub 验收见 `scripts/r4-acceptance.mjs` / `docs/r4-trigger-worker-2026-09-21.md`；本轮 paper 可用资金修复与真实调用证据另列，批量 source identity 不冒充真实队列 worker |
+| R5 | 真实 critique 判断 + forward paper | ⬜ 负责人已选 critique，不做付费 single/critique 静态对照；比较 runner 与 single 实现保留但不执行，选择本身不代表效果结论。本轮预算已授权，真实最终批量完成38条，另有1条同运行时版本的恢复探针；402余额不足阻塞≥50，仍缺独立 forward-paper 经济证据；真实判断质量/经济证据未完成，因此不代表 R5 通过 |
+| R6 | P3 小额 `live_auto` | ⬜ R5 两道验收均通过且完成 §12；先通过真实 HTX 非空持仓+算法保护单对账；连续 14 天重复成交=0、无保护暴露=0、对账未决=0。2026-10-02 本地简化见 `docs/r6-workspace-review-2026-10-02.md`；本轮受控 FIL 真实生产 journal/merged 对账和 runtime 重建通过，见 `docs/r6-runtime-connection-2026-10-03.md`，不替代14天观察 |
 
 R2–R5 每阶段交付一条待实现的验收入口 `scripts/r2-acceptance.mjs` 至 `scripts/r5-acceptance.mjs`，
 以 `pnpm build && node scripts/rN-acceptance.mjs` 运行（N 替换为阶段号），输出同名日期化
@@ -451,13 +456,17 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
    共用的专用 provider key；provider 账户也应专用或设 provider-side hard cap，否则本地总额只覆盖本 control registry。
    当前 profile 刻意不设日预算，所以 production W1/W2/W3 fail-closed；未获预算授权时只运行 preflight/stub，不尝试付费 provider 调用。
 
-**当前验收阻塞（2026-09-21）**：负责人已取消付费 single/critique 静态对照并选择 critique；该决定不构成模型质量或策略增益证据。R5 仍缺明确预算授权后的 critique provider/forward-paper 运行、≥50 个非空执行链样本、资金费来源及独立经济验收；R6 仍缺 HTX 非空持仓+算法保护单对账和非空安全观察。未获得预算与隔离凭据授权前不发模型请求；未完成这些证据前不得标为通过或启用 live。
+**当前验收阻塞（2026-10-03）**：负责人已授权保守真实测试并选择 critique，生产日预算仍未配置。本轮最终批量完成38条，另有1条同运行时版本的恢复探针；四条请求因 DeepSeek 402 Insufficient Balance 停止，只读余额也返回不可用，≥50目标未达标。需恢复余额或同模型备用凭据后继续，未知 reservation 不能自动归零或重发。测试 state/profile 隔离不等于 provider 账户隔离。R5 的 funding 来源、动作/拒绝/恢复分项非空覆盖与独立经济验收，以及 R6 非空14天安全观察仍未完成；不能据连接成功启用生产 live。Sub2API WS 已通过真实工具调用，但价格/账单尚未核验，sub2api: alias 的交易成本闸仍关闭。
 
 **静态对照状态**：single/critique 付费对照已由负责人明确取消，相关 outcome/Critic 指标不产生结论；若未来重新启用该实验，必须先冻结指标阈值、PIT manifest、预算与新的预注册协议。当前选择 critique 不得表述为相对 single 已验证更优。
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 
 **未决运行的恢复入口缺口**：bar 修订隔离与模型调用未决 reservation 都会 fail-closed，但仓库当前没有对应的 feature-only 修复/游标确认命令，也没有用 provider usage/billing 证据核销未决 reservation 的审计流程。它们不能由运维直接删标记或盲目重试；启用长期无人值守运行前，需要补齐经核验、幂等且可审计的恢复入口。
+
+**2026-10-03 真实工程测试进度**：早期 6 条模型判断/19 次调用已保留完整 usage、失败和原始脱敏 trace，估算合计 0.202095972 USD；其中指定 Flash/high/32k 的 2 条判断完成。
+HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已完成非空仓位 + 原生 SL/TP 的 merged 查询、保留保护撤单、reduce-only 平仓及空仓后撤保护。
+真实连接还暴露并修复 defaultType、symbol 传递、TPSL close-only 归一化、保护覆盖验证与 ccxt 最小量单位问题。生产 journal 非空对账与 runtime 重建现已通过；Responses 采样因402余额不足未达≥50，资金费和经济/长期门槛仍须继续。
 
 **2026-09-23 R6 本轮准备复核**：负责人要求本轮跳过 R5，直接验证实盘 R6；这是缩小本轮流程，不是 R5 判断质量或经济闸通过。使用新注入的 HTX 凭据完成只读预检：USDT 永续权益 24.904350154514756，远端与本地均为空仓、零挂单，因而仍没有“非空持仓 + 算法保护单”的对账证据。负责人要求本轮回撤不超过 2%，按该时点权益为 0.49808700309029513 USDT；公开盘口与真实账户只读预检下，最小一张 ADA、DOGE 合约名义额分别约 2.55、10.29 USDT，均高于本轮额度。止损触发/成交不能保证价格，所以本轮没有发送实盘订单，也不能开始 R6 的非空 14 天观察。当前默认 `maxDrawdownUsd=2.5` 及仅按已结算结果计算的风险状态不能当作这个 2% 约束已被执行。完整只读报告与逐步日志保存在当前账户权限受限的 `~/.dsh/trading/r6-validation-2026-09-23/`。
 

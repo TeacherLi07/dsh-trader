@@ -32,7 +32,7 @@
 | T1.3 | 交易工具 `agents/tools.ts`（14 个，含 propose/execute） | ✅ 历史验收完成；旧模型副作用工具链已在 R3 删除，执行只保留 `execute-action` |
 | T1.4–T1.11 | 结算/反思、context 组装、预算账本、P1.5 闸门、预测市场（§4.4） | ✅ 已完成（`tag: phase-p1`；证据见 `../docs/p1-acceptance-2026-09-14.md`、`../docs/pm-pit-acceptance-2026-09-14.md`、`../docs/p1.5-gate-run-2026-09-14.md`） |
 | — | **P1 验收 + P1.5 通道闸门**（§10 P1 ①–⑥；当时判定关闭 W2/W3） | ✅ `tag: phase-p1`；R4 后 W2/W3 已接线，但预算未配置时仍 fail-closed |
-| T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 真 HTX 只读预检与最小额独立冒烟已通过；普通/算法单合并计数与撤单已补测；进 P3 前仍需真 HTX “有持仓 + 保护单”对账验证 |
+| T2.1 | `CcxtBroker`（HTX 优先、venue-agnostic、OKX sandbox）+ 真实 `getOpenOrders`/`findOrderByClientOrderId` | ✅ 真 HTX 只读预检与最小额独立冒烟已通过；普通/算法单合并计数与撤单已补测；本轮真实非空生产对账见 [`R6 连接证据`](../docs/r6-runtime-connection-2026-10-03.md)，长期观察未完成 |
 | T2.2 | 对账 runner + Docker 重启后的启动恢复 + `/halt` `/resume` | ✅ 单进程模型：dsh 退出由 Docker 重启；启动先跑 CrashRecovery 再做对账；持久化 `halted` 已接入新增敞口硬闸，`/resume` 不清对账冻结；旧 watchdog 验收仅归档 |
 | T2.3 | 故障注入：`kill -9`×50 / 幂等提交×10 / 保护单停摆仍生效 | ✅ P2 ①②④ 全通过：`../docs/p2-fault-injection-2026-09-15.md` |
 | T2.4 | 内核指标补全：`adx14` + `funding.rate`/`oi.changePct`/`liq.notional`/`basis.bps` | ✅ 增量=全量（ADX 对拍 92 样本）；单位口径有测试；`UNIMPLEMENTED_PATHS` 清空 |
@@ -45,7 +45,7 @@
 | R2 | 有界 `DecisionContext` 与请求渲染 | ✅ schema v6 双时间归档（当前 schema v8）；固定 PIT fixture 的 context/request 为 107,128 / 119,243 字符，request 上限 180,000，UTF-8 输入预算保守上界 123,751 tokens；非空样本含行情、benchmark、衍生品、组合/保护、计划与 outcome；缺失/过期/暖机、PIT、脱敏和超长拒发均通过；复验见 `../docs/r2-decision-context-2026-09-21.md`。只捕获请求，未调用模型 |
 | R3 | DecisionEnvelope 判断链 | ✅ single/critique、evidence/eligibility、成本入账和单一执行入口；`trade-supervisor.decisionStrategy` 默认 `critique`，可切回 `single`；付费对照未执行，不代表效果差异；stub 工程证据见 `../docs/r3-decision-envelope-2026-09-21.md`（外部模型调用 0） |
 | R4 | 即时动作与 W2/W3 持久 worker | ✅ 去重、限频、预算、退避重试、重启恢复、TTL 与 PM 只读映射；结算对未知成本 fail-closed，但生产 funding resolver 尚未接入，经济验收仍受阻；PM-triggered 开仓仍 fail-closed，待 R5 独立场内 gate；stub 工程证据见 `../docs/r4-trigger-worker-2026-09-21.md`（外部模型调用 0） |
-| R5 | 真实 critique 与 forward-paper 效果验收 | ⬜ 负责人选择 critique，付费 single/critique 对照取消；静态 runner 与离线护栏保留但未执行。仍缺预算授权后的 critique 真实运行、≥50 个非空执行链样本、独立 forward-paper 经济证据和 funding resolver；选择不代表相对 single 的效果结论。说明见 [`docs/r5-runner.md`](../docs/r5-runner.md)，lesson 默认关闭 |
+| R5 | 真实 critique 与 forward-paper 效果验收 | ⬜ 负责人选择 critique，付费 single/critique 对照取消；静态 runner 与离线护栏保留但未执行。已授权并进行真实 Responses 测试；≥50目标因402余额不足未达标，独立经济证据和 funding resolver仍缺。实测见 [`连接进度`](../docs/real-integration-progress-2026-10-03.md)；选择不代表相对 single 的效果结论。说明见 [`docs/r5-runner.md`](../docs/r5-runner.md)，lesson 默认关闭 |
 | R6 / P3 | 小额实盘 | ⬜ 当前为 `paper`；R5 两道验收通过且完成真 HTX “有持仓 + 保护单”对账后，需同时设置 `TRADER_MODE=live_auto`、独立 `TRADER_LIVE_ARMED=1`、两项凭据及全部非空限额；缺凭据不降级；逐单 `live_confirm` 与自进化不在当前架构 |
 
 ## 开发

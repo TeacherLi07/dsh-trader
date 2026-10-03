@@ -37,7 +37,7 @@
   ],
   "localVerification": {
     "files": 74,
-    "tests": 831,
+    "tests": 832,
     "exitCode": 0
   },
   "deepseekResponsesPilot": {
@@ -53,5 +53,22 @@
   "limitations": [
     "Sub2API gateway price not verified; trading cost gate remains closed",
     "Real WS test is a provider engineering probe, not economic acceptance"
-  ]
+  ],
+  "deepseekWsReadonlyProbe": {
+    "at": 1791004417618,
+    "reports": [
+      {
+        "baseURL": "https://api.deepseek.com",
+        "opened": false,
+        "responseCreateSent": 0,
+        "error": "Error: Unexpected server response: 405"
+      },
+      {
+        "baseURL": "https://api.deepseek.com/v1",
+        "opened": false,
+        "responseCreateSent": 0,
+        "error": "Error: Unexpected server response: 405"
+      }
+    ]
+  }
 }

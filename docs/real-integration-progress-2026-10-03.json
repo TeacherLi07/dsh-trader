@@ -1,0 +1,378 @@
+{
+  "date": "2026-10-03",
+  "status": "blocked_on_provider_balance",
+  "model": "deepseek-flash",
+  "preferredApi": "responses",
+  "reasoningEffort": "high",
+  "maxOutputTokens": 32768,
+  "summaries": [
+    {
+      "label": "real-pilot",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-02/real-pilot",
+      "runs": 2,
+      "completed": 0,
+      "knownUsageCalls": 6,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 2,
+      "stages": {
+        "strategist": 4,
+        "risk-critic": 2
+      },
+      "knownUsageEstimatedUsd": 0.06924357,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 312107,
+        "out": 38320,
+        "cached": 3840
+      },
+      "outcomes": {
+        "review": 2
+      },
+      "failures": [
+        "DecisionOutputFailure: RiskCritic shape 无效"
+      ]
+    },
+    {
+      "label": "real-pilot-v2",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-02/real-pilot-v2",
+      "runs": 2,
+      "completed": 2,
+      "knownUsageCalls": 7,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 1,
+      "stages": {
+        "strategist": 5,
+        "risk-critic": 2
+      },
+      "knownUsageEstimatedUsd": 0.06871572599999999,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 363029,
+        "out": 25776,
+        "cached": 8192
+      },
+      "outcomes": {
+        "no_trade": 2
+      },
+      "failures": []
+    },
+    {
+      "label": "real-high-v1",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-02/real-high-v1",
+      "runs": 2,
+      "completed": 2,
+      "knownUsageCalls": 6,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 0,
+      "stages": {
+        "strategist": 4,
+        "risk-critic": 2
+      },
+      "knownUsageEstimatedUsd": 0.06413667599999999,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 311418,
+        "out": 31047,
+        "cached": 8192
+      },
+      "outcomes": {
+        "no_trade": 2
+      },
+      "failures": []
+    },
+    {
+      "label": "responses-pilot",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-pilot",
+      "runs": 1,
+      "completed": 0,
+      "knownUsageCalls": 0,
+      "unknownUsageCalls": 1,
+      "rejectedOutputs": 0,
+      "stages": {},
+      "knownUsageEstimatedUsd": 0,
+      "unresolvedUpperReservationUsd": 0.04287435,
+      "tokens": {
+        "in": 0,
+        "out": 0,
+        "cached": 0
+      },
+      "outcomes": {
+        "review": 1
+      },
+      "failures": [
+        "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error"
+      ]
+    },
+    {
+      "label": "responses-pilot-v2",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-pilot-v2",
+      "runs": 1,
+      "completed": 0,
+      "knownUsageCalls": 4,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 2,
+      "stages": {
+        "strategist": 3,
+        "risk-critic": 1
+      },
+      "knownUsageEstimatedUsd": 0.047738202,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 210167,
+        "out": 28684,
+        "cached": 6784
+      },
+      "outcomes": {
+        "review": 1
+      },
+      "failures": [
+        "DecisionOutputFailure: plan.invalidation[0].when DSL 编译失败：非法字符 \"&\"（位置 18）"
+      ]
+    },
+    {
+      "label": "responses-pilot-v3",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-pilot-v3",
+      "runs": 2,
+      "completed": 2,
+      "knownUsageCalls": 6,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 0,
+      "stages": {
+        "strategist": 4,
+        "risk-critic": 2
+      },
+      "knownUsageEstimatedUsd": 0.071231088,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 315064,
+        "out": 43308,
+        "cached": 13696
+      },
+      "outcomes": {
+        "no_trade": 2
+      },
+      "failures": []
+    },
+    {
+      "label": "responses-final-1",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-final-1",
+      "runs": 11,
+      "completed": 10,
+      "knownUsageCalls": 31,
+      "unknownUsageCalls": 1,
+      "rejectedOutputs": 1,
+      "stages": {
+        "strategist": 21,
+        "risk-critic": 10
+      },
+      "knownUsageEstimatedUsd": 0.3854143679999999,
+      "unresolvedUpperReservationUsd": 0.0443631,
+      "tokens": {
+        "in": 1673220,
+        "out": 245283,
+        "cached": 86656
+      },
+      "outcomes": {
+        "no_trade": 10,
+        "review": 1
+      },
+      "failures": [
+        "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；QUOTA: OpenAI API error (402): {\"message\":\"Insufficient Balance (request_id: 595d5432-e44e-4c6f-8f18-0ff5b8872d2a)\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}"
+      ]
+    },
+    {
+      "label": "responses-final-2",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-final-2",
+      "runs": 12,
+      "completed": 11,
+      "knownUsageCalls": 35,
+      "unknownUsageCalls": 1,
+      "rejectedOutputs": 1,
+      "stages": {
+        "strategist": 24,
+        "risk-critic": 11
+      },
+      "knownUsageEstimatedUsd": 0.41590256400000003,
+      "unresolvedUpperReservationUsd": 0.0443805,
+      "tokens": {
+        "in": 1889394,
+        "out": 245001,
+        "cached": 98688
+      },
+      "outcomes": {
+        "no_trade": 11,
+        "review": 1
+      },
+      "failures": [
+        "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；QUOTA: OpenAI API error (402): {\"message\":\"Insufficient Balance (request_id: d8c347cd-15e1-4074-b49d-4f666c97384d)\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}"
+      ]
+    },
+    {
+      "label": "responses-final-3",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-final-3",
+      "runs": 8,
+      "completed": 7,
+      "knownUsageCalls": 25,
+      "unknownUsageCalls": 1,
+      "rejectedOutputs": 2,
+      "stages": {
+        "strategist": 17,
+        "risk-critic": 8
+      },
+      "knownUsageEstimatedUsd": 0.3374005499999999,
+      "unresolvedUpperReservationUsd": 0.047787750000000004,
+      "tokens": {
+        "in": 1354185,
+        "out": 241036,
+        "cached": 70400
+      },
+      "outcomes": {
+        "no_trade": 7,
+        "review": 1
+      },
+      "failures": [
+        "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；QUOTA: OpenAI API error (402): {\"message\":\"Insufficient Balance (request_id: d4e138ec-a908-4ba7-99e1-315b510ded89)\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}"
+      ]
+    },
+    {
+      "label": "responses-final-4",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-final-4",
+      "runs": 11,
+      "completed": 10,
+      "knownUsageCalls": 31,
+      "unknownUsageCalls": 1,
+      "rejectedOutputs": 1,
+      "stages": {
+        "strategist": 20,
+        "risk-critic": 11
+      },
+      "knownUsageEstimatedUsd": 0.3944664359999999,
+      "unresolvedUpperReservationUsd": 0.044577599999999995,
+      "tokens": {
+        "in": 1676970,
+        "out": 258711,
+        "cached": 83712
+      },
+      "outcomes": {
+        "no_trade": 10,
+        "review": 1
+      },
+      "failures": [
+        "DecisionModelCallFailure: DecisionModelCallFailure: 模型阶段失败：error；QUOTA: OpenAI API error (402): {\"message\":\"Insufficient Balance (request_id: 82abdeb5-0026-405e-a0eb-ed5830499d32)\",\"type\":\"unknown_error\",\"param\":null,\"code\":\"invalid_request_error\"}"
+      ]
+    },
+    {
+      "label": "responses-resume-v1",
+      "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-resume-v1",
+      "runs": 1,
+      "completed": 1,
+      "knownUsageCalls": 3,
+      "unknownUsageCalls": 0,
+      "rejectedOutputs": 0,
+      "stages": {
+        "strategist": 2,
+        "risk-critic": 1
+      },
+      "knownUsageEstimatedUsd": 0.040953359999999994,
+      "unresolvedUpperReservationUsd": 0,
+      "tokens": {
+        "in": 155752,
+        "out": 31356,
+        "cached": 8320
+      },
+      "outcomes": {
+        "no_trade": 1
+      },
+      "failures": []
+    }
+  ],
+  "finalBatch": {
+    "requested": 52,
+    "completed": 38,
+    "terminalFailed": 4,
+    "knownUsageCalls": 122,
+    "knownUsageEstimatedUsd": 1.5331839179999998,
+    "unresolvedUpperReservationUsd": 0.18110895,
+    "allCompletedOutcomes": "no_trade",
+    "actualDispatcherCoverage": "direct runtime source identities; not genuine queue workers",
+    "modelOpeningActions": 0,
+    "modelClosingActions": 0,
+    "economicGate": "not_run"
+  },
+  "finalRuntimeCompletedIncludingResumeProbe": 39,
+  "totalKnownUsageEstimatedUsd": 1.8952025399999999,
+  "totalUnresolvedUpperReservationUsd": 0.2239833,
+  "providerBalance": {
+    "httpStatus": 200,
+    "isAvailable": false,
+    "generationFailure": "HTTP 402 Insufficient Balance",
+    "checkedAt": 1791003349995
+  },
+  "resume": {
+    "passed": true,
+    "modelInvocations": 0,
+    "providerHttpRequests": 0,
+    "replayed": true,
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-resume-v1"
+  },
+  "verification": {
+    "files": 74,
+    "tests": 832,
+    "exitCode": 0
+  },
+  "coverage": {
+    "lines": {
+      "total": 8286,
+      "covered": 7216,
+      "skipped": 0,
+      "pct": 87.08
+    },
+    "statements": {
+      "total": 9603,
+      "covered": 7982,
+      "skipped": 0,
+      "pct": 83.11
+    },
+    "functions": {
+      "total": 1572,
+      "covered": 1426,
+      "skipped": 0,
+      "pct": 90.71
+    },
+    "branches": {
+      "total": 9452,
+      "covered": 7245,
+      "skipped": 0,
+      "pct": 76.65
+    },
+    "branchesTrue": {
+      "total": 0,
+      "covered": 0,
+      "skipped": 0,
+      "pct": 100
+    }
+  },
+  "otherEvidence": [
+    "r6-runtime-connection-2026-10-03.md",
+    "r5-provider-connections-2026-10-03.md",
+    "pm-pit-connection-2026-10-03.md"
+  ],
+  "remaining": [
+    ">=50 final-version complete samples requires restored DeepSeek balance",
+    "Sub2API monetary price/billing remains unverified; no trading opens via that alias",
+    "R5 funding source/economic/forward-paper acceptance and R6 14-day observation remain separate phase gates"
+  ],
+  "credentialScan": {
+    "files": 384,
+    "bytes": 379597404,
+    "matches": 0,
+    "includesSQLite": true
+  },
+  "finalHtxReadOnly": {
+    "consistent": true,
+    "remotePositions": 0,
+    "remoteOrders": 0,
+    "executedActions": 0,
+    "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/final-htx-preflight.json"
+  }
+}

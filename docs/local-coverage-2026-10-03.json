@@ -1,0 +1,70 @@
+{
+  "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
+  "exitCode": 0,
+  "files": 74,
+  "tests": 832,
+  "total": {
+    "lines": {
+      "total": 8286,
+      "covered": 7216,
+      "skipped": 0,
+      "pct": 87.08
+    },
+    "statements": {
+      "total": 9603,
+      "covered": 7982,
+      "skipped": 0,
+      "pct": 83.11
+    },
+    "functions": {
+      "total": 1572,
+      "covered": 1426,
+      "skipped": 0,
+      "pct": 90.71
+    },
+    "branches": {
+      "total": 9452,
+      "covered": 7245,
+      "skipped": 0,
+      "pct": 76.65
+    },
+    "branchesTrue": {
+      "total": 0,
+      "covered": 0,
+      "skipped": 0,
+      "pct": 100
+    }
+  },
+  "filesBelow60Percent": [
+    {
+      "path": "src/plugins/commands.ts",
+      "lines": 56,
+      "branches": 66.66
+    },
+    {
+      "path": "src/plugins/exec.ts",
+      "lines": 21.97,
+      "branches": 15.32
+    },
+    {
+      "path": "src/plugins/supervisor.ts",
+      "lines": 51,
+      "branches": 42.53
+    },
+    {
+      "path": "src/plugins/ui.ts",
+      "lines": 39.13,
+      "branches": 26.31
+    },
+    {
+      "path": "src/predictions/runtime.ts",
+      "lines": 0,
+      "branches": 100
+    }
+  ],
+  "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/coverage-delivery.log",
+  "limitations": [
+    "Coverage is unit/loopback coverage; separate real provider/venue/startup evidence is not included",
+    "Percentages do not demonstrate R5 economic quality or R6 long observation"
+  ]
+}
