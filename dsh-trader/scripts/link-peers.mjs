@@ -30,6 +30,9 @@ const PACKAGES = [
   'dsh-subagent',
   'dsh-llm',
   'dsh-llm-deepseek',
+  'dsh-llm-pi-ai',
+  'dsh-credentials',
+  'dsh-credentials-local',
   'schemastery',
 ]
 

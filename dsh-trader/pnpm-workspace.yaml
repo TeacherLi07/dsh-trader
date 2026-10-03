@@ -13,3 +13,5 @@ allowBuilds:
   esbuild: true
   bufferutil: false
   ccxt: false
+  '@google/genai': false
+  protobufjs: false
