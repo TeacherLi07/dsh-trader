@@ -1,0 +1,29 @@
+{
+  "task": "R2",
+  "date": "2026-10-03",
+  "nativeSamples": [
+    {
+      "asset": "ADA",
+      "contractSize": 10,
+      "ccxtAmountMin": 10,
+      "nativeMinContracts": 1
+    },
+    {
+      "asset": "BTC",
+      "contractSize": 0.001,
+      "ccxtAmountMin": 0.001,
+      "nativeMinContracts": 1
+    },
+    {
+      "asset": "FIL",
+      "contractSize": 0.1,
+      "ccxtAmountMin": 0.1,
+      "nativeMinContracts": 1
+    }
+  ],
+  "nonVacuousFixtureCases": 5,
+  "privateSource": "/home/ubuntu/.dsh/trading/integration-2026-10-02/market-metadata.json",
+  "realMinimumOrderEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-02/fil-live-smoke-v3.json",
+  "unknownSourceValue": null,
+  "unknownSourceTreatedAsZero": false
+}
