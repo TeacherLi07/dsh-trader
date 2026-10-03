@@ -1,0 +1,57 @@
+{
+  "reports": [
+    {
+      "label": "sub2api-ws-v1",
+      "passed": false,
+      "submittedRequests": 0,
+      "model": "sub2api:gpt-5.4-mini",
+      "usage": null,
+      "error": "TypeError: ctx.llm.resolveModel is not a function",
+      "costKnown": false,
+      "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/sub2api-ws-v1"
+    },
+    {
+      "label": "sub2api-ws-v2",
+      "passed": false,
+      "submittedRequests": 1,
+      "model": "sub2api:gpt-5.4-mini",
+      "usage": null,
+      "error": "AssertionError [ERR_ASSERTION]: nonempty structured tool output required",
+      "costKnown": false,
+      "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/sub2api-ws-v2"
+    },
+    {
+      "label": "sub2api-ws-v3",
+      "passed": true,
+      "submittedRequests": 1,
+      "model": "sub2api:gpt-5.6-sol",
+      "usage": {
+        "inputTokens": 153,
+        "outputTokens": 19,
+        "totalTokens": 172
+      },
+      "error": null,
+      "costKnown": false,
+      "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/sub2api-ws-v3"
+    }
+  ],
+  "localVerification": {
+    "files": 74,
+    "tests": 831,
+    "exitCode": 0
+  },
+  "deepseekResponsesPilot": {
+    "samples": 2,
+    "calls": 6,
+    "costUsd": 0.071231088,
+    "outcomes": [
+      "no_trade",
+      "no_trade"
+    ],
+    "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-pilot-v3"
+  },
+  "limitations": [
+    "Sub2API gateway price not verified; trading cost gate remains closed",
+    "Real WS test is a provider engineering probe, not economic acceptance"
+  ]
+}

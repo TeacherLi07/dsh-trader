@@ -310,6 +310,25 @@ describe('Sub2API Responses WebSocket provider', () => {
     expect(finish.reason.failure.message).toMatch(/outcome and cost are unresolved/)
   })
 
+  it('保留网关 error 帧的原始诊断并脱敏，已发送请求仍不重发或伪造已知费用', async () => {
+    const gateway = await startGateway((socket) => {
+      socket.send(JSON.stringify({ type: 'error', status: 400, error: {
+        type: 'invalid_request_error', message: `model not supported for this account; credential=${FAKE_KEY}`,
+      } }))
+    })
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL).stream(requestOptions())) chunks.push(chunk)
+    expect(gateway.requests).toHaveLength(1)
+    expect(gateway.httpFallbacks).toEqual([])
+    expect(gateway.handshakes()).toBe(1)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'OUTCOME_UNKNOWN' } } })
+    const detail = JSON.stringify(chunks)
+    expect(detail).toContain('invalid_request_error')
+    expect(detail).toContain('model not supported for this account')
+    expect(detail).not.toContain(FAKE_KEY)
+    expect(chunks.some((chunk) => chunk.type === 'usage')).toBe(false)
+  })
+
   it('keeps a post-submit abort unresolved and never retries or switches transports', async () => {
     const controller = new AbortController()
     const gateway = await startGateway((socket, _request, payload) => {

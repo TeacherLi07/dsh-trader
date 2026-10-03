@@ -341,7 +341,7 @@ function verifiedResponseUsage(value: unknown): TokenUsage | undefined {
 }
 
 function redactSecret(message: string, secret: string): string {
-  return secret.length === 0 ? message : message.split(secret).join('[redacted]')
+  return secret.length === 0 ? message : message.split(secret).join('[redacted]').split(encodeURIComponent(secret)).join('[redacted]')
 }
 
 function chunksFromPiEvent(
@@ -542,9 +542,10 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
           if (terminalEvent !== undefined) return
         } else if (raw.type === 'error') {
           failureCode = requestSent ? 'OUTCOME_UNKNOWN' : 'TRANSPORT'
+          const detail = redactSecret(raw.error instanceof Error ? raw.error.message : String(raw.error), apiKey)
           throw new LlmError(requestSent
-            ? 'Sub2API WebSocket failed after response.create; provider outcome and cost are unresolved'
-            : 'Sub2API WebSocket failed before response.create was sent', failureCode)
+            ? `Sub2API WebSocket failed after response.create; provider outcome and cost are unresolved (${detail})`
+            : `Sub2API WebSocket failed before response.create was sent (${detail})`, failureCode)
         } else if (raw.type === 'close') {
           if (terminalEvent === undefined) {
             failureCode = requestSent ? 'OUTCOME_UNKNOWN' : 'TRANSPORT'
