@@ -224,7 +224,16 @@ try {
       assert.ok(spent < totalBudgetUsd, 'integration total budget exhausted')
       const day = new Date(clock.now()).toISOString().slice(0, 10)
       const spentToday = db.prepare("SELECT COALESCE(SUM(est_usd), 0) AS usd FROM budget_ledger WHERE scope = 'global' AND day = ?").get(day).usd
-      const trigger = { source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: clock.now(), attempt: 1 }
+      // at 属于 run identity；重启重新取墙钟会让同一事件变成新付费请求。首次领取前持久化它。
+      const triggerName = `trigger-${index}.json`
+      const triggerPath = join(output, triggerName)
+      const trigger = existsSync(triggerPath) ? JSON.parse(readFileSync(triggerPath, 'utf8')) : {
+        source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: clock.now(), attempt: 1,
+      }
+      assert.equal(trigger.id, `connection-${policy.id}-${index}`)
+      assert.equal(trigger.source, ['W1', 'W2', 'W3'][index % 3])
+      assert.ok(Number.isSafeInteger(trigger.at) && trigger.at >= policy.createdAt)
+      if (!existsSync(triggerPath)) write(triggerName, trigger)
       const symbol = symbols[index % symbols.length]
       const config = { strategy: 'critique', route: { provider, model: 'deepseek-flash', maxTokens, maxChars: 180_000 },
         // BudgetGuard 接受当日绝对上限，会再次扣除当日已花金额；不能把剩余额度直接当上限。
