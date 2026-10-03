@@ -36,7 +36,7 @@ interface LoopbackGateway {
   readonly baseURL: string
   readonly requests: unknown[]
   readonly httpFallbacks: string[]
-  readonly upgradeHeaders: Array<{ readonly authorization?: string; readonly beta?: string; readonly userAgent?: string }>
+  readonly upgradeHeaders: Array<{ readonly authorization?: string; readonly beta?: string; readonly userAgent?: string; readonly originator?: string; readonly version?: string; readonly sessionId?: string; readonly threadId?: string; readonly requestId?: string }>
   readonly handshakes: () => number
   close(): Promise<void>
 }
@@ -132,7 +132,7 @@ async function startGateway(
 ): Promise<LoopbackGateway> {
   const requests: unknown[] = []
   const httpFallbacks: string[] = []
-  const upgradeHeaders: Array<{ readonly authorization?: string; readonly beta?: string; readonly userAgent?: string }> = []
+  const upgradeHeaders: Array<{ readonly authorization?: string; readonly beta?: string; readonly userAgent?: string; readonly originator?: string; readonly version?: string; readonly sessionId?: string; readonly threadId?: string; readonly requestId?: string }> = []
   let handshakeCount = 0
   const server = createServer((request, response) => {
     httpFallbacks.push(`${request.method ?? 'UNKNOWN'} ${request.url ?? ''}`)
@@ -149,7 +149,9 @@ async function startGateway(
     upgradeHeaders.push({
       authorization: header(request, 'authorization'),
       beta: header(request, 'openai-beta'),
-      userAgent: header(request, 'user-agent'),
+      userAgent: header(request, 'user-agent'), originator: header(request, 'originator'),
+      version: header(request, 'version'), sessionId: header(request, 'session-id'),
+      threadId: header(request, 'thread-id'), requestId: header(request, 'x-client-request-id'),
     })
     webSockets.handleUpgrade(request, socket, head, (webSocket) => {
       webSockets.emit('connection', webSocket, request)
@@ -267,7 +269,14 @@ describe('Sub2API Responses WebSocket provider', () => {
       authorization: `Bearer ${FAKE_KEY}`,
       beta: 'responses_websockets=2026-02-06',
     })
-    expect(gateway.upgradeHeaders[0]?.userAgent).toContain('deepseek-harness')
+    expect(gateway.upgradeHeaders[0]?.userAgent).toMatch(/^codex_cli_rs\/0\.160\.0 /)
+    expect(gateway.upgradeHeaders[0]?.originator).toBe('codex_cli_rs')
+    expect(gateway.upgradeHeaders[0]?.version).toBe('0.160.0')
+    const session = gateway.upgradeHeaders[0]?.sessionId
+    expect(session).toBeTruthy()
+    expect(gateway.upgradeHeaders[0]?.threadId).toBe(session)
+    expect(gateway.upgradeHeaders[0]?.requestId).toBe(session)
+    expect(gateway.requests[0]).toMatchObject({ prompt_cache_key: session, client_metadata: { session_id: session, thread_id: session } })
     expect(gateway.httpFallbacks).toEqual([])
     expect(gateway.requests).toHaveLength(1)
     expect(JSON.stringify(gateway.requests[0])).not.toContain(FAKE_KEY)

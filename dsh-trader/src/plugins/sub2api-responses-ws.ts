@@ -1,6 +1,7 @@
 /** Sub2API Responses WS v2 的独立 DSH LLM adapter。 */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { codexClientIdentity, DEFAULT_CODEX_VERSION } from './codex-client-identity.js'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LlmAdapter,
@@ -8,7 +9,6 @@ import {
   ReasoningEffortId,
   ToolCallId,
   assertUsableApiKey,
-  attributionHeaders,
   resolveRetryPolicy,
   type GenerateOptions,
   type LlmModelInfo,
@@ -70,6 +70,7 @@ export interface Sub2ApiResponsesWsConfig {
   /** 仅携带凭据引用，防止配置包含实际密钥。 */
   readonly apiKeyEnv: string
   readonly connectTimeoutMs: number
+  readonly codexVersion?: string
   readonly models: readonly Sub2ApiWsModelConfig[]
 }
 
@@ -88,6 +89,7 @@ export const Config = z.object({
   baseURL: z.string().default(''),
   apiKeyEnv: z.string().default('SUB2API_KEY'),
   connectTimeoutMs: z.number().default(10_000),
+  codexVersion: z.string().default(DEFAULT_CODEX_VERSION),
   models: z.array(modelSchema).default([]),
 })
 
@@ -415,6 +417,7 @@ function makeResponseCreateEvent(
   options: GenerateOptions,
   configuredModel: ResolvedSub2ApiWsModel,
   model: PiAiModel<'openai-responses'>,
+  identity: ReturnType<typeof codexClientIdentity>,
 ): ResponsesClientEvent {
   const context = toPiAiContext(options)
   // 与 DSH ChatGPT OAuth route 一致：系统指令写入 Responses.instructions，输入转换跳过同一份系统提示。
@@ -436,6 +439,7 @@ function makeResponseCreateEvent(
     input,
     store: false,
     truncation: 'disabled',
+    ...identity.body,
     max_output_tokens: options.maxTokens ?? configuredModel.maxTokens,
     ...(options.temperature === undefined || reasoningEnabled ? {} : { temperature: options.temperature }),
     ...(tools.length === 0 ? {} : { tools, tool_choice: 'required', parallel_tool_calls: false }),
@@ -447,6 +451,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
   readonly #baseURL: string
   readonly #apiKeyEnv: string
   readonly #connectTimeoutMs: number
+  readonly #codexVersion: string
   readonly #models: ReadonlyMap<string, ResolvedSub2ApiWsModel>
   readonly #resolveApiKey: ProviderDependencies['resolveApiKey']
   readonly #now: ProviderDependencies['now']
@@ -457,6 +462,8 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     this.#baseURL = normalizeBaseURL(config.baseURL)
     this.#apiKeyEnv = config.apiKeyEnv
     this.#connectTimeoutMs = config.connectTimeoutMs
+    this.#codexVersion = config.codexVersion ?? DEFAULT_CODEX_VERSION
+    codexClientIdentity('config-validation', this.#codexVersion)
     this.#models = validateModels(config.models)
     this.#resolveApiKey = dependencies.resolveApiKey
     this.#now = dependencies.now
@@ -507,18 +514,19 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     const configuredModel = this.#models.get(options.model)
     if (configuredModel === undefined) throw new LlmError(`Sub2API WebSocket model is not configured: ${options.model}`, 'UNKNOWN_MODEL')
 
+    const identity = codexClientIdentity(options.sessionId?.toString(), this.#codexVersion)
     const resolved = await this.#resolveApiKey()
     if (resolved === undefined) throw new LlmError(`Sub2API credential reference is not configured: ${this.#apiKeyEnv}`, 'MISSING_CREDENTIAL')
     const apiKey = assertUsableApiKey(resolved, name, this.#apiKeyEnv)
     const model = piModel(configuredModel, this.#baseURL)
-    const client = new OpenAI({ apiKey, baseURL: this.#baseURL, maxRetries: 0, defaultHeaders: attributionHeaders() })
+    const client = new OpenAI({ apiKey, baseURL: this.#baseURL, maxRetries: 0, defaultHeaders: identity.headers })
     const proxyAgent = websocketProxyAgent(this.#baseURL)
     // DSH 会复用全局 SDK；其目录可能没有 @types/ws。用本包的 ClientOptions 保留握手参数校验。
     const socketOptions: ClientOptions & ResponsesWSBaseOptions = {
       reconnect: null,
       maxQueueSize: 0,
       ...(proxyAgent === undefined ? {} : { agent: proxyAgent }),
-      headers: { ...attributionHeaders(), 'OpenAI-Beta': OPENAI_RESPONSES_WS_BETA },
+      headers: { ...identity.headers, 'OpenAI-Beta': OPENAI_RESPONSES_WS_BETA },
     }
     const socket = new ResponsesWS(client, socketOptions)
     const socketEvents = socket.stream()
@@ -579,7 +587,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     try {
       await waitForSocketOpen(socketIterator, socket, this.#connectTimeoutMs, options.signal)
       if (options.signal?.aborted) throw new LlmError('Sub2API WebSocket request aborted before response.create', 'ABORTED')
-      const request = makeResponseCreateEvent(options, configuredModel, model)
+      const request = makeResponseCreateEvent(options, configuredModel, model, identity)
       requestSent = true
       socket.send(request)
       abortListener = () => socket.close({ code: 1000, reason: 'caller-aborted' })
