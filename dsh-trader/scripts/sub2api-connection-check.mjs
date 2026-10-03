@@ -69,6 +69,8 @@ try {
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm this WebSocket Responses connection.' }] }],
     tools: [submissionTool],
   })) { report.chunks.push(chunk); log('chunk', chunk) }
+  const providerFailure = report.chunks.find(chunk => chunk.type === 'finish' && chunk.reason?.kind === 'error')?.reason?.failure
+  if (providerFailure) throw new Error(`${providerFailure.code}: ${providerFailure.message}`)
   const tool = report.chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
   assert.ok(tool, 'nonempty structured tool output required')
   if (completeSchema) {
@@ -93,6 +95,8 @@ try {
       history, createToolResultMessage({ callId: tool.block.id, isError: false,
         content: [{ type: 'text', text: completeSchema ? '{"validation":"OK","outcome":"no_trade"}' : '{"status":"OK"}' }] })],
   })) { followup.push(chunk); log('followup.chunk', chunk) }
+  const followupFailure = followup.find(chunk => chunk.type === 'finish' && chunk.reason?.kind === 'error')?.reason?.failure
+  if (followupFailure) throw new Error(`${followupFailure.code}: ${followupFailure.message}`)
   const followupUsage = followup.find((chunk) => chunk.type === 'usage')?.usage
   assert.ok(followupUsage?.totalTokens > 0, 'nonempty multi-turn terminal usage required')
   assert.ok(followup.some((chunk) => chunk.type === 'block-end' && chunk.block.type === 'text' &&

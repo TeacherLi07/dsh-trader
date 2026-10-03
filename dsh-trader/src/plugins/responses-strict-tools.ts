@@ -101,6 +101,15 @@ function schemaAllowsNull(schema: unknown): boolean {
 function prepareStrictSchemaNode(value: unknown, path: string): JsonSchemaObject {
   if (!isJsonSchemaObject(value)) strictSchemaFailure(path, 'boolean or non-object schemas are unsupported')
   const schema: JsonSchemaObject = { ...value }
+  // 标准 JSON Schema 可由 const/enum 隐含类型；上游 strict decoder 要求明确 type，补类型不改变允许值。
+  if (schema['type'] === undefined && (Object.hasOwn(schema, 'const') || schema['enum'] !== undefined)) {
+    const values = literalValues(schema)
+    if (values === undefined || values.some((value) => typeof value === 'number' && !Number.isFinite(value))) {
+      strictSchemaFailure(path, 'const/enum must declare a type or contain finite primitive literals')
+    }
+    const types = [...new Set(values.map((value) => value === null ? 'null' : typeof value))]
+    schema['type'] = types.length === 1 ? types[0] : types
+  }
   const unsupported = ['$ref', '$defs', 'definitions', 'allOf', 'patternProperties', 'dependentSchemas', 'dependencies',
     'unevaluatedProperties', 'propertyNames', 'contains', 'prefixItems', 'not', 'if', 'then', 'else']
   const unsupportedKey = unsupported.find((key) => schema[key] !== undefined)

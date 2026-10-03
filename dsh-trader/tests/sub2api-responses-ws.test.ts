@@ -337,6 +337,14 @@ describe('Sub2API Responses WebSocket provider', () => {
     const request = gateway.requests[0] as { tools: Array<Record<string, unknown>> }
     const functionTool = request.tools[0]!
     expect(functionTool['strict']).toBe(true)
+    const checkLiteralTypes = (value: unknown): void => {
+      if (typeof value !== 'object' || value === null) return
+      if (Array.isArray(value)) { value.forEach(checkLiteralTypes); return }
+      const node = value as Record<string, unknown>
+      if (Object.hasOwn(node, 'const') || Object.hasOwn(node, 'enum')) expect(node['type']).toBeDefined()
+      Object.values(node).forEach(checkLiteralTypes)
+    }
+    checkLiteralTypes(functionTool['parameters'])
     const parameters = functionTool['parameters'] as Record<string, unknown>
     const properties = parameters['properties'] as Record<string, unknown>
     expect(parameters['additionalProperties']).toBe(false)
