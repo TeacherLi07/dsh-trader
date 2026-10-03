@@ -958,9 +958,8 @@ export class HtxBroker implements Broker {
       clientOrderId: request.clientOrderId,
       reduceOnly: request.reduceOnly === true,
     }
-    addParam(params, 'stopLossPrice', request.stopLossPrice)
-    addParam(params, 'takeProfitPrice', request.takeProfitPrice)
-    addParam(params, 'trailingPercent', request.trailingPercent)
+    // HTX 的标量 stopLossPrice/takeProfitPrice/trailingPercent 会把普通开仓路由到算法单端点，
+    // 并非附带保护。主单只传普通订单字段；确认成交后由执行链独立挂保护并核验覆盖。
 
     const amount = this.#toContracts(request.symbol, request.qty)
     const created = await this.#call(() =>

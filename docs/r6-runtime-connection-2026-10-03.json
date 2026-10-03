@@ -1,0 +1,311 @@
+{
+  "status": "passed",
+  "executing": true,
+  "symbol": "FIL/USDT:USDT",
+  "steps": [
+    {
+      "at": 1791001487387,
+      "name": "loss_envelope",
+      "detail": {
+        "equity": 24.904217866514756,
+        "envelope": {
+          "maxLossUsd": 0.49808435733029516,
+          "conservativeLossUsd": 0.1076406,
+          "fits": true
+        },
+        "spec": {
+          "symbol": "FIL/USDT:USDT",
+          "linear": true,
+          "contractSize": 0.1,
+          "amountStepContracts": 1,
+          "priceStep": 0.0001,
+          "minAmountContracts": 1,
+          "minNotionalQuote": 0,
+          "makerFeeRate": 0.0002,
+          "takerFeeRate": 0.0005,
+          "minimumRule": "htx-whole-contracts-v1"
+        },
+        "limits": {
+          "perOrderCapUsd": 0.1076406,
+          "maxExposureUsd": 0.1108065,
+          "maxLeverage": 0.02,
+          "dailyLossLimitUsd": 0.24904217866514758,
+          "maxDrawdownUsd": 0.49808435733029516,
+          "maxConsecutiveLosses": 1,
+          "maxSpreadBps": 10,
+          "maxOpenOrders": 2
+        }
+      }
+    },
+    {
+      "at": 1791001500217,
+      "name": "preflight",
+      "detail": {
+        "venue": "htx",
+        "equity": 24.904217866514756,
+        "envelope": {
+          "maxLossUsd": 0.49808435733029516,
+          "conservativeLossUsd": 0.1076406,
+          "fits": true
+        },
+        "spec": {
+          "symbol": "FIL/USDT:USDT",
+          "linear": true,
+          "contractSize": 0.1,
+          "amountStepContracts": 1,
+          "priceStep": 0.0001,
+          "minAmountContracts": 1,
+          "minNotionalQuote": 0,
+          "makerFeeRate": 0.0002,
+          "takerFeeRate": 0.0005,
+          "minimumRule": "htx-whole-contracts-v1"
+        },
+        "limits": {
+          "perOrderCapUsd": 0.1076406,
+          "maxExposureUsd": 0.1108065,
+          "maxLeverage": 0.02,
+          "dailyLossLimitUsd": 0.24904217866514758,
+          "maxDrawdownUsd": 0.49808435733029516,
+          "maxConsecutiveLosses": 1,
+          "maxSpreadBps": 10,
+          "maxOpenOrders": 2
+        },
+        "riskPct": 0.00012775865988058353
+      }
+    },
+    {
+      "at": 1791001531868,
+      "name": "open",
+      "detail": {
+        "executed": true,
+        "denied": false,
+        "decisionId": "dec:runtime-check-1791001483281:open:FIL/USDT:USDT:1791001483281"
+      }
+    },
+    {
+      "at": 1791001538876,
+      "name": "nonempty_remote_protection",
+      "detail": {
+        "positions": [
+          {
+            "symbol": "FIL/USDT:USDT",
+            "qty": 0.1,
+            "avgPrice": 1.0554,
+            "unrealizedPnlUsd": 0,
+            "observedAt": 1791001535760,
+            "protectedStopPrice": 1.0236
+          }
+        ],
+        "protections": [
+          {
+            "intentId": "725244929274033",
+            "clientOrderId": "725244929274033",
+            "symbol": "FIL/USDT:USDT",
+            "state": "acked",
+            "ts": 1791001531607,
+            "exchangeOrderId": "1555918724979810304",
+            "observedAt": 1791001538876
+          }
+        ]
+      }
+    },
+    {
+      "at": 1791001543544,
+      "name": "nonempty_reconcile",
+      "detail": {
+        "ranAt": 1791001538876,
+        "acknowledgeOrphans": false,
+        "result": {
+          "actions": [],
+          "consistent": true,
+          "freezeTrading": false
+        },
+        "actions": [],
+        "consistent": true,
+        "applied": [],
+        "freezeTrading": false
+      }
+    },
+    {
+      "at": 1791001543545,
+      "name": "same_open_idempotent",
+      "detail": {
+        "executed": false,
+        "denied": false,
+        "reason": "already_decided",
+        "decisionId": "dec:runtime-check-1791001483281:open:FIL/USDT:USDT:1791001483281",
+        "alreadyIntended": true
+      }
+    },
+    {
+      "at": 1791001556165,
+      "name": "restart_nonempty_recovery",
+      "detail": {
+        "ranAt": 1791001551159,
+        "acknowledgeOrphans": false,
+        "result": {
+          "actions": [],
+          "consistent": true,
+          "freezeTrading": false
+        },
+        "actions": [],
+        "consistent": true,
+        "applied": [],
+        "freezeTrading": false
+      }
+    },
+    {
+      "at": 1791001569774,
+      "name": "cancel_preserves_protection",
+      "detail": {
+        "executed": true,
+        "denied": false,
+        "decisionId": "dec:runtime-check-1791001483281:cancel-open-only:FIL/USDT:USDT:1791001483281"
+      }
+    },
+    {
+      "at": 1791001593639,
+      "name": "reduce_only_close",
+      "detail": {
+        "executed": true,
+        "denied": false,
+        "decisionId": "dec:runtime-check-1791001483281:close:FIL/USDT:USDT:1791001483281"
+      }
+    },
+    {
+      "at": 1791001615458,
+      "name": "final_flat_reconcile",
+      "detail": {
+        "ranAt": 1791001610694,
+        "acknowledgeOrphans": false,
+        "result": {
+          "actions": [],
+          "consistent": true,
+          "freezeTrading": false
+        },
+        "actions": [],
+        "consistent": true,
+        "applied": [],
+        "freezeTrading": false
+      }
+    },
+    {
+      "at": 1791001615459,
+      "name": "nonempty_journal_counts",
+      "detail": {
+        "decisions": 4,
+        "order_intents": 3,
+        "orders": 3,
+        "fills": 2,
+        "audit_events": 36
+      }
+    },
+    {
+      "at": 1791001631393,
+      "name": "cleanup",
+      "detail": {
+        "cancelAll": true,
+        "flattened": true,
+        "note": null
+      }
+    }
+  ],
+  "priorFailure": {
+    "steps": [
+      {
+        "at": 1791001147418,
+        "name": "loss_envelope",
+        "detail": {
+          "equity": 24.904217866514756,
+          "envelope": {
+            "maxLossUsd": 0.49808435733029516,
+            "conservativeLossUsd": 0.1080384,
+            "fits": true
+          },
+          "spec": {
+            "symbol": "FIL/USDT:USDT",
+            "linear": true,
+            "contractSize": 0.1,
+            "amountStepContracts": 1,
+            "priceStep": 0.0001,
+            "minAmountContracts": 1,
+            "minNotionalQuote": 0,
+            "makerFeeRate": 0.0002,
+            "takerFeeRate": 0.0005,
+            "minimumRule": "htx-whole-contracts-v1"
+          },
+          "limits": {
+            "perOrderCapUsd": 0.1080384,
+            "maxExposureUsd": 0.11121600000000001,
+            "maxLeverage": 0.02,
+            "dailyLossLimitUsd": 0.24904217866514758,
+            "maxDrawdownUsd": 0.49808435733029516,
+            "maxConsecutiveLosses": 1,
+            "maxSpreadBps": 10,
+            "maxOpenOrders": 2
+          }
+        }
+      },
+      {
+        "at": 1791001159992,
+        "name": "preflight",
+        "detail": {
+          "venue": "htx",
+          "equity": 24.904217866514756,
+          "envelope": {
+            "maxLossUsd": 0.49808435733029516,
+            "conservativeLossUsd": 0.1080384,
+            "fits": true
+          },
+          "spec": {
+            "symbol": "FIL/USDT:USDT",
+            "linear": true,
+            "contractSize": 0.1,
+            "amountStepContracts": 1,
+            "priceStep": 0.0001,
+            "minAmountContracts": 1,
+            "minNotionalQuote": 0,
+            "makerFeeRate": 0.0002,
+            "takerFeeRate": 0.0005,
+            "minimumRule": "htx-whole-contracts-v1"
+          },
+          "limits": {
+            "perOrderCapUsd": 0.1080384,
+            "maxExposureUsd": 0.11121600000000001,
+            "maxLeverage": 0.02,
+            "dailyLossLimitUsd": 0.24904217866514758,
+            "maxDrawdownUsd": 0.49808435733029516,
+            "maxConsecutiveLosses": 1,
+            "maxSpreadBps": 10,
+            "maxOpenOrders": 2
+          },
+          "riskPct": 0.00012823080881788472
+        }
+      },
+      {
+        "at": 1791001175157,
+        "name": "failed",
+        "detail": {
+          "error": "Error: htx {\"code\":1067,\"message\":\"The position_side field is invalid. Please re-enter.\",\"data\":null,\"args\":[[\"position_side\"]],\"ts\":1791001174906,\"unknownException\":false}"
+        }
+      },
+      {
+        "at": 1791001191546,
+        "name": "cleanup",
+        "detail": {
+          "cancelAll": true,
+          "flattened": true,
+          "note": null
+        }
+      }
+    ],
+    "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-runtime-v1"
+  },
+  "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-runtime-v3",
+  "localVerification": {
+    "files": 74,
+    "tests": 831,
+    "exitCode": 0
+  },
+  "r6OverallPassed": false
+}

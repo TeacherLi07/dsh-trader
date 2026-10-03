@@ -197,6 +197,15 @@ const orderRequest = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 })
 
 describe('CcxtBroker', () => {
+  it.each(['market', 'limit'] as const)('带风险保护意图的 %s 主单仍提交普通单，不被 HTX 标量触发参数改路由', async (type) => {
+    const exchange = new FakeExchange()
+    const broker = makeBroker(exchange, { fillPollAttempts: 0 })
+    await broker.placeOrder(orderRequest({ type, price: type === 'limit' ? 100 : undefined,
+      stopLossPrice: 97, takeProfitPrice: 103, trailingPercent: 1 }))
+    expect(exchange.createCalls).toHaveLength(1)
+    expect(exchange.createCalls[0]?.params).toEqual({ clientOrderId: orderRequest().clientOrderId, reduceOnly: false })
+    expect(exchange.createCalls[0]?.type).toBe(type)
+  })
   it('算法订单按 exchange id 查询必须尝试其端点，不能把 client id 未匹配误报为 venue 不支持', async () => {
     const exchange = new FakeExchange()
     exchange.fetchOrder = async (id, _symbol, params) => {
