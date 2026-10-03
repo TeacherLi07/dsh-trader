@@ -22,6 +22,7 @@ const API_KEY = 'test-api-key'
 const API_SECRET = 'test-api-secret'
 
 class FakeExchange implements CcxtProExchangeLike {
+  options: Record<string, unknown> = { defaultType: 'spot', adjustForTimeDifference: true }
   readonly id = 'fake'
   readonly has: Readonly<Record<string, unknown>> = {
     fetchOrder: true,
@@ -196,6 +197,97 @@ const orderRequest = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 })
 
 describe('CcxtBroker', () => {
+  it('算法订单按 exchange id 查询必须尝试其端点，不能把 client id 未匹配误报为 venue 不支持', async () => {
+    const exchange = new FakeExchange()
+    exchange.fetchOrder = async (id, _symbol, params) => {
+      exchange.fetchOrderCalls.push({ id, ...(params === undefined ? {} : { params }) })
+      if (params?.['stopLoss'] !== true) throw new Error('OrderNotFound')
+      return { id, clientOrderId: 'own-protection-id', symbol: SYMBOL, status: 'open', side: 'sell', amount: 2, stopLossPrice: 95 }
+    }
+    const found = await makeBroker(exchange).findOrderByExchangeOrderId('remote-algo-id', SYMBOL)
+    expect(found).toMatchObject({ exchangeOrderId: 'remote-algo-id', clientOrderId: 'own-protection-id', state: 'acked' })
+    expect(exchange.fetchOrderCalls).toHaveLength(2)
+  })
+
+  it('真实 HTX v5 sl 回报省略 reduce_only，只有可核验的原生 TPSL close-only 形状才证明保护', async () => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, markPrice: 100 }]
+    const stop = { id: 'native-stop', symbol: SYMBOL, type: 'stop', status: 'open', side: 'sell', amount: 2,
+      stopLossPrice: 95, info: { algo_id: 'native-stop', contract_code: 'BTC-USDT', position_side: 'both', type: 'sl', state: 'active', sl_trigger_price: '95', volume: '2' } }
+    exchange.algorithmOrders.stopLossTakeProfit = [stop]
+    const broker = makeBroker(exchange)
+    expect((await broker.getPositions())[0]?.protectedStopPrice).toBe(95)
+    expect((await broker.getAccount()).pendingExposureUsd).toBe(0)
+    exchange.algorithmOrders.stopLossTakeProfit = [{ ...stop, info: { ...stop.info, type: 'trigger' } }]
+    expect((await broker.getPositions())[0]?.protectedStopPrice).toBeUndefined()
+    expect((await broker.getAccount()).pendingExposureUsd).toBeNull()
+    exchange.algorithmOrders.stopLossTakeProfit = [{ ...stop, reduceOnly: false }]
+    expect((await broker.getPositions())[0]?.protectedStopPrice).toBeUndefined()
+  })
+
+  it('普通/保护提交的幂等预查始终使用请求标的，永续成交查询不可省略 symbol', async () => {
+    const exchange = new FakeExchange()
+    const otherSymbol = 'ETH/USDT:USDT'
+    exchange.markets = { ...exchange.markets, [otherSymbol]: { linear: true, swap: true, contractSize: 1 } }
+    exchange.positions = [{ symbol: otherSymbol, side: 'long', contracts: 2, entryPrice: 100, markPrice: 100 }]
+    const lookups: (string | undefined)[] = []
+    const fetchMyTrades = exchange.fetchMyTrades.bind(exchange)
+    exchange.fetchMyTrades = async (symbol, since, limit, params) => {
+      lookups.push(symbol)
+      if (symbol === undefined) throw new Error('htx fetchMyTrades() requires a symbol argument')
+      return fetchMyTrades(symbol, since, limit, params)
+    }
+    const broker = makeBroker(exchange, { accountType: 'swap' })
+    await broker.placeOrder(orderRequest({ symbol: otherSymbol }))
+    await broker.placeProtective({ symbol: otherSymbol, clientOrderId: 'new-stop', stopLossPrice: 95 })
+    expect(exchange.createCalls).toHaveLength(2)
+    expect(lookups).toEqual([otherSymbol, otherSymbol])
+  })
+
+  it('accountType 写入 ccxt.options，未指定 symbol 的 merged 对账也必须读永续账户', async () => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, markPrice: 100 }]
+    exchange.algorithmOrders.stopLossTakeProfit = [{ id: 'swap-stop', symbol: SYMBOL, type: 'stop', status: 'open', side: 'sell', amount: 2, reduceOnly: true, stopPrice: 95 }]
+    const fetchOpenOrders = exchange.fetchOpenOrders.bind(exchange)
+    exchange.fetchOpenOrders = async (...args) => exchange.options['defaultType'] === 'swap' ? fetchOpenOrders(...args) : []
+    const broker = makeBroker(exchange, { accountType: 'swap' })
+    expect(await broker.getOpenOrders()).toHaveLength(1)
+    expect((await broker.getPositions())[0]?.protectedStopPrice).toBe(95)
+    expect(exchange.options['adjustForTimeDifference']).toBe(true)
+  })
+
+  it.each([
+    { side: 'buy', amount: 2, reduceOnly: true },
+    { side: 'sell', amount: 1, reduceOnly: true },
+    { side: 'sell', amount: 2, reduceOnly: false },
+    { side: 'sell', amount: undefined, reduceOnly: true },
+    { side: 'sell', amount: 2, reduceOnly: true, stopPrice: -1 },
+    { side: 'sell', amount: 2, reduceOnly: true, status: 'canceled' },
+  ])('远端止损必须能证明方向、减仓、数量与有效状态：%j', async (fields) => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, markPrice: 100 }]
+    exchange.openOrders = [{ id: 'bad-stop', symbol: SYMBOL, type: 'stop', status: 'open', stopPrice: 95, ...fields }]
+    expect((await makeBroker(exchange).getPositions())[0]?.protectedStopPrice).toBeUndefined()
+  })
+
+  it('足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口', async () => {
+    const exchange = new FakeExchange()
+    exchange.markets = { [SYMBOL]: { linear: true, swap: true, contractSize: 0.1 } }
+    exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2, entryPrice: 100, markPrice: 100 }]
+    exchange.openOrders = [{ id: 'valid-stop', symbol: SYMBOL, type: 'stop', status: 'open', side: 'sell', amount: 2, reduceOnly: true, stopPrice: 95 }]
+    const broker = makeBroker(exchange)
+    expect((await broker.getPositions())[0]).toMatchObject({ qty: 0.2, protectedStopPrice: 95 })
+    expect((await broker.getAccount()).pendingExposureUsd).toBe(0)
+    exchange.openOrders.push({ id: 'entry-trigger', symbol: SYMBOL, type: 'stop', status: 'open', side: 'buy', amount: 1, stopPrice: 105, reduceOnly: false })
+    expect((await broker.getAccount()).pendingExposureUsd).toBeNull()
+  })
+
+  it('不把无法解析的非空持仓响应丢成空仓', async () => {
+    const exchange = new FakeExchange()
+    exchange.positions = [{ symbol: SYMBOL, contracts: 'not-a-number', side: 'long' }]
+    await expect(makeBroker(exchange).getPositions()).rejects.toThrow(/持仓.*无法解析/)
+  })
+
   it('maps account, positions, open orders, risk state, and ticker spread', async () => {
     const exchange = new FakeExchange()
     exchange.positions = [
@@ -210,7 +302,7 @@ describe('CcxtBroker', () => {
       },
     ]
     exchange.openOrders = [
-      { id: 'stop-1', clientOrderId: 'protect-1', symbol: SYMBOL, status: 'open', reduceOnly: true, type: 'stop', stopPrice: '95' },
+      { id: 'stop-1', clientOrderId: 'protect-1', symbol: SYMBOL, status: 'open', side: 'sell', amount: 2, reduceOnly: true, type: 'stop', stopPrice: '95' },
       { id: 'limit-1', info: { 'client-order-id': 'client-2' }, symbol: SYMBOL, status: 'open', type: 'limit' },
       { id: 'ghost', symbol: SYMBOL, status: 'open', type: 'limit' },
     ]

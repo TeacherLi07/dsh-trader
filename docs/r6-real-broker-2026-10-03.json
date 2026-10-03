@@ -1,0 +1,237 @@
+{
+  "task": "R6",
+  "date": "2026-10-03",
+  "scope": "controlled real broker engineering",
+  "brokerRegressionsBefore": "\n RUN  v5.0.0 /workspace/dsh-trader\n\n ❯ tests/exec-ccxt-broker.test.ts (46 tests | 8 failed) 213ms\n   ❯ CcxtBroker (43)\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"buy\",\"amount\":2,\"reduceOnly\":true} 6ms\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":1,\"reduceOnly\":true} 1ms\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":false} 0ms\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"reduceOnly\":true} 0ms\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"stopPrice\":-1} 0ms\n     × 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"status\":\"canceled\"} 0ms\n     × 足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口 2ms\n     × 不把无法解析的非空持仓响应丢成空仓 2ms\n     ✓ maps account, positions, open orders, risk state, and ticker spread 2ms\n     ✓ 保留交易所真实可用保证金，缺字段不把 equity 猜成 free margin 0ms\n     ✓ 为有价格的未成交增加敞口订单预留名义，无法估值时返回 unknown 0ms\n     ✓ fails closed with infinite spread when bid or ask is missing 0ms\n     ✓ short-circuits duplicate clientOrderId without a second createOrder 1ms\n     ✓ throws transport failures and leaves a journaled intent in created, not acked 8ms\n     ✓ throws when a successful create response has an unknown state 0ms\n     ✓ finds an order through fetchOrder, open orders, trades, or returns undefined 1ms\n     ✓ converts HTX contract fill quantities back to the broker base-quantity unit 0ms\n     ✓ order 缺少费用时只回填同一订单且 USDT 计价的逐笔手续费 0ms\n     ✓ 非计价币手续费不冒充 USDT 成本 0ms\n     ✓ places a configurable protective reduceOnly conditional order 0ms\n     ✓ 拒绝用小于已确认累计成交量的远端仓位挂保护 0ms\n     ✓ cancels every open order after fetching them 51ms\n     ✓ counts algorithm-only protective orders in account openOrders 0ms\n     ✓ explicit includeProtection cancels algorithm-only orders only when flat 26ms\n     ✓ 保护单批量撤销期间若仓位快照转为非空就立即停止，不能继续撤止损 0ms\n     ✓ includeProtection 发现普通/未知挂单时不开始撤单 0ms\n     ✓ default cancelAll preserves reduce-only protection even while canceling entries 27ms\n     ✓ refuses to cancel an order whose type cannot be classified as entry vs protection 0ms\n     ✓ uses each order symbol when canceling all markets instead of spreadSymbol 26ms\n     ✓ resolves the actual symbol for public cancelOrder when only exchange id is supplied 25ms\n     ✓ does not invent spreadSymbol when public cancelOrder cannot resolve an order 26ms\n     ✓ deduplicates the same order returned by ordinary and algorithm endpoints 0ms\n     ✓ sets sandbox without requiring a network call 0ms\n     ✓ refuses account reads without a RiskStateProvider 0ms\n     ✓ ★ 把凭据回填到 exchange 实例（否则 ccxt 私有端点一律 unauthorized），且错误信息脱敏 0ms\n     ✓ ★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0 0ms\n     ✓ ★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位） 0ms\n     ✓ 不足一张最小合约时拒绝下单（绝不四舍五入放大仓位） 0ms\n     ✓ inverse 合约拒绝换算（口径不同，宁可拒绝也不下错） 0ms\n     ✓ spot metadata rejects orders and positions before conversion/submission 0ms\n     ✓ missing swap flag rejects orders and positions before conversion/submission 0ms\n     ✓ missing market metadata rejects orders and positions before conversion/submission 0ms\n     ✓ does not convert filled quantities without authoritative swap metadata 0ms\n   ✓ exec plugin broker routing (1)\n     ✓ selects ccxt only for armed live_auto with both credentials 0ms\n   ✓ HTX 实盘冒烟暴露的修复（position_side / 市价单成交 / clientOrderId 查询） (2)\n     ✓ ★ 算法保护单必须带 position_side（HTX 缺它直接报 code 1067） 0ms\n     ✓ ★ 市价单 create 返回 open 时，轮询 fetchOrder 成交后回填 filled + avgPrice 0ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"buy\",\"amount\":2,\"reduceOnly\":true}\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":1,\"reduceOnly\":true}\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":false}\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"reduceOnly\":true}\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"status\":\"canceled\"}\nAssertionError: expected 95 to be undefined\n\n- Expected:\nundefined\n\n+ Received:\n95\n\n ❯ tests/exec-ccxt-broker.test.ts:210:80\n    208|     exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2…\n    209|     exchange.openOrders = [{ id: 'bad-stop', symbol: SYMBOL, type: 'st…\n    210|     expect((await makeBroker(exchange).getPositions())[0]?.protectedSt…\n       |                                                                                ^\n    211|   })\n    212|\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"stopPrice\":-1}\nAssertionError: expected -1 to be undefined\n\n- Expected:\nundefined\n\n+ Received:\n-1\n\n ❯ tests/exec-ccxt-broker.test.ts:210:80\n    208|     exchange.positions = [{ symbol: SYMBOL, side: 'long', contracts: 2…\n    209|     exchange.openOrders = [{ id: 'bad-stop', symbol: SYMBOL, type: 'st…\n    210|     expect((await makeBroker(exchange).getPositions())[0]?.protectedSt…\n       |                                                                                ^\n    211|   })\n    212|\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/8]⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口\nAssertionError: expected +0 to be null\n\n- Expected:\nnull\n\n+ Received:\n0\n\n ❯ tests/exec-ccxt-broker.test.ts:222:60\n    220|     expect((await broker.getAccount()).pendingExposureUsd).toBe(0)\n    221|     exchange.openOrders.push({ id: 'entry-trigger', symbol: SYMBOL, ty…\n    222|     expect((await broker.getAccount()).pendingExposureUsd).toBeNull()\n       |                                                            ^\n    223|   })\n    224|\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/8]⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 不把无法解析的非空持仓响应丢成空仓\nAssertionError: promise resolved \"[]\" instead of rejecting\n\n- Expected:\nError {\n  \"message\": \"rejected promise\",\n}\n\n+ Received:\n[]\n\n ❯ tests/exec-ccxt-broker.test.ts:228:54\n    226|     const exchange = new FakeExchange()\n    227|     exchange.positions = [{ symbol: SYMBOL, contracts: 'not-a-number',…\n    228|     await expect(makeBroker(exchange).getPositions()).rejects.toThrow(…\n       |                                                      ^\n    229|   })\n    230|\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/8]⎯\n\n\n Test Files  1 failed (1)\n      Tests  8 failed | 38 passed (46)\n   Start at  15:38:44\n   Duration  529ms (tests 47%, transform 41%, import 11%, worker 1%)\n\n",
+  "accountScopeRegressionBefore": "\n RUN  v5.0.0 /workspace/dsh-trader\n\n ❯ tests/exec-ccxt-broker.test.ts (47 tests | 1 failed) 209ms\n   ❯ CcxtBroker (44)\n     × accountType 写入 ccxt.options，未指定 symbol 的 merged 对账也必须读永续账户 7ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"buy\",\"amount\":2,\"reduceOnly\":true} 1ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":1,\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":false} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"stopPrice\":-1} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"status\":\"canceled\"} 0ms\n     ✓ 足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口 1ms\n     ✓ 不把无法解析的非空持仓响应丢成空仓 1ms\n     ✓ maps account, positions, open orders, risk state, and ticker spread 1ms\n     ✓ 保留交易所真实可用保证金，缺字段不把 equity 猜成 free margin 0ms\n     ✓ 为有价格的未成交增加敞口订单预留名义，无法估值时返回 unknown 0ms\n     ✓ fails closed with infinite spread when bid or ask is missing 0ms\n     ✓ short-circuits duplicate clientOrderId without a second createOrder 1ms\n     ✓ throws transport failures and leaves a journaled intent in created, not acked 8ms\n     ✓ throws when a successful create response has an unknown state 0ms\n     ✓ finds an order through fetchOrder, open orders, trades, or returns undefined 1ms\n     ✓ converts HTX contract fill quantities back to the broker base-quantity unit 0ms\n     ✓ order 缺少费用时只回填同一订单且 USDT 计价的逐笔手续费 0ms\n     ✓ 非计价币手续费不冒充 USDT 成本 0ms\n     ✓ places a configurable protective reduceOnly conditional order 0ms\n     ✓ 拒绝用小于已确认累计成交量的远端仓位挂保护 0ms\n     ✓ cancels every open order after fetching them 51ms\n     ✓ counts algorithm-only protective orders in account openOrders 0ms\n     ✓ explicit includeProtection cancels algorithm-only orders only when flat 26ms\n     ✓ 保护单批量撤销期间若仓位快照转为非空就立即停止，不能继续撤止损 0ms\n     ✓ includeProtection 发现普通/未知挂单时不开始撤单 0ms\n     ✓ default cancelAll preserves reduce-only protection even while canceling entries 26ms\n     ✓ refuses to cancel an order whose type cannot be classified as entry vs protection 0ms\n     ✓ uses each order symbol when canceling all markets instead of spreadSymbol 25ms\n     ✓ resolves the actual symbol for public cancelOrder when only exchange id is supplied 26ms\n     ✓ does not invent spreadSymbol when public cancelOrder cannot resolve an order 25ms\n     ✓ deduplicates the same order returned by ordinary and algorithm endpoints 0ms\n     ✓ sets sandbox without requiring a network call 0ms\n     ✓ refuses account reads without a RiskStateProvider 0ms\n     ✓ ★ 把凭据回填到 exchange 实例（否则 ccxt 私有端点一律 unauthorized），且错误信息脱敏 0ms\n     ✓ ★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0 0ms\n     ✓ ★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位） 0ms\n     ✓ 不足一张最小合约时拒绝下单（绝不四舍五入放大仓位） 0ms\n     ✓ inverse 合约拒绝换算（口径不同，宁可拒绝也不下错） 0ms\n     ✓ spot metadata rejects orders and positions before conversion/submission 0ms\n     ✓ missing swap flag rejects orders and positions before conversion/submission 0ms\n     ✓ missing market metadata rejects orders and positions before conversion/submission 0ms\n     ✓ does not convert filled quantities without authoritative swap metadata 0ms\n   ✓ exec plugin broker routing (1)\n     ✓ selects ccxt only for armed live_auto with both credentials 0ms\n   ✓ HTX 实盘冒烟暴露的修复（position_side / 市价单成交 / clientOrderId 查询） (2)\n     ✓ ★ 算法保护单必须带 position_side（HTX 缺它直接报 code 1067） 0ms\n     ✓ ★ 市价单 create 返回 open 时，轮询 fetchOrder 成交后回填 filled + avgPrice 0ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > accountType 写入 ccxt.options，未指定 symbol 的 merged 对账也必须读永续账户\nAssertionError: expected [] to have a length of 1 but got +0\n\n- Expected\n+ Received\n\n- 1\n+ 0\n\n ❯ tests/exec-ccxt-broker.test.ts:207:42\n    205|     exchange.fetchOpenOrders = async (...args) => exchange.options['de…\n    206|     const broker = makeBroker(exchange, { accountType: 'swap' })\n    207|     expect(await broker.getOpenOrders()).toHaveLength(1)\n       |                                          ^\n    208|     expect((await broker.getPositions())[0]?.protectedStopPrice).toBe(…\n    209|     expect(exchange.options['adjustForTimeDifference']).toBe(true)\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n\n Test Files  1 failed (1)\n      Tests  1 failed | 46 passed (47)\n   Start at  15:53:40\n   Duration  523ms (tests 47%, transform 41%, import 11%, worker 1%)\n\n",
+  "nativeTpslRegressionBefore": "\n RUN  v5.0.0 /workspace/dsh-trader\n\n ❯ tests/exec-ccxt-broker.test.ts (49 tests | 1 failed) 211ms\n   ❯ CcxtBroker (46)\n     × 真实 HTX v5 sl 回报省略 reduce_only，只有可核验的原生 TPSL close-only 形状才证明保护 7ms\n     ✓ 普通/保护提交的幂等预查始终使用请求标的，永续成交查询不可省略 symbol 2ms\n     ✓ accountType 写入 ccxt.options，未指定 symbol 的 merged 对账也必须读永续账户 1ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"buy\",\"amount\":2,\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":1,\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":false} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"stopPrice\":-1} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"status\":\"canceled\"} 0ms\n     ✓ 足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口 1ms\n     ✓ 不把无法解析的非空持仓响应丢成空仓 1ms\n     ✓ maps account, positions, open orders, risk state, and ticker spread 1ms\n     ✓ 保留交易所真实可用保证金，缺字段不把 equity 猜成 free margin 0ms\n     ✓ 为有价格的未成交增加敞口订单预留名义，无法估值时返回 unknown 0ms\n     ✓ fails closed with infinite spread when bid or ask is missing 0ms\n     ✓ short-circuits duplicate clientOrderId without a second createOrder 1ms\n     ✓ throws transport failures and leaves a journaled intent in created, not acked 8ms\n     ✓ throws when a successful create response has an unknown state 0ms\n     ✓ finds an order through fetchOrder, open orders, trades, or returns undefined 1ms\n     ✓ converts HTX contract fill quantities back to the broker base-quantity unit 0ms\n     ✓ order 缺少费用时只回填同一订单且 USDT 计价的逐笔手续费 0ms\n     ✓ 非计价币手续费不冒充 USDT 成本 0ms\n     ✓ places a configurable protective reduceOnly conditional order 0ms\n     ✓ 拒绝用小于已确认累计成交量的远端仓位挂保护 0ms\n     ✓ cancels every open order after fetching them 51ms\n     ✓ counts algorithm-only protective orders in account openOrders 0ms\n     ✓ explicit includeProtection cancels algorithm-only orders only when flat 26ms\n     ✓ 保护单批量撤销期间若仓位快照转为非空就立即停止，不能继续撤止损 0ms\n     ✓ includeProtection 发现普通/未知挂单时不开始撤单 0ms\n     ✓ default cancelAll preserves reduce-only protection even while canceling entries 26ms\n     ✓ refuses to cancel an order whose type cannot be classified as entry vs protection 0ms\n     ✓ uses each order symbol when canceling all markets instead of spreadSymbol 25ms\n     ✓ resolves the actual symbol for public cancelOrder when only exchange id is supplied 25ms\n     ✓ does not invent spreadSymbol when public cancelOrder cannot resolve an order 25ms\n     ✓ deduplicates the same order returned by ordinary and algorithm endpoints 0ms\n     ✓ sets sandbox without requiring a network call 0ms\n     ✓ refuses account reads without a RiskStateProvider 0ms\n     ✓ ★ 把凭据回填到 exchange 实例（否则 ccxt 私有端点一律 unauthorized），且错误信息脱敏 0ms\n     ✓ ★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0 0ms\n     ✓ ★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位） 0ms\n     ✓ 不足一张最小合约时拒绝下单（绝不四舍五入放大仓位） 0ms\n     ✓ inverse 合约拒绝换算（口径不同，宁可拒绝也不下错） 0ms\n     ✓ spot metadata rejects orders and positions before conversion/submission 0ms\n     ✓ missing swap flag rejects orders and positions before conversion/submission 0ms\n     ✓ missing market metadata rejects orders and positions before conversion/submission 0ms\n     ✓ does not convert filled quantities without authoritative swap metadata 0ms\n   ✓ exec plugin broker routing (1)\n     ✓ selects ccxt only for armed live_auto with both credentials 0ms\n   ✓ HTX 实盘冒烟暴露的修复（position_side / 市价单成交 / clientOrderId 查询） (2)\n     ✓ ★ 算法保护单必须带 position_side（HTX 缺它直接报 code 1067） 0ms\n     ✓ ★ 市价单 create 返回 open 时，轮询 fetchOrder 成交后回填 filled + avgPrice 0ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 真实 HTX v5 sl 回报省略 reduce_only，只有可核验的原生 TPSL close-only 形状才证明保护\nAssertionError: expected undefined to be 95 // Object.is equality\n\n- Expected:\n95\n\n+ Received:\nundefined\n\n ❯ tests/exec-ccxt-broker.test.ts:207:66\n    205|     exchange.algorithmOrders.stopLossTakeProfit = [stop]\n    206|     const broker = makeBroker(exchange)\n    207|     expect((await broker.getPositions())[0]?.protectedStopPrice).toBe(…\n       |                                                                  ^\n    208|     expect((await broker.getAccount()).pendingExposureUsd).toBe(0)\n    209|     exchange.algorithmOrders.stopLossTakeProfit = [{ ...stop, info: { …\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n\n Test Files  1 failed (1)\n      Tests  1 failed | 48 passed (49)\n   Start at  16:22:50\n   Duration  531ms (tests 46%, transform 42%, import 11%, worker 1%)\n\n",
+  "algorithmQueryRegressionBefore": "\n RUN  v5.0.0 /workspace/dsh-trader\n\n ❯ tests/exec-ccxt-broker.test.ts (50 tests | 1 failed) 210ms\n   ❯ CcxtBroker (47)\n     × 算法订单按 exchange id 查询必须尝试其端点，不能把 client id 未匹配误报为 venue 不支持 7ms\n     ✓ 真实 HTX v5 sl 回报省略 reduce_only，只有可核验的原生 TPSL close-only 形状才证明保护 2ms\n     ✓ 普通/保护提交的幂等预查始终使用请求标的，永续成交查询不可省略 symbol 1ms\n     ✓ accountType 写入 ccxt.options，未指定 symbol 的 merged 对账也必须读永续账户 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"buy\",\"amount\":2,\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":1,\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":false} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"reduceOnly\":true} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"stopPrice\":-1} 0ms\n     ✓ 远端止损必须能证明方向、减仓、数量与有效状态：{\"side\":\"sell\",\"amount\":2,\"reduceOnly\":true,\"status\":\"canceled\"} 0ms\n     ✓ 足量的 reduce-only 保护按 contractSize 换算，并不把开仓触发单当零敞口 0ms\n     ✓ 不把无法解析的非空持仓响应丢成空仓 1ms\n     ✓ maps account, positions, open orders, risk state, and ticker spread 1ms\n     ✓ 保留交易所真实可用保证金，缺字段不把 equity 猜成 free margin 0ms\n     ✓ 为有价格的未成交增加敞口订单预留名义，无法估值时返回 unknown 0ms\n     ✓ fails closed with infinite spread when bid or ask is missing 0ms\n     ✓ short-circuits duplicate clientOrderId without a second createOrder 1ms\n     ✓ throws transport failures and leaves a journaled intent in created, not acked 8ms\n     ✓ throws when a successful create response has an unknown state 0ms\n     ✓ finds an order through fetchOrder, open orders, trades, or returns undefined 1ms\n     ✓ converts HTX contract fill quantities back to the broker base-quantity unit 0ms\n     ✓ order 缺少费用时只回填同一订单且 USDT 计价的逐笔手续费 0ms\n     ✓ 非计价币手续费不冒充 USDT 成本 0ms\n     ✓ places a configurable protective reduceOnly conditional order 0ms\n     ✓ 拒绝用小于已确认累计成交量的远端仓位挂保护 0ms\n     ✓ cancels every open order after fetching them 51ms\n     ✓ counts algorithm-only protective orders in account openOrders 0ms\n     ✓ explicit includeProtection cancels algorithm-only orders only when flat 26ms\n     ✓ 保护单批量撤销期间若仓位快照转为非空就立即停止，不能继续撤止损 0ms\n     ✓ includeProtection 发现普通/未知挂单时不开始撤单 0ms\n     ✓ default cancelAll preserves reduce-only protection even while canceling entries 26ms\n     ✓ refuses to cancel an order whose type cannot be classified as entry vs protection 0ms\n     ✓ uses each order symbol when canceling all markets instead of spreadSymbol 25ms\n     ✓ resolves the actual symbol for public cancelOrder when only exchange id is supplied 25ms\n     ✓ does not invent spreadSymbol when public cancelOrder cannot resolve an order 25ms\n     ✓ deduplicates the same order returned by ordinary and algorithm endpoints 0ms\n     ✓ sets sandbox without requiring a network call 0ms\n     ✓ refuses account reads without a RiskStateProvider 0ms\n     ✓ ★ 把凭据回填到 exchange 实例（否则 ccxt 私有端点一律 unauthorized），且错误信息脱敏 0ms\n     ✓ ★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0 0ms\n     ✓ ★ 基础币数量 ↔ ccxt 张数按 contractSize 换算（差一个 contractSize = 几十倍仓位） 0ms\n     ✓ 不足一张最小合约时拒绝下单（绝不四舍五入放大仓位） 0ms\n     ✓ inverse 合约拒绝换算（口径不同，宁可拒绝也不下错） 0ms\n     ✓ spot metadata rejects orders and positions before conversion/submission 0ms\n     ✓ missing swap flag rejects orders and positions before conversion/submission 0ms\n     ✓ missing market metadata rejects orders and positions before conversion/submission 0ms\n     ✓ does not convert filled quantities without authoritative swap metadata 0ms\n   ✓ exec plugin broker routing (1)\n     ✓ selects ccxt only for armed live_auto with both credentials 0ms\n   ✓ HTX 实盘冒烟暴露的修复（position_side / 市价单成交 / clientOrderId 查询） (2)\n     ✓ ★ 算法保护单必须带 position_side（HTX 缺它直接报 code 1067） 0ms\n     ✓ ★ 市价单 create 返回 open 时，轮询 fetchOrder 成交后回填 filled + avgPrice 0ms\n\n⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯\n\n FAIL  tests/exec-ccxt-broker.test.ts > CcxtBroker > 算法订单按 exchange id 查询必须尝试其端点，不能把 client id 未匹配误报为 venue 不支持\nAssertionError: expected undefined to match object { …(3) }\n\n- Expected:\n{\n  \"clientOrderId\": \"own-protection-id\",\n  \"exchangeOrderId\": \"remote-algo-id\",\n  \"state\": \"acked\",\n}\n\n+ Received:\nundefined\n\n ❯ tests/exec-ccxt-broker.test.ts:208:19\n    206|     }\n    207|     const found = await makeBroker(exchange).findOrderByExchangeOrderI…\n    208|     expect(found).toMatchObject({ exchangeOrderId: 'remote-algo-id', c…\n       |                   ^\n    209|     expect(exchange.fetchOrderCalls).toHaveLength(2)\n    210|   })\n\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\n\n\n Test Files  1 failed (1)\n      Tests  1 failed | 49 passed (50)\n   Start at  16:52:31\n   Duration  541ms (tests 46%, transform 43%, import 11%, worker 1%)\n\n",
+  "liveSmoke": {
+    "ranAt": "2026-10-02T16:32:54.469Z",
+    "execute": true,
+    "symbol": "FIL/USDT:USDT",
+    "contractSize": 0.1,
+    "oneContractBase": 0.1,
+    "referencePrice": 1.0455,
+    "oneContractNotionalUsd": 0.10455000000000002,
+    "logPath": "/home/ubuntu/.dsh/trading/integration-2026-10-02/fil-live-smoke-v3.jsonl",
+    "steps": [
+      {
+        "at": "2026-10-02T16:33:01.239Z",
+        "name": "preflight_readOnlyBalance",
+        "ok": true,
+        "detail": {
+          "venue": "htx",
+          "equityQuote": 24.904283482514757
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:01.239Z",
+        "name": "preflight_getPositions",
+        "ok": true,
+        "detail": {
+          "count": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:01.239Z",
+        "name": "preflight_getOpenOrders",
+        "ok": true,
+        "detail": {
+          "count": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:01.239Z",
+        "name": "preflight_flat_required",
+        "ok": true
+      },
+      {
+        "at": "2026-10-02T16:33:01.239Z",
+        "name": "preflight_loss_envelope",
+        "ok": true,
+        "detail": {
+          "maxDrawdownPct": 0.02,
+          "maxLossUsd": 0.49808566965029516,
+          "conservativeLossUsd": 0.10664100000000001,
+          "fits": true
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:09.701Z",
+        "name": "entry_placeOrder",
+        "ok": true,
+        "detail": {
+          "state": "filled",
+          "exchangeOrderId": "1555739446208663552",
+          "avgPrice": 1.0465,
+          "fee": 6.279e-05
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:10.185Z",
+        "name": "query_findOrderByClientOrderId(entry, by exchange id)",
+        "ok": true,
+        "detail": {
+          "state": "filled",
+          "exchangeOrderId": "1555739446208663552"
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:10.701Z",
+        "name": "query_entry_by_own_numeric_client_id",
+        "ok": true,
+        "detail": {
+          "queriedWith": "111135369268385",
+          "found": true
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:14.404Z",
+        "name": "query_getPositions(after_entry)",
+        "ok": true,
+        "detail": {
+          "qty": 0.1
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:17.987Z",
+        "name": "query_getOpenOrders(after_entry)",
+        "ok": true,
+        "detail": {
+          "count": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:26.068Z",
+        "name": "protective_place_stop",
+        "ok": true,
+        "detail": {
+          "state": "acked",
+          "exchangeOrderId": "1555739520077430784",
+          "stopLossPrice": 1.015105
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:29.088Z",
+        "name": "query_getOpenOrders(after_protective)",
+        "ok": true,
+        "detail": {
+          "count": 1,
+          "stopVisible": true
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:35.642Z",
+        "name": "nonempty_position_and_unspecified_symbol_merged_protection",
+        "ok": true,
+        "detail": {
+          "positions": 1,
+          "qty": 0.1,
+          "remoteStopPrice": 1.0151,
+          "allOpenOrders": 1
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:42.008Z",
+        "name": "query_findOrderByClientOrderId(protective, by exchange id)",
+        "ok": true,
+        "detail": {
+          "found": false,
+          "state": null,
+          "note": "该部署的算法单查询端点不按 algo_id 返回；撤单/平仓不受影响"
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:49.323Z",
+        "name": "protective_place_takeProfit",
+        "ok": true,
+        "detail": {
+          "exchangeOrderId": "1555739617657597952",
+          "takeProfitPrice": 1.077895
+        }
+      },
+      {
+        "at": "2026-10-02T16:33:55.259Z",
+        "name": "cancel_all_preserves_protection_while_open",
+        "ok": true,
+        "detail": {
+          "remaining": 2,
+          "remainingIds": [
+            "1555739520077430784",
+            "1555739617657597952"
+          ]
+        }
+      },
+      {
+        "at": "2026-10-02T16:34:08.591Z",
+        "name": "close_placeOrder(reduceOnly)",
+        "ok": true,
+        "detail": {
+          "state": "filled",
+          "exchangeOrderId": "1555739693232197633"
+        }
+      },
+      {
+        "at": "2026-10-02T16:34:12.129Z",
+        "name": "close_position_flat",
+        "ok": true,
+        "detail": {
+          "qty": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:34:18.881Z",
+        "name": "cancel_protection_after_flat",
+        "ok": true,
+        "detail": {
+          "remaining": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:34:21.857Z",
+        "name": "final_no_open_orders",
+        "ok": true,
+        "detail": {
+          "count": 0
+        }
+      },
+      {
+        "at": "2026-10-02T16:34:37.993Z",
+        "name": "cleanup(finally)",
+        "ok": true,
+        "detail": {
+          "cancelAll": true,
+          "flattened": true,
+          "note": null
+        }
+      }
+    ],
+    "cleanup": {
+      "cancelAll": true,
+      "flattened": true,
+      "note": null
+    },
+    "allPassed": true
+  },
+  "closedAlgorithmReadOnly": {
+    "readOnly": true,
+    "found": true,
+    "ack": {
+      "intentId": "959382430011082",
+      "clientOrderId": "959382430011082",
+      "symbol": "FIL/USDT:USDT",
+      "state": "unknown",
+      "ts": 1790958805829,
+      "exchangeOrderId": "1555739520077430784"
+    }
+  },
+  "limits": {
+    "maxLossFraction": 0.02,
+    "asset": "FIL/USDT:USDT",
+    "contracts": 1
+  },
+  "privateTracePath": "/home/ubuntu/.dsh/trading/integration-2026-10-02/fil-live-smoke-v3.http.jsonl",
+  "productionJournalAccepted": false,
+  "r6OverallPassed": false
+}

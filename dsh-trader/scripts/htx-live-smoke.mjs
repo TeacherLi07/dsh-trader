@@ -23,6 +23,7 @@ import { systemClock } from '../lib/clock.js'
 import { CcxtBroker } from '../lib/exec/ccxt-broker.js'
 import { assertSmokeAccountFlat, cleanupSmokePosition, evaluateSmokeLossEnvelope } from '../lib/exec/smoke-safety.js'
 import { applyProxyAwareFetch } from '../lib/market/ccxt-source.js'
+import { numericClientOrderId } from '../lib/util/canonical.js'
 
 const argv = process.argv.slice(2)
 const EXECUTE = argv.includes('--execute')
@@ -92,17 +93,18 @@ const broker = new CcxtBroker({
 })
 
 const ts = Date.now()
-const entryClientId = `smoke-entry-${ts}`
-const slClientId = `smoke-sl-${ts}`
+const entryClientId = numericClientOrderId(`smoke-entry-${ts}`)
+const slClientId = numericClientOrderId(`smoke-sl-${ts}`)
 
 let cleanup = { cancelAll: false, flattened: false, note: null }
 let preflightPassed = false
 /** 清理只属于本次空账户冒烟；未通过前置检查时绝不处理用户原有持仓。 */
 async function forceCleanup(reason) {
   cleanup = await cleanupSmokePosition(broker, SYMBOL, async (qty) => {
+    const closeId = numericClientOrderId(`smoke-cleanup-${ts}`)
     await broker.placeOrder({
-        intentId: `smoke-close-${Date.now()}`,
-        clientOrderId: `smoke-close-${Date.now()}`,
+        intentId: closeId,
+        clientOrderId: closeId,
         decisionId: 'smoke-cleanup',
         symbol: SYMBOL,
         type: 'market',
@@ -184,16 +186,13 @@ try {
     if (entry.state !== 'filled') throw new Error('开仓终态未确认，进入安全清理')
 
     // ── ③ 查询 ──────────────────────────────────────────────────────────────
-    // ★ 实测限制：HTX 会把 client_order_id 生成为订单号本身，**不采用**我们传的 id。
-    // 所以"按自己的 clientOrderId 查回来"在 HTX 上不可用；这里用交易所订单号验证查询通路本身。
-    const found = await broker.findOrderByClientOrderId(entry.exchangeOrderId ?? '')
+    const found = await broker.findOrderByExchangeOrderId(entry.exchangeOrderId ?? '', SYMBOL)
     record('query_findOrderByClientOrderId(entry, by exchange id)', found !== undefined, {
       state: found?.state ?? null,
       exchangeOrderId: found?.exchangeOrderId ?? null,
     })
-    const byOwn = await broker.findOrderByClientOrderId(entryClientId)
-    record('known_limitation:htx_client_order_id_not_honored', true, {
-      note: 'HTX 生成的 client_order_id = 订单号；本脚本不走生产 journal，不能用它证明生产幂等',
+    const byOwn = await broker.findOrderByClientOrderId(entryClientId, SYMBOL)
+    record('query_entry_by_own_numeric_client_id', byOwn !== undefined, {
       queriedWith: entryClientId,
       found: byOwn !== undefined,
     })
@@ -232,19 +231,27 @@ try {
       stopVisible,
     })
     if (!stopVisible) throw new Error('交易所合并挂单视图没有确认止损，拒绝继续冒烟')
-    const protFound = await broker.findOrderByClientOrderId(protective.exchangeOrderId ?? '')
-    // 算法单按 id 查询是否可用在不同 HTX 部署上不一致；**撤单已经能成功**（用 algo 标志），
-    // 所以这里只如实记录能力，不把它当失败（否则会把"平台差异"伪装成我们的缺陷）。
-    record('query_findOrderByClientOrderId(protective, by exchange id)', true, {
+    const protectedPositions = await broker.getPositions()
+    const protectedPosition = protectedPositions.find((position) => position.symbol === SYMBOL)
+    const mergedAll = await broker.getOpenOrders()
+    const completeProtection = protectedPosition !== undefined && protectedPosition.qty !== 0 &&
+      protectedPosition.protectedStopPrice !== undefined && mergedAll.some((order) => order.exchangeOrderId === protective.exchangeOrderId)
+    record('nonempty_position_and_unspecified_symbol_merged_protection', completeProtection, {
+      positions: protectedPositions.length, qty: protectedPosition?.qty ?? null,
+      remoteStopPrice: protectedPosition?.protectedStopPrice ?? null, allOpenOrders: mergedAll.length,
+    })
+    if (!completeProtection) throw new Error('非空持仓的全账户 merged 对账未确认有效保护')
+    const protFound = await broker.findOrderByExchangeOrderId(protective.exchangeOrderId ?? '', SYMBOL)
+    record('query_protective_by_exchange_id', protFound !== undefined, {
       found: protFound !== undefined,
       state: protFound?.state ?? null,
-      note: protFound === undefined ? '该部署的算法单查询端点不按 algo_id 返回；撤单/平仓不受影响' : undefined,
     })
+    if (protFound === undefined) throw new Error('算法单不能按真实 exchange id 查询，拒绝把调用错误当成 venue 限制')
 
     // ── ⑥ 持仓期间只验证默认撤单保留保护 ──────────────────────────────────────
     const protective2 = await broker.placeProtective({
       symbol: SYMBOL,
-      clientOrderId: `${slClientId}-tp`,
+      clientOrderId: numericClientOrderId(`smoke-tp-${ts}`),
       expectedPositionQty: qty1,
       takeProfitPrice,
     })
@@ -267,7 +274,7 @@ try {
     if (!Number.isFinite(beforeClose) || beforeClose === 0) throw new Error('平仓前无法核验非零持仓，进入安全清理')
     const close = await broker.placeOrder({
       intentId: `smoke-close-${ts}`,
-      clientOrderId: `smoke-close-${ts}`,
+      clientOrderId: numericClientOrderId(`smoke-close-${ts}`),
       decisionId: 'smoke-close',
       symbol: SYMBOL,
       type: 'market',
@@ -294,7 +301,7 @@ try {
     record('final_no_open_orders', finalOpen.length === 0, { count: finalOpen.length })
   }
 } catch (error) {
-  record('fatal', false, { error: String(error).slice(0, 300) })
+  record('fatal', false, { error: String(error) })
 } finally {
   if (EXECUTE && preflightPassed) await forceCleanup('finally')
   report.cleanup = cleanup

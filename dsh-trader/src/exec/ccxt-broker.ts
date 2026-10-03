@@ -123,6 +123,7 @@ export interface CcxtMarketLike {
 export interface CcxtProExchangeLike {
   readonly id: string
   readonly has: Readonly<Record<string, unknown>>
+  options?: Record<string, unknown>
   /** `loadMarkets()` 之后由 ccxt 填充；用于 contractSize / precision，缺了就必须 fail-closed。 */
   readonly markets?: Readonly<Record<string, CcxtMarketLike>>
   /** ccxt 的精度助手（把张数对齐到交易所步长）；不存在时退回 precision.amount 向下取整。 */
@@ -366,14 +367,19 @@ function truthyBoolean(value: unknown): boolean {
 }
 
 function isReduceOnly(value: Readonly<Record<string, unknown>>): boolean {
-  if (truthyBoolean(value['reduceOnly'])) return true
   const info = infoOf(value)
-  return (
-    info !== undefined &&
-    (truthyBoolean(info['reduceOnly']) ||
-      truthyBoolean(info['reduce_only']) ||
-      truthyBoolean(info['reduce-only']))
-  )
+  const flag = value['reduceOnly'] ?? value['reduce_only'] ?? value['reduce-only'] ??
+    info?.['reduceOnly'] ?? info?.['reduce_only'] ?? info?.['reduce-only']
+  if (flag !== undefined && flag !== null) return truthyBoolean(flag)
+  const symbol = asString(value['symbol'])
+  const nativeCode = symbol?.endsWith('/USDT:USDT') === true ? `${symbol.split('/')[0]}-USDT` : undefined
+  // 真实 HTX v5 TPSL 回报没有 reduce_only；专用 sl/tp 端点是既有持仓的平仓保护。
+  // 必须核对原生身份/标的/数量/触发字段；普通 trigger 与明确 reduce_only=false 均不得借类型放行。
+  return info !== undefined && nativeCode !== undefined && info['contract_code'] === nativeCode &&
+    asString(info['algo_id']) !== undefined && ['sl', 'tp', 'tpsl'].includes(String(info['type'])) &&
+    ['both', 'long', 'short'].includes(String(info['position_side'])) &&
+    (asNumber(info['volume']) ?? 0) > 0 &&
+    ['sl_trigger_price', 'tp_trigger_price'].some((key) => (asNumber(info[key]) ?? 0) > 0)
 }
 
 function isProtectionOrder(value: Readonly<Record<string, unknown>>): boolean {
@@ -503,6 +509,12 @@ export class HtxBroker implements Broker {
     // 值只写入 exchange，不打印、不落库、不进 prompt；错误消息经 #safeError 脱敏。
     options.exchange.apiKey = options.apiKey
     options.exchange.secret = options.apiSecret
+    if (options.accountType !== undefined) {
+      // ccxt 的 defaultType 在 options 中；构造器顶层同名字段不会改变未传 symbol 的订单端点。
+      // 余额显式传 type 仍不足以保证 merged 挂单/保护查询读同一个永续账户。
+      options.exchange.options ??= {}
+      options.exchange.options['defaultType'] = options.accountType
+    }
 
     if (options.sandbox === true) {
       try {
@@ -573,19 +585,12 @@ export class HtxBroker implements Broker {
       this.#fetchOpenOrdersMerged(),
     ])
     const observedAt = this.#clock.now()
-    const stops = new Map<string, number>()
-    for (const order of openOrders) {
-      if (!isProtectionOrder(order)) continue
-      const symbol = asString(order['symbol'])
-      const stop = stopPriceFrom(order)
-      if (symbol !== undefined && stop !== undefined && !stops.has(symbol)) stops.set(symbol, stop)
-    }
-
     const out: PositionSnapshot[] = []
     for (const position of positions) {
       const reading = this.#readPosition(position)
-      if (reading === undefined || reading.snapshot.qty === 0) continue
-      const stop = stops.get(reading.snapshot.symbol)
+      if (reading === undefined) throw this.#safeError(new Error('远端非空持仓的数量或标的无法解析，拒绝当作空仓'))
+      if (reading.snapshot.qty === 0) continue
+      const stop = this.#verifiedStop(openOrders, reading.snapshot)
       out.push({
         ...reading.snapshot,
         observedAt,
@@ -593,6 +598,25 @@ export class HtxBroker implements Broker {
       })
     }
     return out
+  }
+
+  #verifiedStop(orders: readonly CcxtOrderLike[], position: PositionSnapshot): number | undefined {
+    const expectedSide = position.qty > 0 ? 'sell' : 'buy'
+    const neededContracts = Math.abs(position.qty) / this.#contractSize(position.symbol)
+    for (const order of orders) {
+      const stop = stopPriceFrom(order)
+      const amount = firstNumber(order, ['remaining', 'amount', 'contracts', 'volume'])
+      const filled = asNumber(order['filled']) ?? 0
+      const remaining = asNumber(order['remaining']) ?? (amount === undefined ? undefined : amount - filled)
+      const positionSide = order['positionSide'] ?? order['position_side'] ?? infoOf(order)?.['position_side']
+      // 类型/本地 intent 只能说明请求种类；远端订单必须证明它会按正确方向关闭整个仓位。
+      if (order['symbol'] !== position.symbol || !isReduceOnly(order) || order['side'] !== expectedSide ||
+          orderState(order, 'unknown') !== 'acked' || stop === undefined || stop <= 0 ||
+          remaining === undefined || remaining + 1e-9 < neededContracts ||
+          (positionSide !== undefined && positionSide !== 'both' && positionSide !== (position.qty > 0 ? 'long' : 'short'))) continue
+      return stop
+    }
+    return undefined
   }
 
   async getOpenOrders(symbol?: string): Promise<readonly OrderAck[]> {
@@ -632,7 +656,7 @@ export class HtxBroker implements Broker {
 
   async placeProtective(request: ProtectiveRequest): Promise<OrderAck> {
     const clientOrderId = request.clientOrderId ?? this.#protectiveClientOrderId(request)
-    const existing = await this.findOrderByClientOrderId(clientOrderId)
+    const existing = await this.findOrderByClientOrderId(clientOrderId, request.symbol)
     if (existing !== undefined) return existing
 
     if (
@@ -854,7 +878,7 @@ export class HtxBroker implements Broker {
 
     if (this.#can('fetchOpenOrders')) {
       try {
-        const orders = await this.#exchange.fetchOpenOrders()
+        const orders = await this.#fetchOpenOrdersMerged(marketSymbol)
         for (const order of orders) {
           if (clientOrderIdFrom(order) === clientOrderId) {
             return this.#orderAck(order, { clientOrderId, ...(marketSymbol === undefined ? {} : { symbol: marketSymbol }) }, 'acked')
@@ -865,9 +889,9 @@ export class HtxBroker implements Broker {
       }
     }
 
-    if (this.#can('fetchMyTrades')) {
+    if (marketSymbol !== undefined && this.#can('fetchMyTrades')) {
       try {
-        const trades = await this.#exchange.fetchMyTrades(undefined, undefined, undefined, { clientOrderId })
+        const trades = await this.#exchange.fetchMyTrades(marketSymbol, undefined, undefined, { clientOrderId })
         for (const trade of trades) {
           if (clientOrderIdFrom(trade) === clientOrderId) return this.#tradeAck(trade, clientOrderId)
         }
@@ -884,8 +908,17 @@ export class HtxBroker implements Broker {
     await this.#ensureMarketsLoaded()
     if (!this.#can('fetchOrder')) return undefined
     try {
-      const order = await this.#exchange.fetchOrder(exchangeOrderId, symbol)
-      if (order === undefined || exchangeOrderIdFrom(order) !== exchangeOrderId) return undefined
+      let order: CcxtOrderLike | undefined
+      // 普通单与算法单使用不同查询端点；exchange id 查询不应携带 clientOrderId 改变查找含义。
+      for (const params of [{}, { stopLoss: true }, { takeProfit: true }, { trigger: true }, { trailing: true }, { stopLossTakeProfit: true }]) {
+        try {
+          const found = await this.#exchange.fetchOrder(exchangeOrderId, symbol, params)
+          if (found !== undefined && exchangeOrderIdFrom(found) === exchangeOrderId) { order = found; break }
+        } catch (error) {
+          if (!lookupMiss(error)) throw error
+        }
+      }
+      if (order === undefined) return undefined
       const ack = this.#orderAck(order, { clientOrderId: exchangeOrderId, symbol }, 'acked')
       if (ack === undefined || ack.fee !== undefined || ack.filledQty === undefined || ack.filledQty <= 0 ||
           !['filled', 'canceled', 'rejected'].includes(ack.state) || symbol === undefined || !this.#can('fetchMyTrades')) {
@@ -917,7 +950,7 @@ export class HtxBroker implements Broker {
   async #placeOrder(request: OrderRequest): Promise<OrderAck> {
     // 传输失败/不确定失败必须 throw：调用方已落库的 created 意图要留给 CrashRecovery 收敛。
     // 不能返回 { state: 'unknown' }，现有 tools.ts 会把 unknown 误当 acked，进而丢掉在途信号。
-    const existing = await this.findOrderByClientOrderId(request.clientOrderId)
+    const existing = await this.findOrderByClientOrderId(request.clientOrderId, request.symbol)
     if (existing !== undefined) return existing
 
     await this.#ensureMarketsLoaded()
@@ -1212,7 +1245,8 @@ export class HtxBroker implements Broker {
   #pendingExposure(orders: readonly CcxtOrderLike[]): number | null {
     let total = 0
     for (const order of orders) {
-      if (isProtectionOrder(order)) continue
+      // 开仓触发单也可能带 stop/trigger 字段；只有可核验的 reduce-only 才能从待成交敞口中排除。
+      if (isReduceOnly(order)) continue
       const symbol = asString(order['symbol'])
       const amount = firstNumber(order, ['amount', 'qty', 'contracts', 'volume'])
       const filled = firstNumber(order, ['filled', 'filledQty', 'filled_qty']) ?? 0
