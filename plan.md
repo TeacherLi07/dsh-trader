@@ -460,6 +460,8 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 
 **静态对照状态**：single/critique 付费对照已由负责人明确取消，相关 outcome/Critic 指标不产生结论；若未来重新启用该实验，必须先冻结指标阈值、PIT manifest、预算与新的预注册协议。当前选择 critique 不得表述为相对 single 已验证更优。
 
+**2026-10-03 最新连接障碍**：Luna稳定会话v6发出9次请求，8次有usage，第9次以1013上游限流关闭；前2条完整判断通过，第3条最终阶段未决，reservation保留。完整联网恢复另被HTX HTTP200业务401 IP白名单拒绝阻断，模型请求0但未到恢复阶段。真实DB副本3条终态各重放2次已证明零模型/零网络与账本不变；连接故障不冒充恢复成功。业务错误解码前的保护与完整证据见 `docs/provider-diagnostics-2026-10-03.md`，缓存实测见 `docs/codex-cache-investigation-2026-10-03.md`。
+
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 
 **未决运行的恢复入口缺口**：bar 修订隔离与模型调用未决 reservation 都会 fail-closed，但仓库当前没有对应的 feature-only 修复/游标确认命令，也没有用 provider usage/billing 证据核销未决 reservation 的审计流程。它们不能由运维直接删标记或盲目重试；启用长期无人值守运行前，需要补齐经核验、幂等且可审计的恢复入口。

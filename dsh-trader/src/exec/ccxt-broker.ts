@@ -130,6 +130,8 @@ export interface CcxtProExchangeLike {
   amountToPrecision?(symbol: string, amount: number): string
   /** ccxt 允许覆盖 fetch 实现；`applyProxyAwareFetch` 需要它（plan §12 #14）。 */
   fetchImplementation?: unknown
+  /** HTX 未知业务错误须在 ccxt 把响应解析成空数组之前拒绝。 */
+  handleErrors?(...args: unknown[]): unknown
   /**
    * ccxt 的私有端点要求凭据挂在实例上，且字段名是 **`apiKey`/`secret`**
    * （ccxt 的 `requiredCredentials` 里写的就是 `secret`；写成 `apiSecret` 会被判为缺失，
@@ -227,6 +229,30 @@ const NOT_SUPPORTED_RE = /not[_ -]?supported|unsupported|has no method|not avail
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const guardedHtxExchanges = new WeakSet<CcxtProExchangeLike>()
+
+function assertHtxBusinessSuccess(response: unknown, operation: string): void {
+  if (!isRecord(response)) return
+  const code = asNumber(response['code'])
+  if ((response['code'] !== undefined && code !== 200) || response['status'] === 'error') {
+    const label = asString(response['code']) ?? (code === undefined ? 'error' : String(code))
+    const detail = asString(response['message']) ?? asString(response['err-msg']) ?? '交易所拒绝请求'
+    throw new Error(`HTX ${operation} rejected (${label}): ${detail}`)
+  }
+}
+
+function guardHtxBusinessErrors(exchange: CcxtProExchangeLike): void {
+  if (exchange.handleErrors === undefined || guardedHtxExchanges.has(exchange)) return
+  const original = exchange.handleErrors
+  exchange.handleErrors = function (...args: unknown[]): unknown {
+    // 先保留 ccxt 已知错误类别；兜住它未识别的 HTTP 200 业务拒绝，避免解码成空仓/空挂单。
+    const result = original.apply(this, args)
+    assertHtxBusinessSuccess(args[6], 'request')
+    return result
+  }
+  guardedHtxExchanges.add(exchange)
 }
 
 function asNumber(value: unknown): number | undefined {
@@ -509,6 +535,7 @@ export class HtxBroker implements Broker {
     // 值只写入 exchange，不打印、不落库、不进 prompt；错误消息经 #safeError 脱敏。
     options.exchange.apiKey = options.apiKey
     options.exchange.secret = options.apiSecret
+    guardHtxBusinessErrors(options.exchange)
     if (options.accountType !== undefined) {
       // ccxt 的 defaultType 在 options 中；构造器顶层同名字段不会改变未传 symbol 的订单端点。
       // 余额显式传 type 仍不足以保证 merged 挂单/保护查询读同一个永续账户。
@@ -529,14 +556,14 @@ export class HtxBroker implements Broker {
   async getAccount(): Promise<AccountSnapshot> {
     const risk = this.#riskState()
     await this.#ensureMarketsLoaded()
-    const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
-    const positions = await this.#call(() => this.#exchange.fetchPositions())
-    // HTX 的保护单在算法端点，普通列表为空并不表示没有挂单；账户计数必须和对账/撤单使用同一合并视图。
-    const openOrders = await this.#fetchOpenOrdersMerged()
+    const balance = await this.#fetchBalance()
     const equity = quoteAmount(balance, this.#quoteCurrency)
     if (equity === undefined) {
       throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
     }
+    const positions = await this.#call(() => this.#exchange.fetchPositions())
+    // HTX 的保护单在算法端点，普通列表为空并不表示没有挂单；账户计数必须和对账/撤单使用同一合并视图。
+    const openOrders = await this.#fetchOpenOrdersMerged()
 
     const readings = positions.map((position) => this.#readPosition(position))
     const totalExposureUsd = this.#exposure(readings)
@@ -570,7 +597,7 @@ export class HtxBroker implements Broker {
    */
   async readOnlyBalance(): Promise<number> {
     await this.#ensureMarketsLoaded()
-    const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
+    const balance = await this.#fetchBalance()
     const equity = quoteAmount(balance, this.#quoteCurrency)
     if (equity === undefined) {
       throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
@@ -1173,6 +1200,13 @@ export class HtxBroker implements Broker {
       this.#marketsLoading = undefined
     }).catch(() => undefined)
     return this.#marketsLoading
+  }
+
+  async #fetchBalance(): Promise<CcxtBalanceLike> {
+    const balance = await this.#call(() => this.#exchange.fetchBalance(this.#balanceParams()))
+    // 实测 HTX HTTP 200 内携带 code=401，ccxt 保留在 info 而未抛错；不能误报余额缺失。
+    try { assertHtxBusinessSuccess(balance.info, 'balance') } catch (error) { throw this.#safeError(error) }
+    return balance
   }
 
   async #call<T>(operation: () => Promise<T>): Promise<T> {

@@ -197,6 +197,79 @@ const orderRequest = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 })
 
 describe('CcxtBroker', () => {
+  it('HTX 解码入口拒绝未知业务401，持仓查询不能将错误变成空数组', async () => {
+    const exchange = new FakeExchange() as FakeExchange & { handleErrors(...args: unknown[]): unknown }
+    let handled = 0
+    exchange.handleErrors = function () { expect(this).toBe(exchange); handled++; return undefined }
+    exchange.fetchPositions = async () => {
+      exchange.handleErrors(200, 'OK', 'https://example.invalid/v5/position', 'GET', {}, '', {
+        code: 401, message: `Incorrect IP address; ${API_KEY}; ${API_SECRET}`,
+      })
+      return []
+    }
+    const broker = makeBroker(exchange)
+    await expect(broker.getPositions()).rejects.toThrow('Incorrect IP address; [REDACTED]; [REDACTED]')
+    expect(handled).toBe(1)
+    expect(exchange.cancelCalls).toHaveLength(0)
+  })
+
+  it('有真实形状的算法保护单时，业务拒绝的持仓查询禁止撤保护，重复构造不重复包装', async () => {
+    const exchange = new FakeExchange() as FakeExchange & { handleErrors(...args: unknown[]): unknown }
+    exchange.handleErrors = () => undefined
+    exchange.algorithmOrders.stopLossTakeProfit = [{ id: 'existing-protection', clientOrderId: 'own-stop',
+      symbol: SYMBOL, status: 'open', type: 'stop', reduceOnly: true, stopPrice: 95 }]
+    const broker = makeBroker(exchange), handler = exchange.handleErrors
+    makeBroker(exchange)
+    expect(exchange.handleErrors).toBe(handler)
+    exchange.fetchPositions = async () => {
+      exchange.handleErrors(200, 'OK', 'https://example.invalid/v5/position', 'GET', {}, '', { code: 401, message: 'Incorrect IP address' })
+      return []
+    }
+    expect(await broker.getOpenOrders(SYMBOL)).toHaveLength(1)
+    await expect(broker.cancelAll(SYMBOL, { includeProtection: true })).rejects.toThrow('Incorrect IP address')
+    expect(exchange.cancelCalls).toHaveLength(0)
+  })
+
+  it('HTX 响应守卫保留原解码器的 this、返回值与错误类型，并接受200和无code响应', () => {
+    const exchange = new FakeExchange() as FakeExchange & { handleErrors(...args: unknown[]): unknown }
+    const known = new TypeError('known decoder failure')
+    exchange.handleErrors = function (...args) { expect(this).toBe(exchange); if (args[6] === 'known') throw known; return 42 }
+    makeBroker(exchange)
+    for (const response of [{ code: 200, data: [] }, { code: '200' }, { status: 'ok', data: [] }, []]) {
+      expect(exchange.handleErrors(200, 'OK', '', 'GET', {}, '', response)).toBe(42)
+    }
+    try { exchange.handleErrors(200, 'OK', '', 'GET', {}, '', 'known'); throw Error('expected decoder error') }
+    catch (error) { expect(error).toBe(known) }
+  })
+
+  it.each(['readOnlyBalance', 'getAccount'] as const)('%s 保留 HTX HTTP 200 中的业务拒绝，脱敏且不继续查询账户', async (method) => {
+    const exchange = new FakeExchange()
+    exchange.balance = { total: { USDT: '10000' }, info: { code: 401, message: 'Incorrect IP address [IP地址错误]; apiKey=api-key; secret=api-secret' } }
+    const broker = makeBroker(exchange, { apiKey: 'api-key', apiSecret: 'api-secret' })
+    await expect(broker[method]()).rejects.toThrow('HTX balance rejected (401): Incorrect IP address [IP地址错误]; apiKey=[REDACTED]; secret=[REDACTED]')
+    expect(exchange.balanceParams).toHaveLength(1)
+    expect(exchange.positionsReadCount).toBe(0)
+    expect(exchange.fetchOpenOrdersCalls).toHaveLength(0)
+    expect(exchange.createCalls).toHaveLength(0)
+  })
+
+  it.each([0, 'unknown'])('余额带无法证明成功的业务 code=%s 时拒绝，即使伪装有数值余额', async (code) => {
+    const exchange = new FakeExchange()
+    exchange.balance = { total: { USDT: '10000' }, info: { code, message: 'unconfirmed status' } }
+    await expect(makeBroker(exchange).readOnlyBalance()).rejects.toThrow('HTX balance rejected')
+    expect(exchange.balanceParams).toHaveLength(1)
+    expect(exchange.createCalls).toHaveLength(0)
+  })
+
+  it('HTX 成功余额与旧版 status:error 明确区分', async () => {
+    const exchange = new FakeExchange()
+    const broker = makeBroker(exchange)
+    exchange.balance = { total: { USDT: '100' }, info: { code: 200, message: 'Success' } }
+    await expect(broker.readOnlyBalance()).resolves.toBe(100)
+    exchange.balance = { info: { status: 'error', 'err-msg': 'api-signature-not-valid' } }
+    await expect(broker.readOnlyBalance()).rejects.toThrow('api-signature-not-valid')
+  })
+
   it.each(['market', 'limit'] as const)('带风险保护意图的 %s 主单仍提交普通单，不被 HTX 标量触发参数改路由', async (type) => {
     const exchange = new FakeExchange()
     const broker = makeBroker(exchange, { fillPollAttempts: 0 })

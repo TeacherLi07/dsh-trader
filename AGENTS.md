@@ -133,6 +133,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |
 | HTX 市价单部分/延迟成交 | `filledQty` 是累计张数，`acked/partial` 可能已产生真实仓位；只看终态会漏量/漏保护；持仓快照也可能暂时少于累计成交 | `CcxtBroker` 把张数换回基础币；快照不足时按真实累计 fill 推导保护覆盖量、冻结标的，保护失败则 reduce-only 平仓；缺量/均价保持 unknown |
 | HTX 算法保护单（sl/tp）三件套 | ① 必须带 `position_side`（否则 code 1067，保护单永远挂不上）；② 不在普通 `fetchOpenOrders` 里，撤单也要 `stopLossTakeProfit`/`trigger`/`trailing` 标志；③ 当前接口采用 15 位数字 client id，历史非数字 id 测试的未采用结论不适用 | `positionSide`（默认 both）+ `#fetchOpenOrdersMerged()`；默认 `cancelAll` 保留保护单，只有远端确认空仓后才可显式撤；本地 stop intent 不证明远端仍有保护 |
+| HTX HTTP200内业务拒绝 | 未识别的code401被ccxt留为info或解析为空列表；不能证明空仓 | 在handleErrors解码前拒绝未知业务错误，余额另验info；见 `docs/provider-diagnostics-2026-10-03.md` |
 | ccxt defaultType 实际在 options 中 | 只把 defaultType 放构造器顶层，余额显式 type 虽读 swap，不传 symbol 的挂单查询仍读现货；真实端点日志已复现 | HtxBroker 回填 exchange.options.defaultType；普通/算法 merged 和余额保持同账户 |
 | 当前 HTX v5 的数字 client id 与 TPSL | 当前接口采用 15 位数字普通/算法 client id；sl/tp 回报缺 reduce_only，不能把任意 trigger 当 close-only | 原生 algo_id/contract_code/type/position_side/volume/触发价共同证明 TPSL；stop 还需正确方向、足量与有效状态；详见 `docs/r6-real-broker-2026-10-03.md` |
 | HTX 主单不能带标量保护参数 | ccxt 的 stopLossPrice/takeProfitPrice/trailingPercent 会将普通开仓发到 v5/algo/order，真实生产链曾报 code 1067 | 主单只传普通字段；成交后独立挂保护并核验。不能靠添加 position_side 掩盖错误路由 |

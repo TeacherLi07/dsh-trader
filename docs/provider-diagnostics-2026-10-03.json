@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-03T13:26:56.217942+00:00",
+  "fixes": [
+    {
+      "component": "Sub2API Responses WS",
+      "observed": {
+        "code": 1013,
+        "reason": "upstream rate limit exceeded, please retry later"
+      },
+      "changed": "Preserve redacted close code/reason in finish failure; keep OUTCOME_UNKNOWN and no resubmission",
+      "regression": "Nonempty loopback request closed with1013 and echoed dummy credential; one request/one handshake, no usage or fallback"
+    },
+    {
+      "component": "HTX balance",
+      "observed": {
+        "httpStatus": 200,
+        "businessCode": 401,
+        "message": "Incorrect IP address [IP地址错误]"
+      },
+      "changed": "Reject unknown business responses in actual CCXT handleErrors before decoding any private reply as empty positions/orders; keep existing known error classification and redact in broker. Balance info validation remains a fallback for injected exchanges.",
+      "regression": "Nonempty protective order fixture cannot be cancelled when position query rejects. Actual ccxt signing/decoder with HTTP200/code401 fixed network fixture rejects readOnlyBalance/getPositions. Repeated broker construction wraps once."
+    }
+  ],
+  "verification": {
+    "command": "pnpm verify",
+    "files": 78,
+    "tests": 878,
+    "passed": true,
+    "actualCcxtDecoderFixture": {
+      "files": 1,
+      "tests": 2,
+      "networkImplementation": "fixed HTTP200/code401 body, no outbound network",
+      "privateQueryCounts": {
+        "readOnlyBalance": 1,
+        "getPositionsWithParallelOpenOrders": 2
+      }
+    }
+  },
+  "networkFailureTrace": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/http.jsonl",
+  "networkFailureTraceSha256": "7688767f2386aabd46467df1ace8dc46064ac45e8bbe17aa07486b5e9b2f2bcb",
+  "wsFailureTrace": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/ws.jsonl",
+  "wsFailureTraceSha256": "e4cfb408cd93747261b9b7f55464bd08768bcd5cd6fbc21dfed19f4348043128",
+  "postFixActualNetworkAcceptance": "not run while endpoint rate/IP rejection unresolved",
+  "defaultMode": "paper",
+  "realOrdersInThisValidation": 0
+}
