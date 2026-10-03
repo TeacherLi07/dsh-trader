@@ -24,7 +24,7 @@ print(json.dumps({'provider':name,'baseURL':p.get('base_url'),'wireApi':p.get('w
 
 export function lunaProviderConfig(gateway, maxTokens) {
   assert.ok(Number.isSafeInteger(maxTokens) && maxTokens > 0 && maxTokens <= 128_000)
-  return { enabled: true, baseURL: gateway.baseURL, apiKeyEnv: gateway.apiKeyEnv, connectTimeoutMs: 20_000,
+  return { enabled: true, strictTools: true, baseURL: gateway.baseURL, apiKeyEnv: gateway.apiKeyEnv, connectTimeoutMs: 20_000,
     models: [{ id: gateway.model, wireModelId: gateway.wireModelId, name: 'GPT-6 Luna (Sub2API)',
       contextWindow: 1_050_000, maxTokens, reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       defaultReasoningEffort: gateway.reasoningEffort }] }

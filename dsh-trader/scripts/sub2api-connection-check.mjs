@@ -8,6 +8,9 @@ import LlmRuntime, { createAssistantMessage, createToolResultMessage } from '@de
 import CredentialsLocal from '@deepseek-ai/dsh-credentials-local'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { estimateCost, lunaGatewayReferencePrice } from '../lib/cost.js'
+import { randomUUID } from 'node:crypto'
+import { DECISION_ENVELOPE_TOOL, parseDecisionEnvelopeCandidate } from '../lib/agents/decision-envelope.js'
+import { freezeDecisionContext } from '../lib/agents/decision-context.js'
 import { readLunaGatewayConfig, lunaProviderConfig, traceResponsesWs } from './model-connection-config.mjs'
 import * as WsProvider from '../lib/plugins/sub2api-responses-ws.js'
 
@@ -18,12 +21,16 @@ const reportPath = join(output, 'report.json')
 assert.ok(!existsSync(reportPath), 'refuse to overwrite evidence')
 const home = process.env.DSH_HOME ?? '/home/ubuntu/.dsh'
 const configured = readLunaGatewayConfig(process.argv[3])
+const completeSchema = process.argv.includes('--complete-schema')
+const sessionId = randomUUID()
+const submissionTool = completeSchema ? DECISION_ENVELOPE_TOOL : { name: 'submit_connection_result', description: 'Return connection status only; no side effects.',
+  parameters: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', enum: ['OK'] } }, required: ['status'] } }
 const price = lunaGatewayReferencePrice(Date.now())
 const report = { startedAt: Date.now(), provider: WsProvider.SUB2API_RESPONSES_WS_PROVIDER,
   model: configured.model, endpoint: configured.baseURL, sourceConfig: configured.sourceConfig,
   maxTokens: 8192, reasoningEffort: configured.reasoningEffort,
   referencePrice: price, costKnown: false, gatewayPriceVerified: false, realExchangeOrdersSubmitted: 0,
-  submittedRequests: 0, chunks: [], rounds: [], passed: false }
+  strictTools: true, completeSchema, syntheticContractProbe: completeSchema, sessionId, submittedRequests: 0, chunks: [], rounds: [], passed: false }
 let key
 const redact = (value) => {
   let text = JSON.stringify(value)
@@ -37,6 +44,10 @@ const restoreWs = await traceResponsesWs(log, (event) => {
   assert.equal(event.model, configured.wireModelId)
   assert.equal(event.reasoning?.effort, 'max', 'reasoning effort must reach wire unchanged')
   assert.equal(event.temperature, undefined, 'reasoning model sampling compatibility')
+  assert.equal(event.prompt_cache_key, sessionId)
+  assert.equal(event.client_metadata?.session_id, sessionId)
+  assert.equal(event.client_metadata?.thread_id, sessionId)
+  if (event.tools?.length) assert.equal(event.tools[0].strict, true)
 })
 const ctx = new Context()
 let llmFiber, credentialsFiber, providerFiber
@@ -51,27 +62,36 @@ try {
   const models = await ctx.llm.listModels(report.provider)
   assert.ok(models.some((model) => model.id === report.model), 'WS route model registration required')
   for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
-    maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
-    system: 'Use the submit_connection_result tool exactly once with status OK. No other output.',
+    sessionId, maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
+    system: completeSchema
+      ? 'Use submit_decision_envelope exactly once for a schema contract probe. Outcome no_trade, nonempty thesis, empty claims/rejectedAlternatives/uncertainties, confidence 0.5, riskFraction 0.1. No plan or trade action is needed; optional fields may be null. This probe has no execution tools.'
+      : 'Use the submit_connection_result tool exactly once with status OK. No other output.',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm this WebSocket Responses connection.' }] }],
-    tools: [{ name: 'submit_connection_result', description: 'Return connection status only; no side effects.',
-      parameters: { type: 'object', additionalProperties: false,
-        properties: { status: { type: 'string', enum: ['OK'] } }, required: ['status'] } }],
+    tools: [submissionTool],
   })) { report.chunks.push(chunk); log('chunk', chunk) }
   const tool = report.chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
   assert.ok(tool, 'nonempty structured tool output required')
-  assert.equal(JSON.parse(tool.block.arguments).status, 'OK')
+  if (completeSchema) {
+    const asOf = Date.now()
+    const sections = Object.fromEntries(['mandate','market','derivatives','benchmark','portfolio','activePlan','history','lessons','predictions']
+      .map(name => [name, { asOf, source: 'synthetic provider contract probe; no trading evidence', missing: [], value: {} }]))
+    const context = freezeDecisionContext({ symbol: 'ADA/USDT:USDT', primaryTimeframe: '1h', asOf, sections })
+    const parsed = parseDecisionEnvelopeCandidate(JSON.parse(tool.block.arguments), context)
+    assert.ok(parsed.ok, 'full original DecisionEnvelope validator must accept the provider contract result')
+    assert.equal(parsed.candidate.outcome, 'no_trade')
+    report.contractValidated = true
+  } else assert.equal(JSON.parse(tool.block.arguments).status, 'OK')
   const usage = report.chunks.find((chunk) => chunk.type === 'usage')?.usage
   assert.ok(usage && usage.totalTokens > 0, 'nonempty authoritative usage required')
   report.rounds.push({ kind: 'tool', usage })
   const history = createAssistantMessage({ content: [tool.block], source: { provider: report.provider, model: report.model } })
   const followup = []
   for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
-    maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
+    sessionId, maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
     system: 'After receiving the connection tool result, reply CONNECTION_OK exactly.',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm the connection via the status tool.' }] },
       history, createToolResultMessage({ callId: tool.block.id, isError: false,
-        content: [{ type: 'text', text: '{"status":"OK"}' }] })],
+        content: [{ type: 'text', text: completeSchema ? '{"validation":"OK","outcome":"no_trade"}' : '{"status":"OK"}' }] })],
   })) { followup.push(chunk); log('followup.chunk', chunk) }
   const followupUsage = followup.find((chunk) => chunk.type === 'usage')?.usage
   assert.ok(followupUsage?.totalTokens > 0, 'nonempty multi-turn terminal usage required')

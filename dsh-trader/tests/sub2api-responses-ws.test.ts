@@ -14,6 +14,8 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { DEEPSEEK_PRICE_SEED, selectPrice } from '../src/cost.js'
+import { ACTION_KINDS } from '../src/plan/schema.js'
+import { DECISION_ENVELOPE_TOOL } from '../src/agents/decision-envelope.js'
 import type { ResponseStreamEvent } from 'openai/resources/responses/responses'
 import {
   SUB2API_RESPONSES_WS_PROVIDER,
@@ -105,12 +107,14 @@ function adapter(
   modelId = MODEL_ALIAS,
   wireModelId = WIRE_MODEL_ID,
   effort: ResponsesReasoningEffort = 'high',
+  strictTools = false,
 ): Sub2ApiResponsesWebSocketAdapter {
   const config: Sub2ApiResponsesWsConfig = {
     enabled: true,
     baseURL,
     apiKeyEnv: 'SUB2API_KEY',
     connectTimeoutMs: 3_000,
+    strictTools,
     models: [{
       id: modelId,
       wireModelId,
@@ -181,10 +185,14 @@ async function startGateway(
   return gateway
 }
 
-function sendResponseCompleted(socket: WebSocket): void {
+function sendResponseCompleted(
+  socket: WebSocket,
+  argumentsJson = '{"outcome":"no_trade"}',
+  toolName = 'submit_decision_envelope',
+): void {
   const outputItem = {
     id: 'fc_item_1', type: 'function_call', status: 'completed', call_id: 'call_1',
-    name: 'submit_decision_envelope', arguments: '{"outcome":"no_trade"}',
+    name: toolName, arguments: argumentsJson,
   }
   const events: ResponseStreamEvent[] = [
     {
@@ -192,12 +200,11 @@ function sendResponseCompleted(socket: WebSocket): void {
       response: { id: 'resp_1', object: 'response', created_at: 1, status: 'in_progress', model: WIRE_MODEL_ID, output: [] },
     } as unknown as ResponseStreamEvent,
     { type: 'response.output_item.added', sequence_number: 1, output_index: 0, item: { ...outputItem, arguments: '' } } as unknown as ResponseStreamEvent,
-    { type: 'response.function_call_arguments.delta', sequence_number: 2, output_index: 0, item_id: 'fc_item_1', delta: '{"outcome":' } as unknown as ResponseStreamEvent,
-    { type: 'response.function_call_arguments.delta', sequence_number: 3, output_index: 0, item_id: 'fc_item_1', delta: '"no_trade"}' } as unknown as ResponseStreamEvent,
-    { type: 'response.function_call_arguments.done', sequence_number: 4, output_index: 0, item_id: 'fc_item_1', arguments: '{"outcome":"no_trade"}' } as unknown as ResponseStreamEvent,
-    { type: 'response.output_item.done', sequence_number: 5, output_index: 0, item: outputItem } as unknown as ResponseStreamEvent,
+    { type: 'response.function_call_arguments.delta', sequence_number: 2, output_index: 0, item_id: 'fc_item_1', delta: argumentsJson } as unknown as ResponseStreamEvent,
+    { type: 'response.function_call_arguments.done', sequence_number: 3, output_index: 0, item_id: 'fc_item_1', arguments: argumentsJson } as unknown as ResponseStreamEvent,
+    { type: 'response.output_item.done', sequence_number: 4, output_index: 0, item: outputItem } as unknown as ResponseStreamEvent,
     {
-      type: 'response.completed', sequence_number: 6,
+      type: 'response.completed', sequence_number: 5,
       response: {
         id: 'resp_1', object: 'response', created_at: 1, status: 'completed', model: WIRE_MODEL_ID,
         output: [outputItem],
@@ -301,6 +308,134 @@ describe('Sub2API Responses WebSocket provider', () => {
     expect(model.providerRetryPolicy(SUB2API_RESPONSES_WS_PROVIDER)).toMatchObject({ mode: 'normal', maxRetries: 0 })
   })
 
+  it('strictifies the complete DecisionEnvelope schema and restores only synthetic optional nulls', async () => {
+    const responseArguments = JSON.stringify({
+      outcome: 'act',
+      thesis: 'A non-empty model thesis.',
+      rejectedAlternatives: [],
+      claims: [],
+      uncertainties: [],
+      confidence: 0.7,
+      riskFraction: 0.02,
+      immediateAction: {
+        action: 'open',
+        side: 'long',
+        method: 'market',
+        limitOffsetBps: null,
+        stop: { method: 'atr', k: 1.5 },
+        target: null,
+      },
+      plan: null,
+      critiqueResponses: null,
+    })
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket, responseArguments))
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL, undefined, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true).stream(
+      requestOptions({ tools: [DECISION_ENVELOPE_TOOL] }),
+    )) chunks.push(chunk)
+
+    const request = gateway.requests[0] as { tools: Array<Record<string, unknown>> }
+    const functionTool = request.tools[0]!
+    expect(functionTool['strict']).toBe(true)
+    const parameters = functionTool['parameters'] as Record<string, unknown>
+    const properties = parameters['properties'] as Record<string, unknown>
+    expect(parameters['additionalProperties']).toBe(false)
+    expect(parameters['required']).toEqual(Object.keys(DECISION_ENVELOPE_TOOL.parameters.properties))
+
+    const actionOptional = properties['immediateAction'] as Record<string, unknown>
+    const actionUnion = (actionOptional['anyOf'] as Record<string, unknown>[]).find((schema) => Array.isArray(schema['anyOf']))!
+    const actionVariants = actionUnion['anyOf'] as Record<string, unknown>[]
+    const actionValues = actionVariants
+      .map((schema) => ((schema['properties'] as Record<string, unknown>)['action'] as Record<string, unknown>)['const'])
+      .sort()
+    expect(actionValues).toEqual([...ACTION_KINDS].sort())
+
+    const openAction = actionVariants.find((schema) =>
+      ((schema['properties'] as Record<string, unknown>)['action'] as Record<string, unknown>)['const'] === 'open')!
+    const openProperties = openAction['properties'] as Record<string, unknown>
+    expect(openAction['required']).toEqual(Object.keys(openProperties))
+    expect(openProperties['limitOffsetBps']).toMatchObject({ anyOf: [{ type: 'number', minimum: 0 }, { type: 'null' }] })
+    expect(openProperties['target']).toMatchObject({ anyOf: [{ type: 'object' }, { type: 'null' }] })
+    const stopSchema = openProperties['stop'] as Record<string, unknown>
+    expect((stopSchema['anyOf'] as Record<string, unknown>[]).map((schema) =>
+      ((schema['properties'] as Record<string, unknown>)['method'] as Record<string, unknown>)['const']).sort())
+      .toEqual(['atr', 'structure'])
+
+    const planOptional = properties['plan'] as Record<string, unknown>
+    const planSchema = (planOptional['anyOf'] as Record<string, unknown>[]).find((schema) => schema['type'] === 'object')!
+    const planProperties = planSchema['properties'] as Record<string, unknown>
+    const forbidden = planProperties['forbidden'] as Record<string, unknown>
+    expect(forbidden['uniqueItems']).toBe(true)
+    expect(((forbidden['items'] as Record<string, unknown>)['enum'] as unknown[]).sort()).toEqual([...ACTION_KINDS].sort())
+
+    const toolEnd = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+    if (toolEnd?.type !== 'block-end' || toolEnd.block.type !== 'tool-call') throw new Error('expected final tool-call block')
+    const restored = JSON.parse(toolEnd.block.arguments) as Record<string, unknown>
+    expect(restored).not.toHaveProperty('plan')
+    expect(restored).not.toHaveProperty('critiqueResponses')
+    const restoredAction = restored['immediateAction'] as Record<string, unknown>
+    expect(restoredAction).not.toHaveProperty('target')
+    expect(restoredAction).not.toHaveProperty('limitOffsetBps')
+    expect(restoredAction['stop']).toEqual({ method: 'atr', k: 1.5 })
+  })
+
+  it('retains required nulls and unknown fields, and refuses ambiguous strict unions without fallback', async () => {
+    const invalidArguments = JSON.stringify({
+      outcome: null,
+      thesis: 'Still preserved so the workflow validator can reject it.',
+      rejectedAlternatives: [],
+      claims: [],
+      uncertainties: [],
+      confidence: 0.5,
+      riskFraction: 0.01,
+      immediateAction: {
+        action: 'open', side: 'long', method: 'market', stop: null,
+        limitOffsetBps: null, target: null,
+      },
+      unexpected: null,
+    })
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket, invalidArguments))
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL, undefined, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true).stream(
+      requestOptions({ tools: [DECISION_ENVELOPE_TOOL] }),
+    )) chunks.push(chunk)
+    const toolEnd = chunks.find((chunk) => chunk.type === 'block-end' && chunk.block.type === 'tool-call')
+    if (toolEnd?.type !== 'block-end' || toolEnd.block.type !== 'tool-call') throw new Error('expected final tool-call block')
+    const preserved = JSON.parse(toolEnd.block.arguments) as Record<string, unknown>
+    expect(preserved['outcome']).toBeNull()
+    expect(preserved['unexpected']).toBeNull()
+    const preservedAction = preserved['immediateAction'] as Record<string, unknown>
+    expect(preservedAction['stop']).toBeNull()
+    expect(preservedAction).not.toHaveProperty('target')
+    expect(preservedAction).not.toHaveProperty('limitOffsetBps')
+
+    const invalidUnion = {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        choice: {
+          oneOf: [
+            { type: 'object', additionalProperties: false, properties: { left: { type: 'string' } }, required: ['left'] },
+            { type: 'object', additionalProperties: false, properties: { right: { type: 'string' } }, required: ['right'] },
+          ],
+        },
+      },
+      required: ['choice'],
+    }
+    const unsupportedGateway = await startGateway((socket) => sendResponseCompleted(socket))
+    let credentialReads = 0
+    const model = adapter(unsupportedGateway.baseURL, () => { credentialReads += 1 }, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true)
+    const unsupported = requestOptions({ tools: [{ name: 'ambiguous', description: 'ambiguous union', parameters: invalidUnion }] })
+    await expect(async () => {
+      for await (const _chunk of model.stream(unsupported)) { /* 等待 adapter 在提交前拒绝 schema。 */ }
+    }).rejects.toThrow(/provably disjoint/)
+    expect(model.providerRetryPolicy(SUB2API_RESPONSES_WS_PROVIDER)).toMatchObject({ maxRetries: 0 })
+    expect(credentialReads).toBe(0)
+    expect(unsupportedGateway.handshakes()).toBe(0)
+    expect(unsupportedGateway.requests).toEqual([])
+    expect(unsupportedGateway.httpFallbacks).toEqual([])
+  })
+
   it.each(['none', 'xhigh', 'max'] as const)('preserves %s reasoning effort on the wire and filters sampling', async (effort) => {
     const modelAlias = 'sub2api:gpt-6-luna'
     const gateway = await startGateway((socket) => sendTextResponse(socket, {
@@ -345,13 +480,14 @@ describe('Sub2API Responses WebSocket provider', () => {
     const gateway = await startGateway((socket, _request, payload) => {
       if (payload.type === 'response.create') socket.close(1011, 'upstream interrupted')
     })
-    const model = adapter(gateway.baseURL)
+    const model = adapter(gateway.baseURL, undefined, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true)
     const chunks: StreamChunk[] = []
-    for await (const chunk of model.stream(requestOptions())) chunks.push(chunk)
+    for await (const chunk of model.stream(requestOptions({ tools: [DECISION_ENVELOPE_TOOL] }))) chunks.push(chunk)
 
     expect(gateway.requests).toHaveLength(1)
     expect(gateway.handshakes()).toBe(1)
     expect(gateway.httpFallbacks).toEqual([])
+    expect((gateway.requests[0] as { tools: Array<Record<string, unknown>> }).tools[0]?.['strict']).toBe(true)
     expect(chunks.at(-1)).toMatchObject({
       type: 'finish',
       reason: { kind: 'error', failure: { code: 'OUTCOME_UNKNOWN' } },

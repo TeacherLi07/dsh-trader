@@ -24,7 +24,7 @@ describe('真实连接配置按本轮授权固定来源', () => {
     const result = readFixture()
     expect(result).toMatchObject({ config: { baseURL: 'https://ai.teacherli.net/', apiKeyEnv: 'SUB2API_KEY',
       model: 'sub2api:gpt-6-luna', wireModelId: 'gpt-6-luna', reasoningEffort: 'max' },
-      provider: { models: [{ defaultReasoningEffort: 'max', contextWindow: 1_050_000, maxTokens: 32768 }] } })
+      provider: { strictTools: true, models: [{ defaultReasoningEffort: 'max', contextWindow: 1_050_000, maxTokens: 32768 }] } })
     expect(JSON.stringify(result)).not.toContain('FAKE_SECRET')
     expect(JSON.stringify(result)).not.toContain('irrelevant-default')
   })

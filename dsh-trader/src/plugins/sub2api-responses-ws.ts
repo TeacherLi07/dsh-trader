@@ -2,6 +2,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { codexClientIdentity, DEFAULT_CODEX_VERSION } from './codex-client-identity.js'
+import { restoreOptionalNulls, strictResponsesTools, type JsonSchemaObject } from './responses-strict-tools.js'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import {
   LlmAdapter,
@@ -71,6 +72,7 @@ export interface Sub2ApiResponsesWsConfig {
   readonly apiKeyEnv: string
   readonly connectTimeoutMs: number
   readonly codexVersion?: string
+  readonly strictTools?: boolean
   readonly models: readonly Sub2ApiWsModelConfig[]
 }
 
@@ -90,6 +92,7 @@ export const Config = z.object({
   apiKeyEnv: z.string().default('SUB2API_KEY'),
   connectTimeoutMs: z.number().default(10_000),
   codexVersion: z.string().default(DEFAULT_CODEX_VERSION),
+  strictTools: z.boolean().default(false),
   models: z.array(modelSchema).default([]),
 })
 
@@ -350,7 +353,11 @@ function redactSecret(message: string, secret: string): string {
 
 function chunksFromPiEvent(
   event: AssistantMessageEvent,
-  input: { readonly authoritativeUsage?: TokenUsage; readonly failureCode: string },
+  input: {
+    readonly authoritativeUsage?: TokenUsage
+    readonly failureCode: string
+    readonly strictToolSchemas?: ReadonlyMap<string, JsonSchemaObject>
+  },
 ): readonly StreamChunk[] {
   switch (event.type) {
     case 'start':
@@ -382,14 +389,19 @@ function chunksFromPiEvent(
         ...(partial.name === '' ? {} : { name: partial.name }), argumentsDelta: event.delta,
       }]
     }
-    case 'toolcall_end':
+    case 'toolcall_end': {
+      const originalSchema = input.strictToolSchemas?.get(event.toolCall.name)
+      const argumentsValue = originalSchema === undefined
+        ? event.toolCall.arguments
+        : restoreOptionalNulls(event.toolCall.arguments, originalSchema)
       return [{
         type: 'block-end', index: event.contentIndex,
         block: {
           type: 'tool-call', id: ToolCallId(event.toolCall.id), name: event.toolCall.name,
-          arguments: JSON.stringify(event.toolCall.arguments ?? {}),
+          arguments: JSON.stringify(argumentsValue ?? {}),
         },
       }]
+    }
     case 'done':
       if (event.reason === 'deferred') throw new LlmError('Sub2API Responses deferred output is unsupported', 'UNSUPPORTED_RESPONSE')
       return [
@@ -418,11 +430,16 @@ function makeResponseCreateEvent(
   configuredModel: ResolvedSub2ApiWsModel,
   model: PiAiModel<'openai-responses'>,
   identity: ReturnType<typeof codexClientIdentity>,
+  strictTools: boolean,
 ): ResponsesClientEvent {
   const context = toPiAiContext(options)
   // 与 DSH ChatGPT OAuth route 一致：系统指令写入 Responses.instructions，输入转换跳过同一份系统提示。
   const input = convertResponsesMessages(model, context, new Set(['openai']), { includeSystemPrompt: false })
-  const tools = context.tools === undefined ? [] : convertResponsesTools(context.tools, { supportsStrictMode: false })
+  const tools = context.tools === undefined
+    ? []
+    : strictTools
+      ? strictResponsesTools(context.tools)
+      : convertResponsesTools(context.tools, { supportsStrictMode: false })
   const effort = options.reasoningEffort?.toString() ?? configuredModel.defaultReasoningEffort
   if (effort !== undefined && !configuredModel.reasoningEfforts.includes(effort as ResponsesReasoningEffort)) {
     throw new LlmError(`Sub2API model does not support requested reasoning effort ${effort}`, 'UNSUPPORTED_REASONING_EFFORT')
@@ -452,6 +469,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
   readonly #apiKeyEnv: string
   readonly #connectTimeoutMs: number
   readonly #codexVersion: string
+  readonly #strictTools: boolean
   readonly #models: ReadonlyMap<string, ResolvedSub2ApiWsModel>
   readonly #resolveApiKey: ProviderDependencies['resolveApiKey']
   readonly #now: ProviderDependencies['now']
@@ -464,6 +482,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     this.#connectTimeoutMs = config.connectTimeoutMs
     this.#codexVersion = config.codexVersion ?? DEFAULT_CODEX_VERSION
     codexClientIdentity('config-validation', this.#codexVersion)
+    this.#strictTools = config.strictTools ?? false
     this.#models = validateModels(config.models)
     this.#resolveApiKey = dependencies.resolveApiKey
     this.#now = dependencies.now
@@ -515,10 +534,14 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     if (configuredModel === undefined) throw new LlmError(`Sub2API WebSocket model is not configured: ${options.model}`, 'UNKNOWN_MODEL')
 
     const identity = codexClientIdentity(options.sessionId?.toString(), this.#codexVersion)
+    const model = piModel(configuredModel, this.#baseURL)
+    const request = makeResponseCreateEvent(options, configuredModel, model, identity, this.#strictTools)
+    const strictToolSchemas = this.#strictTools && options.tools !== undefined
+      ? new Map(options.tools.map((tool) => [tool.name, tool.parameters as JsonSchemaObject]))
+      : undefined
     const resolved = await this.#resolveApiKey()
     if (resolved === undefined) throw new LlmError(`Sub2API credential reference is not configured: ${this.#apiKeyEnv}`, 'MISSING_CREDENTIAL')
     const apiKey = assertUsableApiKey(resolved, name, this.#apiKeyEnv)
-    const model = piModel(configuredModel, this.#baseURL)
     const client = new OpenAI({ apiKey, baseURL: this.#baseURL, maxRetries: 0, defaultHeaders: identity.headers })
     const proxyAgent = websocketProxyAgent(this.#baseURL)
     // DSH 会复用全局 SDK；其目录可能没有 @types/ws。用本包的 ClientOptions 保留握手参数校验。
@@ -587,7 +610,6 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     try {
       await waitForSocketOpen(socketIterator, socket, this.#connectTimeoutMs, options.signal)
       if (options.signal?.aborted) throw new LlmError('Sub2API WebSocket request aborted before response.create', 'ABORTED')
-      const request = makeResponseCreateEvent(options, configuredModel, model, identity)
       requestSent = true
       socket.send(request)
       abortListener = () => socket.close({ code: 1000, reason: 'caller-aborted' })
@@ -614,7 +636,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
         })
 
       for await (const event of assistantEvents) {
-        for (const chunk of chunksFromPiEvent(event, { authoritativeUsage, failureCode })) yield chunk
+        for (const chunk of chunksFromPiEvent(event, { authoritativeUsage, failureCode, strictToolSchemas })) yield chunk
       }
       await processing
     } finally {
