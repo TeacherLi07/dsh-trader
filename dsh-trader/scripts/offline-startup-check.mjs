@@ -17,6 +17,8 @@ const moduleUrl = (path) => JSON.stringify(pathToFileURL(join(root, path)).href)
 try {
   mkdirSync(profile, { recursive: true })
   symlinkSync(join(root, 'node_modules'), join(temporary, 'profiles/node_modules'), 'dir')
+  mkdirSync(join(profile, 'node_modules'), { recursive: true })
+  symlinkSync(root, join(profile, 'node_modules/dsh-trader'), 'dir')
   writeFileSync(join(profile, 'package.json'), JSON.stringify({
     name: 'dsh-offline-startup', private: true,
     dsh: { profile: { bundles: [], patchReload: 'startup' } },
@@ -39,7 +41,7 @@ import { writeFileSync } from 'node:fs'
 import { getExecPorts } from ${moduleUrl('lib/plugins/exec.js')}
 import { getDatabase } from ${moduleUrl('lib/db/runtime.js')}
 import { HeartbeatStore } from ${moduleUrl('lib/supervisor/heartbeat.js')}
-export const inject = ['commands', 'appExit']
+export const inject = ['commands', 'appExit', 'llm']
 export function apply(ctx) {
   ctx.effect(() => {
     let attempts = 0
@@ -65,10 +67,12 @@ export function apply(ctx) {
         assert.ok(account.equityQuote > 0)
         const calls = getDatabase().prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind IN ('model_call_reserved', 'model_call_accounted', 'model_call_unresolved')").get().n
         assert.equal(calls, 0)
+        const providerModels = await ctx.llm.listModels('sub2api-openai-ws')
+        assert.ok(providerModels.some(model => model.id === 'sub2api:offline-luna'), 'nonempty provider catalog from package plugin required')
         assert.equal(globalThis.offlineNetworkAttempts, 0)
         writeFileSync(${JSON.stringify(reportPath)}, JSON.stringify({
           status: 'passed', broker: ports.broker.venue, commands, halt, resume,
-          equityQuote: account.equityQuote, modelCalls: calls, networkAttempts: globalThis.offlineNetworkAttempts,
+          equityQuote: account.equityQuote, modelCalls: calls, providerModels: providerModels.map(model => model.id), networkAttempts: globalThis.offlineNetworkAttempts,
         }))
         ctx.appExit(0)
       } catch (error) {
@@ -80,11 +84,28 @@ export function apply(ctx) {
   }, 'offline.startup.check')
 }
 `)
-  // 最小树仅挂载本次改变的生产插件及所需服务，避开任何行情/模型 provider adapter。
+  // WS 仅注册目录，不调用模型；通过真正的包子路径加载，避免相对 lib 导入掩盖缺失 exports。
   writeFileSync(join(profile, 'cordis.patch.yml'), `
 - insert:
     - { id: commands, name: '@deepseek-ai/dsh-commands' }
     - { id: llm, name: '@deepseek-ai/dsh-llm' }
+    - id: offline-credentials-local
+      name: '@deepseek-ai/dsh-credentials-local'
+      config: { dshHome: ${JSON.stringify(temporary)}, watch: false }
+    - id: llm-sub2api-responses-ws
+      name: dsh-trader/plugins/sub2api-responses-ws
+      config:
+        enabled: true
+        baseURL: http://127.0.0.1:1
+        apiKeyEnv: OFFLINE_NO_KEY
+        models:
+          - id: sub2api:offline-luna
+            wireModelId: offline-luna
+            name: Offline Luna catalog
+            contextWindow: 1050000
+            maxTokens: 32768
+            reasoningEfforts: [none, max]
+            defaultReasoningEffort: max
     - id: trade-db
       name: ${JSON.stringify(join(root, 'lib/plugins/db.js'))}
       config: { path: ${JSON.stringify(join(temporary, 'desk.db'))} }

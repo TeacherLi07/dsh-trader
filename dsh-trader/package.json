@@ -20,7 +20,8 @@
     "./plugins/predictions": "./lib/plugins/predictions.js",
     "./plugins/commands": "./lib/plugins/commands.js",
     "./plugins/probe": "./lib/plugins/probe.js",
-    "./plugins/ui": "./lib/plugins/ui.js"
+    "./plugins/ui": "./lib/plugins/ui.js",
+    "./plugins/sub2api-responses-ws": "./lib/plugins/sub2api-responses-ws.js"
   },
   "dsh": {
     "bundle": {

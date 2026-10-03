@@ -3,6 +3,12 @@ import { describe, expect, it } from 'vitest'
 import * as packageRoot from '../src/index.js'
 
 describe('交易包 public API', () => {
+  it('独立 WS provider 在 patch 中的包子路径可被 Node 正常解析', () => {
+    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { exports: Record<string, string> }
+    expect(manifest.exports['./plugins/sub2api-responses-ws']).toBe('./lib/plugins/sub2api-responses-ws.js')
+    expect(import.meta.resolve('dsh-trader/plugins/sub2api-responses-ws')).toBe(new URL('../lib/plugins/sub2api-responses-ws.js', import.meta.url).href)
+  })
+
   it('包根不暴露可直接持有实盘 broker 或跳过组合根的执行器', () => {
     const internalExecutionExports = [
       'HtxBroker', 'CcxtBroker', 'executeAction', 'executePlanAction',
