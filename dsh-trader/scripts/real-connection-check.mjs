@@ -160,33 +160,48 @@ try {
     const ports = runtime.getPorts()
     const observations = new MarketObservationStore(db)
     const source = createCcxtSource(exchange)
-    const counts = []
-    for (const symbol of allSymbols) {
-      const ticker = await exchange.fetchTicker(symbol)
-      prices.set(symbol, Number(ticker.last))
-      const at = clock.now()
-      observations.record({ kind: 'spec', symbol, timeframe: '', eventTime: at, availableAt: at, source: 'real htx loadMarkets', value: marketSpecification(symbol, exchange.markets[symbol], exchange.precisionMode) })
-      for (const timeframe of timeframes) {
-        const rows = await source.fetchOHLCV(symbol, timeframe, undefined, 160)
-        const availableAt = clock.now()
-        const candles = normalizeCandles(rows, symbol, timeframe, availableAt).candles.filter((candle) => candle.closed)
-        event('market.series', { symbol, timeframe, received: rows.length, closed: candles.length })
-        assert.ok(candles.length >= 64, 'real series must contain nonempty warmup')
-        ports.bars.upsertClosed(candles, { source: 'real htx OHLCV', fetchedAt: availableAt })
-        const engine = new FeatureEngine()
-        for (const candle of candles) {
-          ports.features.upsert(engine.onClosedCandle(candle), availableAt)
-          ports.bars.markProcessed(candle, availableAt)
+    const seriesStates = new Map()
+    let lastMarketRefresh = 0
+    const refreshMarket = async () => {
+      const counts = []
+      for (const symbol of allSymbols) {
+        const ticker = await exchange.fetchTicker(symbol)
+        prices.set(symbol, Number(ticker.last))
+        const at = clock.now()
+        observations.record({ kind: 'spec', symbol, timeframe: '', eventTime: at, availableAt: at, source: 'real htx loadMarkets', value: marketSpecification(symbol, exchange.markets[symbol], exchange.precisionMode) })
+        for (const timeframe of timeframes) {
+          const rows = await source.fetchOHLCV(symbol, timeframe, undefined, 160)
+          const availableAt = clock.now()
+          const candles = normalizeCandles(rows, symbol, timeframe, availableAt).candles.filter((candle) => candle.closed)
+          event('market.series', { symbol, timeframe, received: rows.length, closed: candles.length })
+          assert.ok(candles.length >= 64, 'real series must contain nonempty warmup')
+          const key = `${symbol}:${timeframe}`
+          const state = seriesStates.get(key) ?? { engine: new FeatureEngine(), known: new Map(), lastOpenTime: -1 }
+          for (const candle of candles) {
+            const previous = state.known.get(candle.openTime)
+            assert.ok(previous === undefined || previous === fingerprint(candle), 'closed bar revision requires explicit recovery; stop sampling')
+          }
+          ports.bars.upsertClosed(candles, { source: 'real htx OHLCV', fetchedAt: availableAt })
+          for (const candle of candles) {
+            if (candle.openTime <= state.lastOpenTime) continue
+            ports.features.upsert(state.engine.onClosedCandle(candle), availableAt)
+            ports.bars.markProcessed(candle, availableAt)
+            state.known.set(candle.openTime, fingerprint(candle))
+            state.lastOpenTime = candle.openTime
+          }
+          seriesStates.set(key, state)
+          counts.push({ symbol, timeframe, bars: candles.length })
         }
-        counts.push({ symbol, timeframe, bars: candles.length })
+        const derivatives = await createCcxtDerivativesSource(exchange).fetch(symbol, clock.now(), symbol.replace(':USDT', ''))
+        const availableAt = clock.now()
+        observations.record({ kind: 'derivatives', symbol, timeframe: '', eventTime: derivatives.timestamp, availableAt,
+          source: 'real htx derivative public endpoints', value: derivatives })
+        write(`derivatives-${symbol.split('/')[0]}.json`, derivatives)
       }
-      const derivatives = await createCcxtDerivativesSource(exchange).fetch(symbol, clock.now(), symbol.replace(':USDT', ''))
-      const availableAt = clock.now()
-      observations.record({ kind: 'derivatives', symbol, timeframe: '', eventTime: derivatives.timestamp, availableAt,
-        source: 'real htx derivative public endpoints', value: derivatives })
-      write(`derivatives-${symbol.split('/')[0]}.json`, derivatives)
+      lastMarketRefresh = clock.now()
+      report.phases.realMarket = { refreshedAt: lastMarketRefresh, series: counts, bars: counts.reduce((sum, row) => sum + row.bars, 0) }
     }
-    report.phases.realMarket = { series: counts, bars: counts.reduce((sum, row) => sum + row.bars, 0) }
+    await refreshMarket()
     await runtime.reconcileOnce()
     const ctx = new Context()
     llmFiber = await ctx.plugin(LlmRuntime)
@@ -204,9 +219,10 @@ try {
     await ctx.llm.listModels(provider)
     const model = { stream: (options) => { modelInvocations += 1; return ctx.llm.stream(options) } }
     for (let index = 0; index < sampleCount; index += 1) {
+      if (clock.now() - lastMarketRefresh >= 5 * 60_000) await refreshMarket()
       const spent = db.prepare("SELECT COALESCE(SUM(est_usd), 0) AS usd FROM budget_ledger WHERE scope = 'global'").get().usd
       assert.ok(spent < totalBudgetUsd, 'integration total budget exhausted')
-      const trigger = { source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: policy.createdAt, attempt: 1 }
+      const trigger = { source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: clock.now(), attempt: 1 }
       const symbol = symbols[index % symbols.length]
       const config = { strategy: 'critique', route: { provider, model: 'deepseek-flash', maxTokens, maxChars: 180_000 },
         dailyBudgetUsd: Math.min(dailyBudgetUsd, totalBudgetUsd - spent), dailyTokenCap, planWindowMs: 14_400_000 }
