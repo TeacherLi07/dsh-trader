@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
 import {
   ReasoningEffortId,
+  ToolCallId,
+  createAssistantMessage,
   createSystemMessage,
+  createToolResultMessage,
   createUserMessage,
   type GenerateOptions,
   type StreamChunk,
@@ -64,6 +67,35 @@ function requestOptions(overrides: Partial<GenerateOptions> = {}): GenerateOptio
     maxTokens: 32_768,
     ...overrides,
   }
+}
+
+function multiTurnHistoryOptions(): GenerateOptions {
+  const callId = ToolCallId('call_history_1')
+  return requestOptions({
+    messages: [
+      createSystemMessage('Use all prior turns and tool results.', 'test-provider'),
+      createUserMessage({
+        content: [{ type: 'text', text: 'Earlier request: inspect ETH position.' }],
+        source: { kind: 'user' },
+      }),
+      createAssistantMessage({
+        content: [
+          { type: 'text', text: 'I will inspect the position first.' },
+          { type: 'tool-call', id: callId, name: 'lookup_position', arguments: '{"symbol":"ETH"}' },
+        ],
+        source: { provider: 'prior-provider', model: 'prior-model' },
+      }),
+      createToolResultMessage({
+        callId,
+        content: [{ type: 'text', text: 'No open ETH position.' }],
+        isError: false,
+      }),
+      createUserMessage({
+        content: [{ type: 'text', text: 'Now provide the final decision using that tool result.' }],
+        source: { kind: 'user' },
+      }),
+    ],
+  })
 }
 
 function adapter(baseURL: string): Sub2ApiResponsesWebSocketAdapter {
@@ -236,6 +268,26 @@ describe('Sub2API Responses WebSocket provider', () => {
     expect(chunks.some((chunk) => chunk.type === 'usage' && chunk.usage.totalTokens === 28)).toBe(true)
     expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
     expect(model.providerRetryPolicy(SUB2API_RESPONSES_WS_PROVIDER)).toMatchObject({ mode: 'normal', maxRetries: 0 })
+  })
+
+  it('serializes non-empty assistant/tool-result history before the current user turn', async () => {
+    const gateway = await startGateway((socket) => sendTextResponse(socket, {
+      input_tokens: 28, output_tokens: 3, total_tokens: 31,
+      input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 },
+    }))
+    const chunks: StreamChunk[] = []
+    for await (const chunk of adapter(gateway.baseURL).stream(multiTurnHistoryOptions())) chunks.push(chunk)
+
+    expect(gateway.requests).toHaveLength(1)
+    const request = gateway.requests[0] as { input: Array<Record<string, unknown>> }
+    const input = request.input
+    const call = input.find((item) => item['type'] === 'function_call')
+    const result = input.find((item) => item['type'] === 'function_call_output')
+    expect(input.some((item) => item['role'] === 'assistant')).toBe(true)
+    expect(call).toMatchObject({ name: 'lookup_position', arguments: '{"symbol":"ETH"}' })
+    expect(result).toMatchObject({ call_id: 'call_history_1', output: 'No open ETH position.' })
+    expect(input.some((item) => JSON.stringify(item).includes('Now provide the final decision'))).toBe(true)
+    expect(chunks.some((chunk) => chunk.type === 'text-delta' && chunk.text.includes('SAFE_REPLY'))).toBe(true)
   })
 
   it('does not reconnect or fall back to HTTP when the socket closes after a non-empty request', async () => {

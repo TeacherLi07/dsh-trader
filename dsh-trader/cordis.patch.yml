@@ -46,7 +46,7 @@
 
     # 仅设置真实 Sub2API gateway/model 时启用。模型 alias 与 wireModelId 分离，
     # 保证缺少独立价格的 sub2api:<id> 不会误中 DeepSeek 官方价目表。
-    - id: trade-sub2api-responses-ws
+    - id: llm-sub2api-responses-ws
       name: dsh-trader/plugins/sub2api-responses-ws
       config:
         enabled: false

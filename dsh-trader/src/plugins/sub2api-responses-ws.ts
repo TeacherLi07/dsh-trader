@@ -29,6 +29,7 @@ import type {
   AssistantMessageEvent,
   Context as PiAiContext,
   Model as PiAiModel,
+  Usage as PiAiUsage,
 } from '@earendil-works/pi-ai'
 import OpenAI from 'openai'
 import { ResponsesWS } from 'openai/resources/responses/ws'
@@ -40,7 +41,7 @@ import type {
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
 
-export const name = 'trade-sub2api-responses-ws'
+export const name = 'llm-sub2api-responses-ws'
 export const inject = ['llm', 'credentials']
 
 export const SUB2API_RESPONSES_WS_PROVIDER = 'sub2api-openai-ws' as const
@@ -51,7 +52,7 @@ export type ResponsesReasoningEffort = (typeof ALLOWED_REASONING_EFFORTS)[number
 
 export interface Sub2ApiWsModelConfig {
   readonly id: string
-  /** Alias passed to the cost ledger; it must not collide with a priced model. */
+  /** DSH route alias; the separate upstream identifier is never substituted into this field. */
   readonly wireModelId: string
   readonly name: string
   readonly contextWindow: number
@@ -175,7 +176,7 @@ function validateModels(models: readonly Sub2ApiWsModelConfig[]): ReadonlyMap<st
   const result = new Map<string, ResolvedSub2ApiWsModel>()
   for (const model of models) {
     if (!model.id.startsWith('sub2api:') || model.id.length <= 'sub2api:'.length) {
-      throw new Error('Sub2API provider model id 必须用 sub2api:<gateway-model> 前缀隔离价目表')
+      throw new Error('Sub2API provider model id 必须使用 sub2api:<gateway-model> 命名空间')
     }
     if (model.wireModelId.trim() === '' || model.name.trim() === '') throw new Error('Sub2API provider model wireModelId/name 不能为空')
     for (const [field, value] of Object.entries({ contextWindow: model.contextWindow, maxTokens: model.maxTokens })) {
@@ -214,23 +215,91 @@ function piModel(model: ResolvedSub2ApiWsModel, baseURL: string): PiAiModel<'ope
   }
 }
 
+function flattenText(blocks: readonly GenerateOptions['messages'][number]['content'][number][]): string {
+  return blocks.map((block) => {
+    if (block.type !== 'text') throw new LlmError('Sub2API Responses WS route does not support image or file content', 'UNSUPPORTED_CONTENT')
+    return block.text
+  }).join('')
+}
+
+function flattenToolResult(blocks: readonly GenerateOptions['messages'][number]['content'][number][]): string {
+  return blocks.map((block) => {
+    if (block.type === 'text') return block.text
+    if (block.type === 'tool-result') return flattenToolResult(block.content)
+    throw new LlmError('Sub2API Responses WS route does not support image or file tool results', 'UNSUPPORTED_CONTENT')
+  }).join('')
+}
+
+function emptyPiUsage(): PiAiUsage {
+  return {
+    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  }
+}
+
+/** 与官方 DSH pi-ai adapter 相同地映射 system/user/assistant/tool-result history。 */
 function toPiAiContext(options: GenerateOptions): PiAiContext {
-  const system: string[] = []
-  if (options.system !== undefined && options.system.length > 0) system.push(options.system)
+  let systemPrompt = options.system
+  let sourceMessages = options.messages
+  if (systemPrompt === undefined && sourceMessages[0]?.role === 'system') {
+    systemPrompt = flattenText(sourceMessages[0].content)
+    sourceMessages = sourceMessages.slice(1)
+  }
   const messages: PiAiContext['messages'] = []
-  for (const message of options.messages) {
-    const text = message.content.map((block) => {
-      if (block.type !== 'text') throw new LlmError('Sub2API WS route currently supports text-only trade requests', 'UNSUPPORTED_CONTENT')
-      return block.text
-    }).join('')
+  const toolNames = new Map<string, string>()
+  for (const message of sourceMessages) {
     if (message.role === 'system') {
-      if (text.length > 0) system.push(text)
+      messages.push({ role: 'user', content: flattenText(message.content), timestamp: 0 })
       continue
     }
-    if (message.role !== 'user') throw new LlmError('Sub2API WS route does not accept assistant history from this workflow', 'UNSUPPORTED_CONTENT')
-    messages.push({ role: 'user', content: text, timestamp: 0 })
+    if (message.role === 'assistant') {
+      const content: AssistantMessage['content'] = message.content.map((block) => {
+        switch (block.type) {
+          case 'text': return { type: 'text', text: block.text }
+          case 'reasoning': return { type: 'thinking', thinking: block.text }
+          case 'tool-call': {
+            let args: unknown
+            try {
+              args = block.arguments === '' ? {} : JSON.parse(block.arguments)
+            } catch {
+              throw new LlmError('Sub2API Responses WS assistant history has invalid tool-call JSON', 'INVALID_REQUEST')
+            }
+            if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+              throw new LlmError('Sub2API Responses WS assistant tool-call arguments must be a JSON object', 'INVALID_REQUEST')
+            }
+            toolNames.set(String(block.id), block.name)
+            return { type: 'toolCall', id: String(block.id), name: block.name, arguments: args as Record<string, unknown> }
+          }
+          default:
+            throw new LlmError('Sub2API Responses WS assistant history contains unsupported content', 'UNSUPPORTED_CONTENT')
+        }
+      })
+      const hasToolCall = content.some((block) => block.type === 'toolCall')
+      const source = message.source.kind === 'model' ? message.source : undefined
+      messages.push({
+        role: 'assistant', content, api: 'dsh-foreign',
+        provider: source?.provider ?? 'dsh-foreign', model: source?.model ?? 'dsh-foreign',
+        usage: emptyPiUsage(), stopReason: hasToolCall ? 'toolUse' : 'stop', timestamp: 0,
+      })
+      continue
+    }
+    const text = flattenText(message.content.filter((block) => block.type !== 'tool-result'))
+    const results = message.content.filter((block) => block.type === 'tool-result')
+    if (text.length > 0 || results.length === 0) messages.push({ role: 'user', content: text, timestamp: 0 })
+    for (const result of results) {
+      const toolCallId = String(result.toolCallId)
+      messages.push({
+        role: 'toolResult', toolCallId, toolName: toolNames.get(toolCallId) ?? 'unknown',
+        content: [{ type: 'text', text: flattenToolResult(result.content) || '(no output)' }],
+        isError: result.isError ?? false, timestamp: 0,
+      })
+    }
   }
-  return { systemPrompt: system.join('\n\n'), messages, tools: options.tools?.map((tool) => ({ ...tool })) }
+  return {
+    ...(systemPrompt === undefined ? {} : { systemPrompt }),
+    messages,
+    ...(options.tools === undefined ? {} : { tools: options.tools.map((tool) => ({ ...tool })) }),
+  }
 }
 
 function isNonnegativeSafeInteger(value: unknown): value is number {
@@ -597,5 +666,5 @@ export function apply(ctx: Context, config: Sub2ApiResponsesWsConfig): void {
     },
   })
   const dispose = ctx.llm.registerAdapter([SUB2API_RESPONSES_WS_PROVIDER], adapter)
-  ctx.effect(() => dispose, 'trade.sub2api-responses-ws.dispose')
+  ctx.effect(() => dispose, 'llm.sub2api-responses-ws.dispose')
 }

@@ -25,8 +25,10 @@ ctx.plugin('@deepseek-ai/dsh-llm-pi-ai', deepseekResponsesPiAiConfig({
 
 此 route 使用官方 OpenAI Node SDK `ResponsesWS` 负责 WebSocket transport，复用 pi-ai 的 Responses message/tool serializer 和 terminal event processor。通用 `openai-responses` 的 `transport: websocket` 不会被读取，不能用来打开 WS。
 
+输入转换遵循 DSH `dsh-llm-pi-ai` 的历史转换方式，支持 system/user/assistant 与 tool-result 文本多轮历史；图片和文件内容明确拒绝，等接入 attachment converter 后再声明支持。
+
 ```yaml
-- id: trade-sub2api-responses-ws
+- id: llm-sub2api-responses-ws
   name: dsh-trader/plugins/sub2api-responses-ws
   config:
     enabled: true
