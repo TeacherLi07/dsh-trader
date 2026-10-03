@@ -345,6 +345,15 @@ describe('R3 decision runtime', () => {
       db = new Database(dbPath)
       migrate(db)
       const afterRestart = makeRuntime(db)
+      const replayModel = new FakeDecisionModel(noTrade)
+      const replayedFailure = await runDecisionRuntime({
+        ...afterRestart, model: replayModel, config: cappedConfig,
+        trigger: { ...trigger, id: 'w1-unresolved-stream-crash' }, symbol: SYMBOL, timeframe: '1h',
+      })
+      expect(replayedFailure).toMatchObject({ status: 'review', replayed: true, retryable: false, reason: first.reason })
+      expect(first.reason).toBeTruthy()
+      expect(replayModel.calls).toBe(0)
+
       const retry = new FakeDecisionModel(noTrade)
       const blocked = await runDecisionRuntime({
         ...afterRestart, model: retry, config: cappedConfig,

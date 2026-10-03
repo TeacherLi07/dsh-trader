@@ -228,11 +228,16 @@ export async function runDecisionRuntime(input: {
   })
   let prior = runStore.get(runId)
   if (prior !== undefined && prior.status !== 'running') {
+    const final = isRecord(prior.final) ? prior.final : undefined
+    const reason = typeof final?.['failure'] === 'string' ? final['failure']
+      : typeof final?.['reason'] === 'string' ? final['reason'] : undefined
     return {
       runId,
       status: prior.status,
       replayed: true,
       contextHash: prior.contextHash,
+      // 重放也要逐字返回已落库的失败，不能让终态 REVIEW 在调用方丢失原因。
+      ...(reason === undefined ? {} : { reason, retryable: false }),
       ...(isRecord(prior.final) && isRecord(prior.final['envelope']) ? { envelope: prior.final['envelope'] as unknown as DecisionEnvelope } : {}),
       ...(isRecord(prior.eligibility) && typeof prior.eligibility['state'] === 'string' ? { eligibility: prior.eligibility as unknown as EligibilityResult } : {}),
     }
