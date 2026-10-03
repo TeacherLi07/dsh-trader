@@ -34,6 +34,14 @@ const request = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 })
 
 describe('PaperBroker', () => {
+  it.each(['buy', 'sell'] as const)('paper 的 %s 可用保证金按权益减毛敞口和挂单预留计算，不能把空值或卖空所得当可用资金', async (side) => {
+    const { broker } = setup(100)
+    await broker.placeOrder(request({ side }))
+    expect((await broker.getAccount()).freeMarginQuote).toBe(9_900)
+    await broker.placeOrder(request({ intentId: 'pending', clientOrderId: 'pending', type: 'limit', side: 'buy', price: 90, qty: 2, notionalUsd: 180 }))
+    expect((await broker.getAccount()).freeMarginQuote).toBe(9_720)
+  })
+
   it('fills a market order at the reference price', async () => {
     const { broker } = setup()
     const ack = await broker.placeOrder(request())

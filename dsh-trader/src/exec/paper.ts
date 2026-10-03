@@ -156,15 +156,18 @@ export class PaperBroker implements Broker {
     const now = this.options.clock.now()
     const dayStart = Math.floor(now / DAY_MS) * DAY_MS
     const dailyLoss = Math.max(0, -(this.#realizedByDay.get(dayStart) ?? 0))
+    const exposure = this.#exposure()
+    const pendingExposure = this.#pendingExposure()
     return {
       venue: this.venue,
       equityQuote: equity,
-      // paper 撮合没有逐仓/全仓保证金模型，不能把现金余额冒充交易所可用保证金。
-      freeMarginQuote: null,
-      totalExposureUsd: this.#exposure(),
-      pendingExposureUsd: this.#pendingExposure(),
+      // paper 明确定义为按 1×毛敞口全额预留；卖空现金含借币所得，不能直接当成可用保证金。
+      // 这是模拟账户的资金合同，不冒充 HTX 的逐仓/全仓余额。
+      freeMarginQuote: pendingExposure === null ? null : Math.max(0, equity - exposure - pendingExposure),
+      totalExposureUsd: exposure,
+      pendingExposureUsd: pendingExposure,
       openOrders: this.#openOrders().length,
-      leverage: equity > 0 ? this.#exposure() / equity : Number.POSITIVE_INFINITY,
+      leverage: equity > 0 ? exposure / equity : Number.POSITIVE_INFINITY,
       dailyLossUsd: dailyLoss,
       drawdownUsd: Math.max(0, this.#peakEquity - equity),
       consecutiveLosses: this.#consecutiveLosses,
