@@ -37,10 +37,12 @@ const modelId = gateway?.model ?? 'deepseek-flash'
 const persistentDispatch = gateway !== undefined
 const sampleCount = Number(value('--samples', '2'))
 const maxTokens = Number(value('--max-output-tokens', '32768'))
+const decisionTimeoutMs = Number(value('--decision-timeout-ms', '300000'))
 const dailyBudgetUsd = Number(value('--daily-budget-usd', '2'))
 const totalBudgetUsd = Number(value('--total-budget-usd', '5'))
 const dailyTokenCap = Number(value('--daily-token-cap', '20000000'))
 assert.ok(Number.isSafeInteger(sampleCount) && sampleCount > 0 && sampleCount <= 100)
+assert.ok(Number.isSafeInteger(decisionTimeoutMs) && decisionTimeoutMs > 0 && decisionTimeoutMs <= 1_800_000, 'decision timeout must be 1..1800000 ms')
 assert.ok(Number.isSafeInteger(maxTokens) && maxTokens > 0 && maxTokens <= 65536)
 assert.ok(dailyBudgetUsd > 0 && dailyBudgetUsd <= 5 && totalBudgetUsd > 0 && totalBudgetUsd <= 10)
 assert.ok(Number.isSafeInteger(dailyTokenCap) && dailyTokenCap > 0 && dailyTokenCap <= 30_000_000)
@@ -71,7 +73,7 @@ const event = (kind, detail) => {
 }
 const policy = existsSync(policyPath) ? JSON.parse(readFileSync(policyPath, 'utf8')) : {
   id: randomUUID(), createdAt: clock.now(), mode: 'paper', strategy: 'critique', versions,
-  dailyBudgetUsd, totalBudgetUsd, dailyTokenCap, maxTokens,
+  dailyBudgetUsd, totalBudgetUsd, dailyTokenCap, maxTokens, decisionTimeoutMs,
   api, provider, model: modelId, gateway, persistentDispatch, thinking: 'enabled', reasoningEffort: gateway?.reasoningEffort ?? 'high',
   referencePriceOnly: gateway !== undefined, gatewayInvoiceVerified: false, credentialScope: 'authorized .env key; test state isolated, provider account isolation not asserted',
 }
@@ -79,6 +81,7 @@ assert.equal(policy.dailyBudgetUsd, dailyBudgetUsd)
 assert.equal(policy.totalBudgetUsd, totalBudgetUsd)
 assert.equal(policy.dailyTokenCap, dailyTokenCap)
 assert.equal(policy.maxTokens, maxTokens)
+assert.equal(policy.decisionTimeoutMs, decisionTimeoutMs)
 assert.equal(policy.api, api)
 assert.equal(policy.model, modelId)
 assert.deepEqual(policy.gateway, gateway)
@@ -261,7 +264,7 @@ try {
       const triggerAt = clock.now()
       const trigger = existsSync(triggerPath) ? JSON.parse(readFileSync(triggerPath, 'utf8')) : {
         source: ['W1', 'W2', 'W3'][index % 3], id: `connection-${policy.id}-${index}`, at: triggerAt, attempt: 1,
-        ...(persistentDispatch && index % 3 !== 0 ? { expiresAt: triggerAt + 15 * 60_000 } : {}),
+        ...(persistentDispatch && index % 3 !== 0 ? { expiresAt: triggerAt + Math.max(15 * 60_000, decisionTimeoutMs + 60_000) } : {}),
       }
       assert.equal(trigger.id, `connection-${policy.id}-${index}`)
       assert.equal(trigger.source, ['W1', 'W2', 'W3'][index % 3])
@@ -272,7 +275,7 @@ try {
         // BudgetGuard 接受当日绝对上限，会再次扣除当日已花金额；不能把剩余额度直接当上限。
         dailyBudgetUsd: Math.min(dailyBudgetUsd, spentToday + totalBudgetUsd - spent), dailyTokenCap, planWindowMs: 14_400_000 }
       heartbeat.beat(clock.now())
-      const run = () => runDecisionRuntime({ ports, model, config, trigger, symbol, timeframe: '1h', signal: AbortSignal.timeout(300_000) })
+      const run = () => runDecisionRuntime({ ports, model, config, trigger, symbol, timeframe: '1h', signal: AbortSignal.timeout(decisionTimeoutMs) })
       let result
       if (persistentDispatch && trigger.source !== 'W1') {
         queue.enqueue({ triggerId: trigger.id, dedupKey: trigger.id, symbol,

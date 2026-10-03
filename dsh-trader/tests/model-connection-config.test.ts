@@ -40,3 +40,18 @@ describe('真实连接配置按本轮授权固定来源', () => {
     expect(() => readFixture(undefined, 'responses', false)).toThrow()
   })
 })
+
+
+describe('真实连接脚本的整轮时间上限', () => {
+  it.each(['0', '-1', 'NaN', '1800001'])('拒绝越界上限 %s，且在凭据/网络前拒绝', (timeout) => {
+    let stderr = ''
+    try {
+      execFileSync(process.execPath, [new URL('../scripts/real-connection-check.mjs', import.meta.url).pathname,
+        '--decision-timeout-ms', timeout], { env: {}, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      stderr = String((error as { stderr?: unknown }).stderr)
+    }
+    expect(stderr).toContain('decision timeout must be 1..1800000 ms')
+    expect(stderr).not.toContain('HTX credentials missing')
+  })
+})
