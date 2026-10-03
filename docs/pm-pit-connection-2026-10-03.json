@@ -1,0 +1,50 @@
+{
+  "allPassed": true,
+  "checks": {
+    "pm_signals_exercised": true,
+    "probability_jump_exercised": true,
+    "sample_has_real_jump": true,
+    "existence_gate_zero_violations": true,
+    "resolution_gate_zero_violations": true,
+    "thin_market_novelty_zero": true,
+    "estimator_consistent": true,
+    "unregistered_alias_uncovered": true,
+    "registered_alias_evaluates": true,
+    "hot_path_as_of_zero": true,
+    "token_buckets_never_negative": true,
+    "series_span_covers_window": true
+  },
+  "sql": {
+    "existenceViolations": 0,
+    "resolutionViolations": 0,
+    "noveltyRows": 14,
+    "probabilityJumpRows": 14,
+    "thinNovelty": 0,
+    "estimatorMismatches": 0
+  },
+  "series": {
+    "points": 653,
+    "spanDays": 29.98
+  },
+  "book": {
+    "bids": 33,
+    "asks": 1
+  },
+  "seededMarkets": 23,
+  "signals": 15,
+  "clientStats": {
+    "requests": 82,
+    "retries": 0,
+    "failures": 0,
+    "consecutiveFailures": 0,
+    "degraded": false,
+    "asOfCalls": 0,
+    "tokens": {
+      "gamma:markets": 60,
+      "dataApi:prices-history": 40,
+      "clob:book": 300
+    }
+  },
+  "privateEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/pm-pit-v3.json",
+  "priorFailure": "PmTimeError: quote local availableAt 非法：undefined"
+}

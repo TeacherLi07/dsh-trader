@@ -37,7 +37,7 @@ const LIQUIDITY = { liquidityFloorQuote: 1_000, spreadCeilBps: 300 }
 /** 扫描多少个活跃市场挑"真的动过"的那个 —— 否则判据 ③④ 会**空跑通过**。 */
 const SCAN = Number(process.env.PM_SCAN ?? '60')
 
-const now = Date.now()
+let now = Date.now()
 // 真实网络 + 真实 sleep ⇒ 必须用**会随墙钟前进**的时钟驱动令牌桶；
 // 用冻结的 ReplayClock 会让"排队后重取"永远取不到令牌（验收会看起来像卡死）。
 const clock = systemClock()
@@ -66,6 +66,7 @@ const store = new PmStore(db, { liquidity: LIQUIDITY, maxActiveWatches: 500 })
 // 只按 `volume24hr` 取 → 全是远期政治盘（日变化 ~0.001 ⇒ 不触发）。所以两路合并去重。
 const movers = await clients.gamma.markets({ limit: SCAN, order: 'oneDayPriceChange', ascending: false })
 const liquid = await clients.gamma.markets({ limit: SCAN, order: 'volume24hr', ascending: false })
+const metadataAvailableAt = clock.now()
 const merged = new Map()
 for (const item of [...movers.items, ...liquid.items]) merged.set(item.conditionId, item)
 const page = { items: [...merged.values()], nextCursor: null }
@@ -84,21 +85,24 @@ for (const [index, market] of rankedItems.entries()) {
   const tokenId = market.clobTokenIds[0]
   if (tokenId === undefined) continue
   const series = await clients.dataApi.pricesHistory({ tokenId, interval: '1m' })
+  const seriesAvailableAt = clock.now()
   if (series.length < 2) continue
   const spanDays = (series[series.length - 1].ts - series[0].ts) / 86_400_000
   const book = await clients.clob.book(tokenId)
+  const bookAvailableAt = clock.now()
   // 没有双边盘口的市场**不可能**过流动性门槛（无 spread），不必浪费请求与注意力
   if (book === null || book.bids.length === 0 || book.asks.length === 0) continue
 
-  // 元数据按"现在"首次见到（created_at 来自源，是过去）
-  store.upsertMarket(market, now)
-  store.recordSeries(tokenId, series, { source: 'data-api.v2', observedAt: now })
+  // 回补的数据不能倒填到启动时点；源事件时间和本机接收时间必须分别保留。
+  store.upsertMarket(market, metadataAvailableAt)
+  store.recordSeries(tokenId, series, { source: 'data-api.v2', observedAt: seriesAvailableAt })
   if (book !== null) {
     const bestBid = book.bids.length ? Math.max(...book.bids.map((level) => level.price)) : undefined
     const bestAsk = book.asks.length ? Math.min(...book.asks.map((level) => level.price)) : undefined
     store.recordQuote({
       tokenId,
-      observedAt: book.observedAt > 0 ? book.observedAt : now,
+      observedAt: book.observedAt,
+      availableAt: bookAvailableAt,
       ...(bestBid === undefined ? {} : { bestBid }),
       ...(bestAsk === undefined ? {} : { bestAsk }),
       ...(bestBid === undefined || bestAsk === undefined ? {} : { mid: (bestBid + bestAsk) / 2 }),
@@ -110,6 +114,7 @@ for (const [index, market] of rankedItems.entries()) {
   }
 
   const alias = `mkt_${index}`
+  now = clock.now()
   store.registerWatch(
     {
       alias,
@@ -148,6 +153,7 @@ if (primary === null) {
   process.exit(2)
 }
 const { alias: ALIAS, tokenId: PRIMARY_TOKEN, market } = primary
+now = clock.now()
 
 // ── 2) 规则族 + 治理（真实信号走同一套限流）─────────────────────────────────
 const queue = new TriggerQueue(db)
@@ -240,14 +246,14 @@ for (const row of noveltyRows) {
 }
 
 // ③ 估计量一致：payload 里的 prob/estimator 必须与该时刻盘口口径一致
-const estimatorMismatches = db
+const estimatorRows = db
   .prepare("SELECT payload_json FROM triggers WHERE rule_id = 'pm_prob_jump'")
   .all()
-  .filter((row) => {
+const estimatorMismatches = estimatorRows.filter((row) => {
     const detail = JSON.parse(row.payload_json).detail ?? {}
-    if (detail.estimator === 'mid') return typeof detail.prob !== 'number'
-    if (detail.estimator === 'last_trade_price') return typeof detail.prob !== 'number'
-    return true // 未知估计量 ⇒ 计为不一致
+    const expected = snapshots.find((snapshot) => snapshot.alias === detail.alias)
+    return expected?.probability.ok !== true || detail.estimator !== expected.probability.estimator ||
+      detail.prob !== expected.probability.value
   }).length
 
 // ⑧ 未注册 alias 一律 UNCOVERED
@@ -264,6 +270,7 @@ const rateViolations = Object.entries(stats.tokens).filter(
 const checks = {
   // ★ 非空跑：判据 ③④ 只有在**真的产生过 novelty**时才算被检验
   pm_signals_exercised: noveltyRows.length > 0,
+  probability_jump_exercised: estimatorRows.length > 0,
   // 前置条件确实成立（样本里真的有超过阈值的真实变化）
   sample_has_real_jump: observedMaxChange > 0,
   existence_gate_zero_violations: existenceViolations === 0,
@@ -318,6 +325,7 @@ const report = {
     existenceViolations,
     resolutionViolations,
     noveltyRows: noveltyRows.length,
+    probabilityJumpRows: estimatorRows.length,
     thinNovelty,
     estimatorMismatches,
   },
