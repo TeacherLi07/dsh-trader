@@ -394,9 +394,17 @@ export async function runDecisionRuntime(input: {
     const estimatedUsage = { tokensIn: request.estimatedInputTokens, tokensOut: config.route.maxTokens, tokensCached: 0 }
     const now = ports.clock.now()
     const reserve = ports.db.transaction(() => {
-      const rows = reservationStatements.get(`SELECT kind, payload_json FROM audit_events
+      // 准入只需身份和状态；不要每轮把历次完整 prompt/response 从 SQLite 搬进内存。
+      const rows = reservationStatements.get(`SELECT kind,
+        CASE WHEN json_type(payload_json) = 'object' THEN json_object(
+          'callAttemptId', json_extract(payload_json, '$.callAttemptId'),
+          'runId', json_extract(payload_json, '$.runId'),
+          'requestHash', json_extract(payload_json, '$.requestHash'),
+          'stage', json_extract(payload_json, '$.stage'),
+          'receiptHash', json_extract(payload_json, '$.receiptHash'))
+        ELSE payload_json END AS payload_json FROM audit_events
         WHERE kind IN ('model_call_reserved', 'model_call_accounted', 'model_call_failed', 'model_call_unresolved',
-                       'model_call_output_rejected', 'model_stage_persisted') ORDER BY seq`).all() as {
+                       'model_call_output_rejected', 'model_stage_persisted', 'model_call_reconciled') ORDER BY seq`).all() as {
         kind: string
         payload_json: string
       }[]
@@ -407,6 +415,7 @@ export async function runDecisionRuntime(input: {
         readonly state: 'reserved' | 'accounted' | 'unresolved'
       }>()
       const rejectedRequests = new Set<string>()
+      const reconciledRequests = new Set<string>()
       for (const row of rows) {
         const payload: unknown = JSON.parse(row.payload_json)
         if (!isRecord(payload)) throw new Error('模型调用 reservation 审计损坏；停止模型调用')
@@ -427,7 +436,16 @@ export async function runDecisionRuntime(input: {
               (row.kind !== 'model_stage_persisted' && payload['stage'] !== priorAttempt.stage)) {
             throw new Error('模型调用结算审计与 reservation 不匹配；停止模型调用')
           }
-          if (row.kind === 'model_call_accounted') {
+          if (row.kind === 'model_call_reconciled') {
+            const receipt = reservationStatements.get('SELECT receipt_hash FROM model_call_reconciliations WHERE call_attempt_id = ?')
+              .get(attempt) as { receipt_hash: string } | undefined
+            if (priorAttempt.state === 'accounted' || receipt === undefined || receipt.receipt_hash !== payload['receiptHash']) {
+              throw new Error('模型费用核销缺少匹配的不可变账单凭据；停止模型调用')
+            }
+            // 核销只消除未知费用阻塞，原请求仍不可重发，也不能当作可用 stage。
+            reconciledRequests.add(priorAttempt.requestHash)
+            pending.delete(attempt)
+          } else if (row.kind === 'model_call_accounted') {
             pending.set(attempt, { ...priorAttempt, state: 'accounted' })
           } else if (row.kind === 'model_call_output_rejected' || row.kind === 'model_stage_persisted') {
             if (priorAttempt.state !== 'accounted') throw new Error('未确认成功的模型调用不能结算为输出拒绝或 stage 持久化')
@@ -449,6 +467,9 @@ export async function runDecisionRuntime(input: {
       const uncommittedSuccesses = [...pending.values()].filter((item) => item.state === 'accounted')
       if (uncommittedSuccesses.length > 0) {
         return { allowed: false as const, reason: `存在 ${uncommittedSuccesses.length} 个已结算成功但 stage 尚未持久化的模型调用；禁止重发` }
+      }
+      if (reconciledRequests.has(request.requestHash)) {
+        return { allowed: false as const, reason: '该请求费用已核销但输出不可恢复；禁止重发相同模型请求' }
       }
       if (rejectedRequests.has(request.requestHash)) {
         // 结构修复会使用不同请求；崩溃后的原请求已经计费并被拒，不能自动再发。

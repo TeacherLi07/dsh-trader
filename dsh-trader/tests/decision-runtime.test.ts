@@ -1,4 +1,6 @@
 import Database from 'better-sqlite3'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +28,7 @@ import { buildDecisionContext } from '../src/agents/decision-context-builder.js'
 import { DecisionContextStore } from '../src/agents/decision-context-store.js'
 import { DecisionRunStore } from '../src/agents/decision-run-store.js'
 import { DECISION_WORKFLOW_PROMPT_VERSION, runDecisionWorkflowStages, type DecisionModel } from '../src/agents/decision-workflow.js'
+import { inspectModelReconciliation, reconcileModelCall, type ModelBillingReceipt } from '../src/agents/model-billing-reconciliation.js'
 import { raw } from './helpers/market.js'
 
 const AS_OF = Date.UTC(2026, 8, 20, 12)
@@ -201,7 +204,344 @@ const config = {
   planWindowMs: 4 * 3_600_000,
 }
 
+function billingReceipt(db: Database.Database): ModelBillingReceipt {
+  const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_reserved' ORDER BY seq").all() as { payload_json: string }[]
+  expect(rows).toHaveLength(1)
+  const call = JSON.parse(rows[0]!.payload_json)
+  return {
+    version: 1, callAttemptId: call.callAttemptId, runId: call.runId, requestHash: call.requestHash,
+    provider: call.provider, model: call.model, clientRequestId: call.clientRequestId, providerResponseId: null,
+    outcome: 'charged', usage: { tokensIn: 120, tokensOut: 20, tokensCached: 40 }, costUsd: 0.25,
+    evidence: { receiptId: 'synthetic-bill-' + call.callAttemptId, source: 'https://example.com/synthetic-test-billing',
+      sha256: 'a'.repeat(64), observedAt: AS_OF },
+  }
+}
+
+describe('R5 audited model billing reconciliation', () => {
+  it('keeps another unresolved charge unknown and rejects reuse of one provider receipt', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    try {
+      await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade, undefined, false), config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      const first = billingReceipt(db)
+      const reserved = JSON.parse((db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_reserved'").get() as { payload_json: string }).payload_json)
+      const unresolved = JSON.parse((db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_unresolved'").get() as { payload_json: string }).payload_json)
+      const id = 'synthetic-second-attempt'
+      const second: ModelBillingReceipt = { ...first, callAttemptId: id, clientRequestId: id,
+        requestHash: 'sha256:' + 'b'.repeat(64), evidence: { ...first.evidence, receiptId: 'synthetic-second-bill' } }
+      const accounting = new BudgetLedger(db).record({ at: AS_OF, scopes: reserved.scopes, model: config.route.model, usage: null,
+        estimatedTokens: reserved.estimatedTokens, reservedUsd: reserved.reservedUsd }, [])
+      runtime.journal.appendAudit({ actor: 'system', kind: 'model_call_reserved', ts: AS_OF,
+        payload: { ...reserved, callAttemptId: id, clientRequestId: id, requestHash: second.requestHash } })
+      runtime.journal.appendAudit({ actor: 'system', kind: 'model_call_unresolved', ts: AS_OF,
+        payload: { ...unresolved, callAttemptId: id, clientRequestId: id, requestHash: second.requestHash, ledgerEntries: accounting.entries } })
+      const firstPlan = inspectModelReconciliation(db, first, AS_OF)
+      expect(firstPlan.after.every(e => !e.costKnown)).toBe(true)
+      reconcileModelCall({ db, clock: runtime.clock, receipt: first, expectedPlanHash: firstPlan.planHash, reason: 'synthetic first bill' })
+      expect(new BudgetLedger(db).state('2026-09-20', GLOBAL_SCOPE).unknownCostCalls).toBe(1)
+      const reused = { ...second, evidence: first.evidence }
+      const reusedPlan = inspectModelReconciliation(db, reused, AS_OF)
+      expect(() => reconcileModelCall({ db, clock: runtime.clock, receipt: reused, expectedPlanHash: reusedPlan.planHash,
+        reason: 'synthetic duplicate receipt' })).toThrow('UNIQUE')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 1 })
+      const secondPlan = inspectModelReconciliation(db, second, AS_OF)
+      expect(secondPlan.before.every(e => !e.costKnown)).toBe(true)
+      expect(secondPlan.after.every(e => e.costKnown && e.estUsd === 0.5)).toBe(true)
+      reconcileModelCall({ db, clock: runtime.clock, receipt: second, expectedPlanHash: secondPlan.planHash, reason: 'synthetic second bill' })
+      expect(new BudgetLedger(db).state('2026-09-20', GLOBAL_SCOPE)).toMatchObject({ unknownCostCalls: 0, spentUsd: 0.5, tokens: 280 })
+    } finally { db.close() }
+  })
+
+  it('attributes a response crossing midnight to its original committed ledger day', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const at = Date.UTC(2026, 8, 20, 23, 59, 59)
+    const runtime = makeRuntime(db, undefined, new ReplayClock(at))
+    try {
+      await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade, () => runtime.clock.advanceTo(at + 2_000), false),
+        config, trigger: { ...trigger, at }, symbol: SYMBOL, timeframe: '1h' })
+      const receipt = { ...billingReceipt(db), evidence: { ...billingReceipt(db).evidence, observedAt: at + 2_000 } }
+      const plan = inspectModelReconciliation(db, receipt, at + 2_000)
+      expect(plan.before.every(e => e.day === '2026-09-21')).toBe(true)
+      reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'synthetic midnight bill' })
+      expect(db.prepare('SELECT DISTINCT day FROM budget_ledger').all()).toEqual([{ day: '2026-09-21' }])
+    } finally { db.close() }
+  })
+
+  it('rolls back a real SIGKILL during receipt insertion, then commits once after restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'model-billing-kill-'))
+    const path = join(directory, 'state.sqlite')
+    let db = new Database(path)
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade, undefined, false), config, trigger, symbol: SYMBOL, timeframe: '1h' })
+    const receipt = billingReceipt(db)
+    const terminal = new DecisionRunStore(db).get(receipt.runId)
+    const before = db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()
+    db.close()
+    const script = `import Database from 'better-sqlite3';import {writeSync} from 'node:fs';
+      import {ReplayClock} from './lib/clock.js';
+      import {inspectModelReconciliation,reconcileModelCall} from './lib/agents/model-billing-reconciliation.js';
+      const db=new Database(process.argv[1]),receipt=JSON.parse(process.argv[2]),clock=new ReplayClock(Number(process.argv[3]));
+      db.function('hold_after_receipt',()=>{writeSync(1,JSON.stringify({insideTransaction:true})+'\\n');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);return 0;});
+      db.exec("CREATE TEMP TRIGGER interrupt_receipt AFTER INSERT ON model_call_reconciliations BEGIN SELECT hold_after_receipt(); END");
+      const plan=inspectModelReconciliation(db,receipt,clock.now());
+      reconcileModelCall({db,clock,receipt,expectedPlanHash:plan.planHash,reason:'synthetic SIGKILL fixture'});`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, path, JSON.stringify(receipt), String(AS_OF)],
+      { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } })
+    try {
+      const [data] = await once(child.stdout, 'data')
+      expect(JSON.parse(String(data))).toEqual({ insideTransaction: true })
+      const exited = once(child, 'exit')
+      child.kill('SIGKILL')
+      expect((await exited)[1]).toBe('SIGKILL')
+      db = new Database(path)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+      expect(db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()).toEqual(before)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reconciled'").get()).toEqual({ n: 0 })
+      expect(new DecisionRunStore(db).get(receipt.runId)).toEqual(terminal)
+      const plan = inspectModelReconciliation(db, receipt, AS_OF)
+      reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'restart after synthetic SIGKILL' })
+      db.close()
+      db = new Database(path)
+      expect(inspectModelReconciliation(db, receipt, AS_OF).alreadyApplied).toBe(true)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reconciled'").get()).toEqual({ n: 1 })
+      expect(new DecisionRunStore(db).get(receipt.runId)).toEqual(terminal)
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+      if (db.open) db.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  }, 15_000)
+
+  it('previews without writes, atomically replaces an unresolved reservation, and never rewrites the terminal run', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const model = new FakeDecisionModel(noTrade, undefined, false)
+    try {
+      const first = await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(first.status).toBe('review')
+      const terminal = new DecisionRunStore(db).get(first.runId)
+      const receipt = billingReceipt(db)
+      const count = db.prepare('SELECT COUNT(*) AS n FROM audit_events').get()
+      const beforeLedger = db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()
+      const plan = inspectModelReconciliation(db, receipt, AS_OF)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM audit_events').get()).toEqual(count)
+      expect(db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()).toEqual(beforeLedger)
+      expect(plan.originalEntries).toHaveLength(2)
+      expect(plan.before.every(e => !e.costKnown)).toBe(true)
+      expect(plan.after).toHaveLength(2)
+      expect(plan.after.every(e => e.costKnown && e.estUsd === 0.25 && e.tokensCached === 40)).toBe(true)
+      const input = { db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'synthetic reviewed provider billing fixture' }
+      expect(reconcileModelCall(input)).toEqual(plan)
+      expect(new BudgetLedger(db).state('2026-09-20', GLOBAL_SCOPE)).toMatchObject({ spentUsd: 0.25, tokens: 140, unknownCostCalls: 0 })
+      expect(new DecisionRunStore(db).get(first.runId)).toEqual(terminal)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reconciled'").get()).toEqual({ n: 1 })
+      expect(() => db.prepare('DELETE FROM model_call_reconciliations').run()).toThrow('immutable')
+      expect(() => db.prepare("UPDATE model_call_reconciliations SET reason = 'changed'").run()).toThrow('immutable')
+      expect(reconcileModelCall(input).alreadyApplied).toBe(true)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reconciled'").get()).toEqual({ n: 1 })
+      expect(() => reconcileModelCall({ ...input, receipt: { ...receipt, costUsd: 0 } })).toThrow('不同账单')
+      const replay = await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(replay).toMatchObject({ replayed: true, status: 'review', reason: first.reason })
+      expect(model.calls).toBe(1)
+      runtime.clock.advanceTo(AS_OF + 1)
+      const future = new FakeDecisionModel(noTrade)
+      const next = await runDecisionRuntime({ ...runtime, model: future, config, trigger: { ...trigger, id: 'independent-later' }, symbol: SYMBOL, timeframe: '1h' })
+      expect(next.status).toBe('completed')
+      expect(future.calls).toBe(1)
+      expect(runtime.journal.intentIds()).toEqual([])
+    } finally { db.close() }
+  })
+
+  it('refuses invalid or mismatched evidence and never clears the unresolved charge', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    try {
+      await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade, undefined, false), config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      const receipt = billingReceipt(db)
+      const before = db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()
+      const invalid = [
+        { ...receipt, clientRequestId: 'another-attempt' },
+        { ...receipt, model: 'another-model' },
+        { ...receipt, runId: 'another-run' },
+        { ...receipt, outcome: 'not_accepted' },
+        { ...receipt, outcome: 'not_accepted', usage: { tokensIn: 0, tokensOut: 0, tokensCached: 0 }, costUsd: 0 },
+        { ...receipt, costUsd: Number.NaN },
+        { ...receipt, usage: { ...receipt.usage, tokensIn: 0, tokensOut: 0, tokensCached: 0 } },
+        { ...receipt, usage: { ...receipt.usage, tokensCached: 121 } },
+        { ...receipt, usage: { ...receipt.usage, tokensOut: -1 } },
+        { ...receipt, usage: { ...receipt.usage, tokensOut: 0.5 } },
+        { ...receipt, providerResponseId: 'invalid\nresponse' },
+        { ...receipt, evidence: { ...receipt.evidence, sha256: 'not-a-sha256' } },
+        { ...receipt, evidence: { ...receipt.evidence, observedAt: AS_OF + 1 } },
+        { ...receipt, evidence: { ...receipt.evidence, observedAt: AS_OF - 1 } },
+        { ...receipt, evidence: { ...receipt.evidence, source: 'not-a-url' } },
+        { ...receipt, evidence: { ...receipt.evidence, source: 'http://example.com/synthetic' } },
+        { ...receipt, evidence: { ...receipt.evidence, source: 'https://example.com/bill?token=not-a-real-key' } },
+        { ...receipt, apiKey: 'must-not-enter-audit' },
+      ]
+      expect(invalid.length).toBeGreaterThan(0)
+      for (const value of invalid) expect(() => reconcileModelCall({ db, clock: runtime.clock, receipt: value,
+        expectedPlanHash: 'unused', reason: 'synthetic invalid billing test' })).toThrow()
+      expect(db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()).toEqual(before)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reconciliation_rejected'").get()).toEqual({ n: invalid.length })
+      expect(JSON.stringify(db.prepare('SELECT payload_json FROM audit_events').all())).not.toContain('must-not-enter-audit')
+    } finally { db.close() }
+  })
+
+  it('rejects unattributed ledger charges and changed previews, and rolls back on reconciliation audit failure', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    try {
+      await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade, undefined, false), config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      const receipt = billingReceipt(db)
+      const plan = inspectModelReconciliation(db, receipt, AS_OF)
+      const before = db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()
+      runtime.journal.appendAudit({ actor: 'system', kind: 'synthetic-intervening-audit', payload: {}, ts: AS_OF })
+      expect(() => reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'stale preview' })).toThrow('预览已变化')
+      const fresh = inspectModelReconciliation(db, receipt, AS_OF)
+      db.exec("CREATE TRIGGER injected_reconciliation_failure BEFORE INSERT ON audit_events WHEN NEW.kind = 'model_call_reconciled' BEGIN SELECT RAISE(ABORT, 'injected reconciliation audit failure'); END")
+      expect(() => reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: fresh.planHash, reason: 'rollback fixture' })).toThrow('injected')
+      expect(db.prepare('SELECT * FROM budget_ledger ORDER BY scope').all()).toEqual(before)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+      db.exec('DROP TRIGGER injected_reconciliation_failure')
+      new BudgetLedger(db).record({ at: AS_OF, scopes: [GLOBAL_SCOPE], model: config.route.model,
+        usage: { tokensIn: 7, tokensOut: 2, tokensCached: 0 } }, new PriceTableStore(db).all())
+      expect(() => inspectModelReconciliation(db, receipt, AS_OF)).toThrow('聚合账本不一致')
+    } finally { db.close() }
+  })
+
+  it('records authoritative billing for a reservation with no committed accounting', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    try {
+      db.exec("CREATE TRIGGER injected_accounting_failure BEFORE INSERT ON audit_events WHEN NEW.kind = 'model_call_accounted' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END")
+      const first = await runDecisionRuntime({ ...runtime, model: new FakeDecisionModel(noTrade), config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(first.status).toBe('review')
+      db.exec('DROP TRIGGER injected_accounting_failure')
+      const receipt = billingReceipt(db)
+      expect(() => inspectModelReconciliation(db, { ...receipt, outcome: 'not_accepted',
+        usage: { tokensIn: 0, tokensOut: 0, tokensCached: 0 }, costUsd: 0 }, AS_OF)).toThrow('矛盾')
+      const plan = inspectModelReconciliation(db, receipt, AS_OF)
+      expect(plan.originalEntries).toHaveLength(0)
+      expect(plan.after.every(e => e.estUsd === 0.25 && e.tokensIn === 120 && e.costKnown)).toBe(true)
+      reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'synthetic charged evidence after local accounting failure' })
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 1 })
+      expect(new DecisionRunStore(db).get(first.runId)?.status).toBe('review')
+    } finally { db.close() }
+  })
+
+  it('accepts a zero nonacceptance bill only when there is no observed generation', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    let calls = 0
+    const model: DecisionModel = { async *stream() { calls++; throw new Error('synthetic transport failure before submission') } }
+    try {
+      const first = await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(first.status).toBe('review')
+      expect(calls).toBe(1)
+      const receipt: ModelBillingReceipt = { ...billingReceipt(db), outcome: 'not_accepted',
+        usage: { tokensIn: 0, tokensOut: 0, tokensCached: 0 }, costUsd: 0 }
+      const plan = inspectModelReconciliation(db, receipt, AS_OF)
+      expect(plan.originalEntries).toHaveLength(2)
+      expect(plan.after.every(e => e.costKnown && e.estUsd === 0 && e.tokensIn === 0)).toBe(true)
+      reconcileModelCall({ db, clock: runtime.clock, receipt, expectedPlanHash: plan.planHash, reason: 'synthetic authoritative nonacceptance evidence' })
+      expect(new BudgetLedger(db).state('2026-09-20', GLOBAL_SCOPE)).toMatchObject({ spentUsd: 0, tokens: 0, unknownCostCalls: 0 })
+    } finally { db.close() }
+  })
+
+  it('keeps legacy reservations without unique request correlation pending', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    const runtime = makeRuntime(db)
+    try {
+      const prior = await recordInterruptedRun(db, runtime, 'legacy-crash', 'reserved')
+      const receipt: ModelBillingReceipt = { version: 1, callAttemptId: 'crashed-attempt-reserved', runId: prior.runId,
+        requestHash: prior.requestHash, provider: config.route.provider, model: config.route.model, clientRequestId: 'crashed-attempt-reserved',
+        providerResponseId: null, outcome: 'not_accepted', usage: { tokensIn: 0, tokensOut: 0, tokensCached: 0 }, costUsd: 0,
+        evidence: { receiptId: 'legacy-fixture', source: 'https://example.com/synthetic-billing', sha256: 'a'.repeat(64), observedAt: AS_OF } }
+      expect(() => inspectModelReconciliation(db, receipt, AS_OF)).toThrow('历史调用缺少')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+    } finally { db.close() }
+  })
+
+  it('denies reconciliation during provider I/O and for an already accounted successful call', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    let observedRunning = 0
+    const model = new FakeDecisionModel(noTrade, () => {
+      observedRunning++
+      expect(() => inspectModelReconciliation(db, billingReceipt(db), AS_OF)).toThrow('已终结')
+    })
+    try {
+      expect((await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })).status).toBe('completed')
+      expect(observedRunning).toBe(1)
+      expect(() => inspectModelReconciliation(db, billingReceipt(db), AS_OF)).toThrow('尚未确认费用')
+      expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+    } finally { db.close() }
+  })
+
+  it('denies a different response ID, corrupt audit hash, or a receipt inserted without its paired audit', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const model: DecisionModel = { async *stream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'OUTCOME_UNKNOWN', message: 'synthetic failure', requestId: 'resp_known_fixture' } } } as unknown as StreamChunk
+    } }
+    try {
+      await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      const receipt = billingReceipt(db)
+      expect(() => inspectModelReconciliation(db, receipt, AS_OF)).toThrow('response ID 不匹配')
+      const matching = { ...receipt, providerResponseId: 'resp_known_fixture' }
+      const plan = inspectModelReconciliation(db, matching, AS_OF)
+      db.prepare('INSERT INTO model_call_reconciliations VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+        matching.callAttemptId, matching.provider, matching.evidence.receiptId, plan.receiptHash,
+        JSON.stringify(matching), JSON.stringify(plan), 'unpaired synthetic row', AS_OF)
+      expect(() => inspectModelReconciliation(db, matching, AS_OF)).toThrow('缺少唯一核销审计')
+      db.exec('DROP TRIGGER audit_events_no_update')
+      db.prepare("UPDATE audit_events SET hash='corrupt-fixture-hash' WHERE seq=(SELECT MIN(seq) FROM audit_events)").run()
+      expect(() => inspectModelReconciliation(db, matching, AS_OF)).toThrow('审计哈希链损坏')
+    } finally { db.close() }
+  })
+})
+
 describe('R3 decision runtime', () => {
+  it.each([{ payload: [] }, { payload: 'malformed-scalar' }])('keeps malformed reservation audit payloads fail-closed after SQL projection', async ({ payload }) => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db), model = new FakeDecisionModel(noTrade)
+    runtime.journal.appendAudit({ actor: 'system', kind: 'model_call_failed', payload, ts: AS_OF })
+    try {
+      const result = await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(result.status).toBe('review')
+      expect(result.reason).toContain('reservation 审计损坏')
+      expect(model.calls).toBe(0)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM budget_ledger').get()).toEqual({ n: 0 })
+    } finally { db.close() }
+  })
+
   it('binds each transport request to its persisted attempt while sharing the cache cohort', async () => {
     const db = new Database(':memory:')
     migrate(db)

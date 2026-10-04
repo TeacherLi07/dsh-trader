@@ -58,6 +58,7 @@ describe('schema (plan §4.1 invariants)', () => {
       'config_versions',
       'price_table',
       'budget_ledger',
+      'model_call_reconciliations',
       'heartbeat',
       'supervisor_window_cursors',
       'supervisor_windows',
@@ -74,6 +75,23 @@ describe('schema (plan §4.1 invariants)', () => {
   it('is idempotent and records the schema version', () => {
     expect(() => migrate(db)).not.toThrow()
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
+  })
+
+  it('v11 to v12 keeps previous budgets and adds immutable billing reconciliation evidence', () => {
+    db.prepare("INSERT INTO budget_ledger (day, scope, tokens_in, est_usd, cost_known) VALUES ('2026-10-04', 'global', 100, 0.1, 0)").run()
+    db.exec('DROP TABLE model_call_reconciliations; PRAGMA user_version=11')
+    const before = db.prepare('SELECT * FROM budget_ledger').all()
+    migrate(db)
+    migrate(db)
+    expect(db.pragma('user_version', { simple: true })).toBe(12)
+    expect(db.prepare('SELECT * FROM budget_ledger').all()).toEqual(before)
+    expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
+    const insert = db.prepare('INSERT INTO model_call_reconciliations VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    expect(() => insert.run('call', 'provider', 'receipt', 'hash', '{}', '{}', ' ', 1)).toThrow('CHECK')
+    insert.run('call', 'provider', 'receipt', 'hash', '{}', '{}', 'fixture', 1)
+    expect(() => db.prepare("UPDATE model_call_reconciliations SET reason='changed'").run()).toThrow('immutable')
+    expect(() => db.prepare('DELETE FROM model_call_reconciliations').run()).toThrow('immutable')
+    expect(() => insert.run('another-call', 'provider', 'receipt', 'hash', '{}', '{}', 'fixture', 1)).toThrow('UNIQUE')
   })
 
   it('v10 给旧 PM quotes 保留未知 availability，并在同 source key 首次重读时补真实可见时刻', () => {

@@ -448,7 +448,7 @@ function responseIsTerminal(event: ResponseStreamEvent): boolean {
   return event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed'
 }
 
-function responseRequestId(event: ResponseStreamEvent): ProviderRequestId | undefined {
+function responseRequestId(event: ResponseStreamEvent, apiKey: string): ProviderRequestId | undefined {
   let id: string
   switch (event.type) {
     case 'response.created':
@@ -461,6 +461,9 @@ function responseRequestId(event: ResponseStreamEvent): ProviderRequestId | unde
       return undefined
   }
   if (typeof id !== 'string' || id.length === 0 || id.length > 256 || /[\u0000-\u001f\u007f]/.test(id)) return undefined
+  // request.id 会进入 DSH failure 和持久审计；上游回显凭据时宁可失去该 ID，不能扩大泄露面。
+  const encodedApiKey = encodeURIComponent(apiKey)
+  if (id.includes(apiKey) || id.includes(encodedApiKey)) return undefined
   return ProviderRequestId(id)
 }
 
@@ -670,7 +673,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
         if (next.done) break
         const raw = next.value
         if (raw.type === 'message' && raw.message !== undefined) {
-          const observedRequestId = responseRequestId(raw.message)
+          const observedRequestId = responseRequestId(raw.message, apiKey)
           if (providerRequestId === undefined && observedRequestId !== undefined) providerRequestId = observedRequestId
           if (responseIsTerminal(raw.message)) {
             terminalEvent = raw.message.type

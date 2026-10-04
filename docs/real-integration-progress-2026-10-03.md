@@ -47,3 +47,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04 07:44 UTC：V5只读鉴权恢复
 
 [完整对照](htx-auth-diagnostics-2026-10-04.md)：指定代理下 `.vn`/`.com` V5余额成功，生产HtxBroker权益24.904121200514755 USDT、持仓0、merged挂单0；私有读取全部V5，交易动作0。当前合约鉴权阻塞解除，前后差异根因尚未定位，旧失败证据保留。
+
+## 2026-10-04：模型费用核销工程入口
+
+[核销验收](model-billing-reconciliation-2026-10-04.md)：schema v12 的单次请求账单凭据、完整费用归因、原子核销、真实SIGKILL、CLI幂等与paper真启动通过；pnpm verify 82文件/925测试，全库行87.37%/分支76.97%。本次凭据扫描14264文件/1379744638字节、命中0。实际旧未知账单核销0，fixture没有网络/付费请求/订单，独立经济段与funding/长期观察仍待完成。

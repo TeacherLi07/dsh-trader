@@ -1,0 +1,78 @@
+{
+  "date": "2026-10-04",
+  "task": "R5 audited model billing reconciliation",
+  "schemaVersion": 12,
+  "verify": {
+    "command": "pnpm verify",
+    "passed": true,
+    "testFiles": 82,
+    "tests": 925
+  },
+  "coverage": {
+    "total": {
+      "lines": 87.37,
+      "statements": 83.27,
+      "functions": 90.78,
+      "branches": 76.97
+    },
+    "module": {
+      "lines": 96.62,
+      "statements": 91,
+      "functions": 100,
+      "branches": 89.78
+    }
+  },
+  "cli": {
+    "passed": true,
+    "syntheticModelAndBillingFixture": true,
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/model-billing-reconciliation-cli-final",
+    "originalStatus": "review",
+    "originalFailurePreserved": true,
+    "terminalRunUnmodified": true,
+    "inspectDbHashUnchanged": true,
+    "ledgerRows": 2,
+    "reconciledCalls": 1,
+    "reconciliationAudits": 1,
+    "repeatedApplyIdempotent": true,
+    "externalInvoicesVerified": 0,
+    "historicalUnknownReservationsCleared": 0,
+    "modelFixtureCalls": 1,
+    "paidModelCalls": 0,
+    "networkCalls": 0,
+    "exchangeActions": 0,
+    "newOrderIntents": 0
+  },
+  "offlineStartup": {
+    "passed": true,
+    "broker": "paper",
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "modelCalls": 0,
+    "isolatedProfile": true
+  },
+  "realSigkill": {
+    "duringReceiptInsert": true,
+    "ledgerReceiptAndAuditRolledBack": true,
+    "restartAppliedOnce": true
+  },
+  "secretScan": {
+    "at": "2026-10-04T09:53:14.812Z",
+    "credentialReferences": 4,
+    "files": 14264,
+    "bytes": 1379744638,
+    "hits": 0
+  },
+  "providerIdSecretEchoRegression": {
+    "childCommit": "dc20cf48566e0d688bd4dc1da41e477f7568727e",
+    "rawAndEncodedExactAndEmbeddedCases": 4,
+    "realRequests": 0
+  },
+  "originalRealUnknownBillsReconciled": 0,
+  "limitations": [
+    "Evidence authenticity requires operator review; file hash alone does not authenticate provider billing",
+    "Legacy calls lacking unique request correlation or atomic accounting remain pending",
+    "Production funding resolver and independent economic/long-term acceptance remain incomplete"
+  ]
+}

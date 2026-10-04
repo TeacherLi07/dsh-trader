@@ -176,10 +176,10 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 执行 | `order_intents`, `orders`, `fills` | client id 唯一；状态单向迁移；重复回报不重复成交 |
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
 | 触发 | `triggers`, `supervisor_window_cursors`, `supervisor_windows` | 去重、限流、带退避的有界重试、事件过期、重启恢复 |
-| 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger` | 审计 append-only；限额与成本版本化 |
+| 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger`, `model_call_reconciliations` | 审计 append-only；限额与成本版本化 |
 | 预测市场 | `pm_markets`, `pm_market_versions`, `pm_series`, `pm_quotes`, `pm_watches` | 当前投影可更新；历史市场元数据 append-only 并按本机 `available_at` 回放；概率序列与盘口分别同时约束 source event time 和本机可用时间；只读、别名有期限且有上限 |
 
-当前 schema 为 v11。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v12。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
 必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
@@ -235,6 +235,30 @@ CREATE TRIGGER IF NOT EXISTS market_feature_recoveries_confirm_once
     OR NEW.rebuild_reason IS NOT OLD.rebuild_reason
   BEGIN SELECT RAISE(ABORT, 'feature recovery can only be confirmed once'); END;
 
+```
+
+v12 增加模型费用核销凭据。原 reservation/失败/终态 run 不修改，费用聚合可在完整审计可归因时按外部 USD 账单重算；只关闭费用阻塞，不重新授权原请求。同调用和同 provider 的单条账单各只能使用一次，核销凭据禁止更新/删除。
+
+```sql
+CREATE TABLE IF NOT EXISTS model_call_reconciliations (
+  call_attempt_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+  receipt_id TEXT NOT NULL CHECK (length(trim(receipt_id)) > 0),
+  receipt_hash TEXT NOT NULL,
+  receipt_json TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+  reconciled_at INTEGER NOT NULL CHECK (reconciled_at >= 0),
+  UNIQUE (provider, receipt_id)
+);
+CREATE TRIGGER IF NOT EXISTS model_call_reconciliations_no_update
+  BEFORE UPDATE ON model_call_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'model billing reconciliation is immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS model_call_reconciliations_no_delete
+  BEFORE DELETE ON model_call_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'model billing reconciliation is immutable');
+  END;
 ```
 
 ### 4.2 权威顺序
@@ -499,7 +523,7 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 
-**未决运行的恢复入口**：bar修订的feature-only重建与显式游标确认命令已接入，schema v11保留不可修改的恢复凭据；完整历史分页重启、PIT、幂等、拒绝与真实SIGKILL均已补验，见 `docs/feature-recovery-2026-10-04.md`。先停profile，查看计划、重建、单独确认，再重启；原隔离观测不删除，新bar不跳过。模型调用未决reservation仍缺用provider usage/billing证据核销的审计流程，不能删除预留或盲目重发。
+**未决运行的恢复入口**：bar修订的feature-only重建与显式游标确认命令已接入，schema v11保留不可修改的恢复凭据；完整历史分页重启、PIT、幂等、拒绝与真实SIGKILL均已补验，见 `docs/feature-recovery-2026-10-04.md`。先停profile，查看计划、重建、单独确认，再重启；原隔离观测不删除，新bar不跳过。模型费用核销入口 `scripts/model-billing-reconciliation.mjs` 已接入 schema v12：停profile后默认只读查看，人工审阅外部账单与usage证据、校验原文件hash，再以精确planHash和原因apply；完整聚合审计对不上或历史缺少单次请求身份/原子记账凭据仍拒绝。原失败/终态run不改写，相同原请求不能重发。旧真实未知账单没有核销，凭据缺口仍是阻塞项；验收见 `docs/model-billing-reconciliation-2026-10-04.md`。
 
 **2026-10-03 真实工程测试进度**：早期 6 条模型判断/19 次调用已保留完整 usage、失败和原始脱敏 trace，估算合计 0.202095972 USD；其中指定 Flash/high/32k 的 2 条判断完成。
 HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已完成非空仓位 + 原生 SL/TP 的 merged 查询、保留保护撤单、reduce-only 平仓及空仓后撤保护。

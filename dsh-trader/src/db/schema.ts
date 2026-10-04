@@ -17,7 +17,7 @@
  * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
  * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型；v9 为 PM 元数据保存按本机获知时间回放的 append-only 版本；v10 为 PM 盘口补本机可用时刻。
  */
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -362,6 +362,27 @@ CREATE TABLE IF NOT EXISTS budget_ledger (
   cost_known INTEGER NOT NULL DEFAULT 0 CHECK (cost_known IN (0, 1)),
   PRIMARY KEY (day, scope)
 );
+
+-- 外部账单只能关闭一次 reservation；原模型失败与终态 run 不回写。
+CREATE TABLE IF NOT EXISTS model_call_reconciliations (
+  call_attempt_id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL CHECK (length(trim(provider)) > 0),
+  receipt_id TEXT NOT NULL CHECK (length(trim(receipt_id)) > 0),
+  receipt_hash TEXT NOT NULL,
+  receipt_json TEXT NOT NULL,
+  plan_json TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+  reconciled_at INTEGER NOT NULL CHECK (reconciled_at >= 0),
+  UNIQUE (provider, receipt_id)
+);
+CREATE TRIGGER IF NOT EXISTS model_call_reconciliations_no_update
+  BEFORE UPDATE ON model_call_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'model billing reconciliation is immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS model_call_reconciliations_no_delete
+  BEFORE DELETE ON model_call_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'model billing reconciliation is immutable');
+  END;
 
 -- ── 预测市场（Polymarket）事件源：只读，永不交易（plan §4.4）──────────────────
 CREATE TABLE IF NOT EXISTS pm_markets (

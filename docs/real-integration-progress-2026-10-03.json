@@ -404,5 +404,14 @@
     "openOrders": 0,
     "realExchangeOrdersSubmitted": 0,
     "rootCauseConfirmed": false
+  },
+  "modelBillingReconciliation20261004": {
+    "report": "docs/model-billing-reconciliation-2026-10-04.json",
+    "schemaVersion": 12,
+    "engineeringPassed": true,
+    "realHistoricalBillsReconciled": 0,
+    "paidModelCalls": 0,
+    "verifyTests": 925,
+    "secretHits": 0
   }
 }

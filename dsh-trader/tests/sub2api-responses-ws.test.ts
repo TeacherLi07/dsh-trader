@@ -136,6 +136,7 @@ function adapter(
   wireModelId = WIRE_MODEL_ID,
   effort: ResponsesReasoningEffort = 'high',
   strictTools = false,
+  resolvedApiKey = FAKE_KEY,
 ): Sub2ApiResponsesWebSocketAdapter {
   const config: Sub2ApiResponsesWsConfig = {
     enabled: true,
@@ -154,7 +155,7 @@ function adapter(
     }],
   }
   return new Sub2ApiResponsesWebSocketAdapter(config, {
-    resolveApiKey: async () => { onResolve?.(); return FAKE_KEY },
+    resolveApiKey: async () => { onResolve?.(); return resolvedApiKey },
     now: () => 1_800_000_000_000,
   })
 }
@@ -755,6 +756,39 @@ describe('Sub2API Responses WebSocket provider', () => {
       registration()
       await llmFiber.dispose()
     }
+  })
+
+  it('response.id 精确或包含原始/URL 编码凭据时不进入 failure 或可供审计的 chunk', async () => {
+    const resolvedApiKey = 'sk/fake+loopback-key'
+    const encodedApiKey = encodeURIComponent(resolvedApiKey)
+    const echoedIds = [resolvedApiKey, `resp_${resolvedApiKey}`, encodedApiKey, `resp_${encodedApiKey}`]
+    let responseIndex = 0
+    const gateway = await startGateway((socket) => {
+      const responseId = echoedIds[responseIndex++]
+      if (responseId === undefined) throw new Error('test provider id fixture exhausted')
+      socket.send(JSON.stringify({
+        type: 'response.created', sequence_number: 0,
+        response: { id: responseId, object: 'response', status: 'in_progress', model: WIRE_MODEL_ID, output: [] },
+      }))
+      socket.close(1011, 'upstream interrupted after response creation')
+    })
+    const model = adapter(gateway.baseURL, undefined, MODEL_ALIAS, WIRE_MODEL_ID, 'high', false, resolvedApiKey)
+
+    for (let index = 0; index < echoedIds.length; index += 1) {
+      const chunks: StreamChunk[] = []
+      for await (const chunk of model.stream(requestOptions())) chunks.push(chunk)
+
+      const finish = chunks.at(-1)
+      if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected unresolved provider error finish')
+      expect(finish.reason.failure).toMatchObject({ code: 'OUTCOME_UNKNOWN' })
+      expect(finish.reason.failure).not.toHaveProperty('requestId')
+      expect(JSON.stringify(chunks)).not.toContain(resolvedApiKey)
+      expect(JSON.stringify(chunks)).not.toContain(encodedApiKey)
+    }
+    expect(responseIndex).toBeGreaterThan(0)
+    expect(responseIndex).toBe(echoedIds.length)
+    expect(gateway.requests).toHaveLength(echoedIds.length)
+    expect(gateway.httpFallbacks).toEqual([])
   })
 
   it('保留真实限流关闭码和原因并脱敏，已发送的 1013 请求仍保持未知且不重发', async () => {
