@@ -59,7 +59,8 @@
     "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-proxy-routing-diagnostics/report.json",
     "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-proxy-recheck/report.json",
     "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-only-recheck/report.json",
-    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-only-recheck/broker-report.json"
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-only-recheck/broker-report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-after-provider-rebuild/report.json"
   ],
   "v5AuthenticationCurrentlyPassed": true,
   "latestV5OnlyRecheck": {
@@ -101,5 +102,13 @@
     ],
     "nonemptyProtectionExercised": false
   },
-  "credentialSynchronizationReportedByUser": true
+  "credentialSynchronizationReportedByUser": true,
+  "v5AfterProviderRebuild": {
+    "at": "2026-10-04T10:13:20.811Z",
+    "passed": true,
+    "equity": 24.904121200514755,
+    "positions": 0,
+    "openOrders": 0,
+    "exchangeActions": 0
+  }
 }

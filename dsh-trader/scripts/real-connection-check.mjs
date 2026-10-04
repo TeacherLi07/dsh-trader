@@ -238,8 +238,17 @@ try {
           reasoningEffort: policy.reasoningEffort, maxTokens, streamIdleTimeoutMs: 120_000 }
     if (gateway) {
       credentialsFiber = await ctx.plugin(CredentialsLocal, { dshHome: process.env.DSH_HOME ?? '/home/ubuntu/.dsh', watch: false })
-      restoreWs = await traceResponsesWs((kind, detail) => appendFileSync(join(output, 'ws.jsonl'),
-        JSON.stringify(redact({ at: clock.now(), kind, detail })) + '\n', { mode: 0o600 }), (request) => {
+      restoreWs = await traceResponsesWs((kind, detail) => {
+        if (kind === 'ws.connect') {
+          const requestId = detail.headers['x-client-request-id']
+          const matching = db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind='model_call_reserved' AND json_extract(payload_json, '$.callAttemptId')=?").get(requestId)
+          assert.equal(matching.n, 1, 'WS header must match exactly one persisted reservation')
+          report.phases.wsRequestCorrelation ??= { observed: 0, matched: 0 }
+          report.phases.wsRequestCorrelation.observed += 1
+          report.phases.wsRequestCorrelation.matched += matching.n
+        }
+        appendFileSync(join(output, 'ws.jsonl'), JSON.stringify(redact({ at: clock.now(), kind, detail })) + '\n', { mode: 0o600 })
+      }, (request) => {
           wsRequests += 1
           assert.equal(request.model, gateway.wireModelId)
           assert.equal(request.reasoning?.effort, 'max')

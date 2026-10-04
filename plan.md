@@ -542,3 +542,5 @@ HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已
 **2026-10-04 R5缓存实测**：新的profile/cohort固定标识、双工具注册表与独立快照边界在真实Luna/max三阶段历史回放中生效，后两阶段各48768 cached tokens，包含大部分完整快照及公共政策。原DB/事实不变、repair=0、未知预留0；参考上界0.02278372 USD。范围为历史provider回放，不能替代前向经济段或当前V5合约对账；首可见47–79s，TTFT改善仍未证实。证据见 `docs/context-prefix-live-2026-10-04.md`。
 
 **2026-10-04 07:44 UTC V5复测**：指定代理下两个域名的V5余额与生产HtxBroker余额/持仓/merged挂单读取成功，权益24.904121200514755 USDT，持仓0/挂单0/交易动作0。当前鉴权阻塞解除，此前401根因仍未确认；本轮空仓不增加非空保护证据，详见 `docs/htx-auth-diagnostics-2026-10-04.md`。
+
+**2026-10-04 R5当前生产链**：teacherli/Luna/max真实1431 bar/9 series的单轮critique通过结构校验，3次actual socket ID与SQLite reservation匹配，cached97536/149840（65.09%）、参考上界0.02026172 USD，未知预留/repair/重放调用/订单0。final误引用空挂单元素被eligibility降decision_only；draft诊断漏传正单独修复，不修改原样本。见 `docs/responses-ws-identity-2026-10-04.md`，不代表经济验收或资金费已知。

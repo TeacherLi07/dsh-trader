@@ -413,5 +413,17 @@
     "paidModelCalls": 0,
     "verifyTests": 925,
     "secretHits": 0
+  },
+  "responsesWsIdentity20261004": {
+    "report": "docs/responses-ws-identity-2026-10-04.json",
+    "shortRequests": 2,
+    "fullRuntimeRequests": 3,
+    "sqliteReservationMatches": 3,
+    "inputTokens": 149840,
+    "cachedTokens": 97536,
+    "referenceUpperUsd": 0.020261719999999997,
+    "unresolvedUsage": 0,
+    "realExchangeOrdersSubmitted": 0,
+    "modelEvidenceIssuePreserved": true
   }
 }

@@ -1,0 +1,180 @@
+{
+  "date": "2026-10-04",
+  "promptVersion": "decision-r3-v5",
+  "verify": {
+    "command": "pnpm verify",
+    "testFiles": 82,
+    "tests": 926,
+    "passed": true
+  },
+  "shortProbe": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-ws-header-identity-proof",
+    "passed": true,
+    "requestIdentityVerified": true,
+    "requests": 2,
+    "uniqueRequestIds": 2,
+    "cohortCount": 1,
+    "rounds": [
+      {
+        "kind": "tool",
+        "usage": {
+          "inputTokens": 1966,
+          "outputTokens": 177,
+          "totalTokens": 2143,
+          "reasoningTokens": 95
+        }
+      },
+      {
+        "kind": "tool-result-history",
+        "usage": {
+          "inputTokens": 133,
+          "outputTokens": 139,
+          "totalTokens": 272,
+          "reasoningTokens": 130
+        }
+      }
+    ],
+    "referenceEstimateUsd": 0.0007617500000000001,
+    "unresolvedUpperReservationUsd": 0,
+    "contractValidated": true
+  },
+  "productionRuntime": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-runtime-ws-reservation-identity",
+    "passed": true,
+    "providerWsRequests": 3,
+    "providerHttpCalls": 0,
+    "samples": [
+      {
+        "index": 0,
+        "source": "W1",
+        "symbol": "ADA/USDT:USDT",
+        "runId": "run-96d6e918fe261c81391c09ff3ec573bc37c5527c5ad4512465e11a4b57664ced",
+        "status": "completed",
+        "replayed": false,
+        "outcome": "no_trade",
+        "eligibility": {
+          "state": "decision_only",
+          "reasons": [
+            "claims[0] 引用缺失/过期/非叶子事实：/sections/portfolio/value/openOrders/0"
+          ],
+          "validatedEvidencePaths": []
+        },
+        "reason": null
+      }
+    ],
+    "wsRequestCorrelation": {
+      "observed": 3,
+      "matched": 3
+    },
+    "bars": 1431,
+    "series": 9,
+    "calls": [
+      {
+        "stage": "strategist",
+        "requestHash": "sha256:5bdd31a6d40a8860bc658a524903c52ad61fd8840b17982b85bb526eb55e71da",
+        "clientRequestId": "4d7c8592-6f75-4e9a-bcb9-f82b14f0b8e1",
+        "sessionId": "decision-871083bafc47f34eff0ff8d99d4157b684975b05998ccf4e2efc8f4c13e807f7",
+        "tokens": {
+          "tokensCached": 0,
+          "tokensIn": 49342,
+          "tokensOut": 2424
+        },
+        "referenceUsd": 0.0141535,
+        "durationMs": 47956,
+        "requestSentAt": 1791110595480,
+        "firstArgumentMs": 32083,
+        "terminalMs": 46914
+      },
+      {
+        "stage": "risk-critic",
+        "requestHash": "sha256:d923b498a13b3350f18148be9c28953ce182e1a208535161e8983f56636dd139",
+        "clientRequestId": "5158a48a-9e7d-4735-b6b3-6130ee19df41",
+        "sessionId": "decision-871083bafc47f34eff0ff8d99d4157b684975b05998ccf4e2efc8f4c13e807f7",
+        "tokens": {
+          "tokensCached": 48768,
+          "tokensIn": 50185,
+          "tokensOut": 2919
+        },
+        "referenceUsd": 0.0035188600000000004,
+        "durationMs": 55798,
+        "requestSentAt": 1791110643422,
+        "firstArgumentMs": 53064,
+        "terminalMs": 54795
+      },
+      {
+        "stage": "strategist",
+        "requestHash": "sha256:86037e327f79740b7355f455f69234a0c36a988a6c8f4c2982e51388bc015ba9",
+        "clientRequestId": "e2e2f5d5-94bd-41a1-9a98-cc9364580a2f",
+        "sessionId": "decision-871083bafc47f34eff0ff8d99d4157b684975b05998ccf4e2efc8f4c13e807f7",
+        "tokens": {
+          "tokensCached": 48768,
+          "tokensIn": 50313,
+          "tokensOut": 1637
+        },
+        "referenceUsd": 0.00258936,
+        "durationMs": 32751,
+        "requestSentAt": 1791110699233,
+        "firstArgumentMs": 17205,
+        "terminalMs": 31754
+      }
+    ],
+    "tokensIn": 149840,
+    "tokensOut": 6980,
+    "tokensCached": 97536,
+    "cacheRatio": 0.6509343299519488,
+    "referenceUpperUsd": 0.020261719999999997,
+    "standardShortReferenceUsd": 0.00969576,
+    "gatewayInvoiceVerified": false,
+    "repairCalls": 0,
+    "terminalReplayAdditionalRequests": 0,
+    "sharedTopInstructions": true,
+    "sharedTools": true,
+    "sharedCacheKey": true,
+    "uniqueClientRequestIds": 3,
+    "guards": {
+      "samples": [
+        {
+          "name": "expired",
+          "state": "expired",
+          "outcome": "idle",
+          "reason": "触发器在处理前过期"
+        },
+        {
+          "name": "no-budget",
+          "state": "failed",
+          "outcome": "failed",
+          "reason": "[attempt 1] W2 预算拒绝（小时 1/3，今日 1/8）：未配置正数日预算，停止模型调用"
+        },
+        {
+          "name": "invalidation",
+          "state": "done",
+          "outcome": "frozen",
+          "reason": "invalidation P0 已冻结 ADA/USDT:USDT；没有模型调用"
+        }
+      ],
+      "providerInvocations": 0,
+      "passed": true
+    },
+    "paperOrders": [],
+    "realExchangeOrdersSubmitted": 0,
+    "funding": {
+      "endpointSupported": true,
+      "rows": 0,
+      "nonempty": false
+    }
+  },
+  "knownModelIssue": "final claims[0] cited nonexistent /sections/portfolio/value/openOrders/0; eligibility decision_only preserved; draft code diagnostics were not passed to critic/final (separate fix follows)",
+  "evidenceFileHashes": {
+    "shortReport": "3305631e48e2c2011bdb1088b5e60bd2e8aa8823bc54f585f7dc1d4099b94cc2",
+    "runtimeReport": "4cc5c719330845187a8578d48f3cd7a426564efe63dd9c671464a4a9d8d1a9be",
+    "runtimeWsLog": "10ce33da7d35393041e98f03c3aa79560995b3f6f63d242fcc545c082ad80155"
+  },
+  "pricingSourceVerifiedAt": "2026-10-04T10:59:00Z",
+  "pricingSource": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+  "limitations": [
+    "Handshake trace proves client socket arguments; gateway billing classification is unverified",
+    "Short protocol probe is not a shared-prefix cache experiment",
+    "Role/output differences prevent causal TTFT inference",
+    "Single NO_TRADE run is not economic acceptance"
+  ]
+}

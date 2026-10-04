@@ -36,10 +36,28 @@ export async function traceResponsesWs(log, onCreate = () => {}) {
   const { ResponsesWS } = await import('openai/resources/responses/ws')
   const send = ResponsesWS.prototype.send
   const stream = ResponsesWS.prototype.stream
+  const createSocket = ResponsesWS.prototype._createSocket
+  const observedHeaders = new Set([
+    'x-client-request-id', 'session-id', 'thread-id', 'originator', 'version', 'user-agent', 'openai-beta',
+  ])
   ResponsesWS.prototype.send = function (event) {
     if (event.type === 'response.create') onCreate(event)
     log('ws.send', event)
     return send.call(this, event)
+  }
+  // SDK 在这里把认证头与调用方 headers 合并后交给 ws.WebSocket；只投影准许的关联字段。
+  ResponsesWS.prototype._createSocket = function (url, authHeaders) {
+    const requestUrl = new URL(String(url))
+    const mergedHeaders = { ...authHeaders, ...this._wsOptions?.headers }
+    const safeHeaders = {}
+    for (const [key, value] of Object.entries(mergedHeaders)) {
+      const name = key.toLowerCase()
+      if (observedHeaders.has(name) && typeof value === 'string' && value.length <= 1024) {
+        safeHeaders[name] = value
+      }
+    }
+    log('ws.connect', { origin: requestUrl.origin, path: requestUrl.pathname, headers: safeHeaders })
+    return createSocket.call(this, url, authHeaders)
   }
   ResponsesWS.prototype.stream = function (...args) {
     const events = stream.apply(this, args)
@@ -50,7 +68,14 @@ export async function traceResponsesWs(log, onCreate = () => {}) {
       }
     } }
   }
-  return () => { ResponsesWS.prototype.send = send; ResponsesWS.prototype.stream = stream }
+  let restored = false
+  return () => {
+    if (restored) return
+    restored = true
+    ResponsesWS.prototype.send = send
+    ResponsesWS.prototype._createSocket = createSocket
+    ResponsesWS.prototype.stream = stream
+  }
 }
 
 

@@ -1,8 +1,13 @@
 import { execFileSync } from 'node:child_process'
+import { once } from 'node:events'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import OpenAI from 'openai'
+import { WebSocketServer } from 'ws'
 
 const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
@@ -38,6 +43,115 @@ describe('真实连接配置按本轮授权固定来源', () => {
   it('拒绝没有明确 WS 能力或错误协议的配置', () => {
     expect(() => readFixture(undefined, 'chat', true)).toThrow()
     expect(() => readFixture(undefined, 'responses', false)).toThrow()
+  })
+})
+
+describe('真实 Responses WS header 观测', () => {
+  it('只记录 allowlist header 与 URL origin/path，并在退出后恢复 OpenAI SDK 原型', async () => {
+    const helper = await import(helperUrl)
+    const { ResponsesWS } = await import('openai/resources/responses/ws')
+    const prototype = ResponsesWS.prototype as unknown as Record<string, unknown>
+    const original = {
+      send: prototype['send'],
+      stream: prototype['stream'],
+      createSocket: prototype['_createSocket'],
+    }
+    const server = createServer()
+    const sockets = new WebSocketServer({ noServer: true })
+    let upgradeUrl: string | undefined
+    let upgradeAuthorization: string | undefined
+    let receivedRequest: unknown
+    server.on('upgrade', (request, socket, head) => {
+      upgradeUrl = request.url
+      upgradeAuthorization = request.headers['authorization']
+      sockets.handleUpgrade(request, socket, head, (ws) => {
+        sockets.emit('connection', ws, request)
+        ws.on('message', (data) => {
+          receivedRequest = JSON.parse(data.toString()) as unknown
+          ws.send(JSON.stringify({ type: 'response.created', sequence_number: 0,
+            response: { id: 'resp_local_header_probe', object: 'response', status: 'in_progress', output: [] } }))
+          ws.close(1000, 'local-loopback-complete')
+        })
+      })
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address() as AddressInfo
+    const apiKey = 'sk-local-loopback-header-secret'
+    const queryMarker = 'never-log-this-query'
+    const observations: Array<{ readonly kind: string; readonly detail: unknown }> = []
+    const created: unknown[] = []
+    const restore = await helper.traceResponsesWs(
+      (kind: string, detail: unknown) => observations.push({ kind, detail }),
+      (event: unknown) => created.push(event),
+    )
+
+    let ws: InstanceType<typeof ResponsesWS> | undefined
+    let iterator: AsyncIterator<unknown> | undefined
+    try {
+      const client = new OpenAI({ apiKey, baseURL: `http://127.0.0.1:${address.port}/v1`, maxRetries: 0,
+        defaultQuery: { probe_marker: queryMarker } })
+      const socketOptions = {
+        reconnect: null,
+        maxQueueSize: 0,
+        headers: {
+          'x-client-request-id': 'attempt-header-0001',
+          'session-id': 'cohort-header-v1',
+          'thread-id': 'cohort-header-v1',
+          originator: 'codex_cli_rs',
+          version: '0.160.0',
+          'User-Agent': 'codex_cli_rs/0.160.0 loopback',
+          'OpenAI-Beta': 'responses_websockets=2026-02-06',
+          'x-unapproved-header': 'must-not-be-recorded',
+        },
+      }
+      ws = new ResponsesWS(client, socketOptions)
+      ws.on('error', () => {})
+      iterator = ws.stream()[Symbol.asyncIterator]()
+      let opened = await iterator.next()
+      while (!opened.done && (opened.value as { type?: string } | undefined)?.type !== 'open') opened = await iterator.next()
+      expect(opened.done).toBe(false)
+      expect(opened.value).toMatchObject({ type: 'open' })
+      ws.send({ type: 'response.create', model: 'local-loopback', input: [] })
+      const response = await iterator.next()
+      expect(response.value).toMatchObject({ type: 'message', message: { type: 'response.created' } })
+      const closed = await iterator.next()
+      expect(closed.value).toMatchObject({ type: 'close' })
+
+      const connect = observations.find((item) => item.kind === 'ws.connect')
+      expect(connect?.detail).toEqual({
+        origin: `ws://127.0.0.1:${address.port}`,
+        path: '/v1/responses',
+        headers: {
+          'x-client-request-id': 'attempt-header-0001',
+          'session-id': 'cohort-header-v1',
+          'thread-id': 'cohort-header-v1',
+          originator: 'codex_cli_rs',
+          version: '0.160.0',
+          'user-agent': 'codex_cli_rs/0.160.0 loopback',
+          'openai-beta': 'responses_websockets=2026-02-06',
+        },
+      })
+      expect(upgradeAuthorization?.startsWith('Bearer ')).toBe(true)
+      expect(upgradeUrl).toContain(`probe_marker=${queryMarker}`)
+      expect(receivedRequest).toMatchObject({ type: 'response.create', model: 'local-loopback' })
+      expect(created).toHaveLength(1)
+      expect(JSON.stringify(observations)).not.toContain(apiKey)
+      expect(JSON.stringify(observations)).not.toContain(queryMarker)
+      expect(JSON.stringify(observations)).not.toContain('must-not-be-recorded')
+      expect(JSON.stringify(observations).toLowerCase()).not.toContain('authorization')
+    } finally {
+      restore()
+      try { ws?.close({ code: 1000, reason: 'test-cleanup' }) } catch { /* close 后清理仍继续。 */ }
+      await iterator?.return?.()
+      for (const socket of sockets.clients) socket.terminate()
+      await new Promise<void>((resolve, reject) => sockets.close((error) => error === undefined ? resolve() : reject(error)))
+      await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)))
+    }
+    expect(prototype['send']).toBe(original.send)
+    expect(prototype['stream']).toBe(original.stream)
+    expect(prototype['_createSocket']).toBe(original.createSocket)
+    expect(observations.filter((item) => item.kind === 'ws.connect')).toHaveLength(1)
   })
 })
 

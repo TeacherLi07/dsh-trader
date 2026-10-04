@@ -51,3 +51,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04：模型费用核销工程入口
 
 [核销验收](model-billing-reconciliation-2026-10-04.md)：schema v12 的单次请求账单凭据、完整费用归因、原子核销、真实SIGKILL、CLI幂等与paper真启动通过；pnpm verify 82文件/925测试，全库行87.37%/分支76.97%。本次凭据扫描14264文件/1379744638字节、命中0。实际旧未知账单核销0，fixture没有网络/付费请求/订单，独立经济段与funding/长期观察仍待完成。
+
+## 2026-10-04：实际WS身份与完整生产链
+
+[真实WS证据](responses-ws-identity-2026-10-04.md)：短探针2次、完整生产critique 3次，全部teacherli/Luna/max；后者header-ID与SQLite reservation 3/3匹配，cached97536/149840（65.09%），参考上界0.02026172 USD，repair/未知预留/重放新增调用/订单均0。final错误引用空挂单数组元素，被资格闸降decision_only；draft诊断漏传正在单独修复。pnpm verify 82文件/926测试。V5生产broker重建后仍读取成功；funding样本0和经济/长期验收缺口保留。

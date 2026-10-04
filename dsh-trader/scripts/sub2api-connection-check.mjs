@@ -24,6 +24,7 @@ const home = process.env.DSH_HOME ?? '/home/ubuntu/.dsh'
 const configured = readLunaGatewayConfig(process.argv[3])
 const completeSchema = process.argv.includes('--complete-schema')
 const sessionId = randomUUID()
+const clientRequestIds = [randomUUID(), randomUUID()]
 const submissionTool = completeSchema ? DECISION_ENVELOPE_TOOL : { name: 'submit_connection_result', description: 'Return connection status only; no side effects.',
   parameters: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', enum: ['OK'] } }, required: ['status'] } }
 const price = lunaGatewayReferencePrice(Date.now())
@@ -31,15 +32,27 @@ const report = { startedAt: Date.now(), provider: WsProvider.SUB2API_RESPONSES_W
   model: configured.model, endpoint: configured.baseURL, sourceConfig: configured.sourceConfig,
   maxTokens: 8192, reasoningEffort: configured.reasoningEffort,
   referencePrice: price, costKnown: false, gatewayPriceVerified: false, realExchangeOrdersSubmitted: 0,
-  strictTools: true, completeSchema, namedToolChoice: true, toolCatalogSize: completeSchema ? DECISION_WORKFLOW_TOOLS.length : 1, syntheticContractProbe: completeSchema, sessionId, submittedRequests: 0, referenceBudgetUsd: 0.05, reservations: [], chunks: [], rounds: [], passed: false }
+  strictTools: true, completeSchema, namedToolChoice: true, toolCatalogSize: completeSchema ? DECISION_WORKFLOW_TOOLS.length : 1, syntheticContractProbe: completeSchema, sessionId, clientRequestIds,
+  observedHandshakes: [], submittedRequests: 0, referenceBudgetUsd: 0.05, reservations: [], chunks: [], rounds: [], passed: false }
 let key
 const redact = (value) => {
   let text = JSON.stringify(value)
   if (key) text = text.replaceAll(key, '[REDACTED]').replaceAll(encodeURIComponent(key), '[REDACTED]')
   return JSON.parse(text)
 }
-const log = (kind, detail) => appendFileSync(join(output, 'ws.jsonl'),
-  JSON.stringify(redact({ at: Date.now(), kind, detail })) + '\n', { mode: 0o600 })
+const log = (kind, detail) => {
+  if (kind === 'ws.connect') {
+    const ordinal = report.observedHandshakes.length
+    assert.ok(ordinal < clientRequestIds.length, 'no extra WebSocket handshake permitted')
+    assert.equal(detail.headers['x-client-request-id'], clientRequestIds[ordinal])
+    assert.equal(detail.headers['session-id'], sessionId)
+    assert.equal(detail.headers['thread-id'], sessionId)
+    assert.equal(detail.headers.originator, 'codex_cli_rs')
+    assert.ok(detail.headers['user-agent']?.startsWith('codex_cli_rs/'))
+    report.observedHandshakes.push(detail)
+  }
+  appendFileSync(join(output, 'ws.jsonl'), JSON.stringify(redact({ at: Date.now(), kind, detail })) + '\n', { mode: 0o600 })
+}
 const restoreWs = await traceResponsesWs(log, (event) => {
   assert.ok(report.submittedRequests < 2, 'no resubmission or extra probe turn permitted')
   const reserve = estimateCost({ tokensIn: Buffer.byteLength(JSON.stringify(event), 'utf8') + 4_096,
@@ -47,7 +60,9 @@ const restoreWs = await traceResponsesWs(log, (event) => {
   assert.equal(reserve.known, true)
   assert.ok(report.reservations.reduce((sum, row) => sum + row.upperUsd, 0) + reserve.usd <= report.referenceBudgetUsd, 'reference probe budget exceeded')
   report.submittedRequests += 1
-  report.reservations.push({ requestOrdinal: report.submittedRequests, upperUsd: reserve.usd })
+  const clientRequestId = clientRequestIds[report.submittedRequests - 1]
+  assert.equal(report.observedHandshakes[report.submittedRequests - 1]?.headers['x-client-request-id'], clientRequestId)
+  report.reservations.push({ requestOrdinal: report.submittedRequests, clientRequestId, upperUsd: reserve.usd })
   log('probe.reserved', report.reservations.at(-1))
   assert.equal(event.model, configured.wireModelId)
   assert.equal(event.reasoning?.effort, 'max', 'reasoning effort must reach wire unchanged')
@@ -70,7 +85,7 @@ try {
   const models = await ctx.llm.listModels(report.provider)
   assert.ok(models.some((model) => model.id === report.model), 'WS route model registration required')
   for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
-    sessionId, maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
+    sessionId, clientRequestId: clientRequestIds[0], maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
     system: completeSchema
       ? 'Use submit_decision_envelope exactly once for a schema contract probe. Outcome no_trade, nonempty thesis, empty claims/rejectedAlternatives/uncertainties, confidence 0.5, riskFraction 0.1. No plan or trade action is needed; optional fields may be null. This probe has no execution tools.'
       : 'Use the submit_connection_result tool exactly once with status OK. No other output.',
@@ -98,7 +113,7 @@ try {
   const history = createAssistantMessage({ content: [tool.block], source: { provider: report.provider, model: report.model } })
   const followup = []
   for await (const chunk of ctx.llm.stream({ provider: report.provider, model: report.model,
-    sessionId, maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
+    sessionId, clientRequestId: clientRequestIds[1], maxTokens: report.maxTokens, temperature: 0, signal: AbortSignal.timeout(180_000),
     system: 'After receiving the connection tool result, reply CONNECTION_OK exactly.',
     messages: [{ role: 'user', content: [{ type: 'text', text: 'Confirm the connection via the status tool.' }] },
       history, createToolResultMessage({ callId: tool.block.id, isError: false,
@@ -115,6 +130,9 @@ try {
   report.usage = usage
   assert.equal(report.chunks.at(-1)?.reason?.kind, 'tool-calls')
   assert.equal(report.submittedRequests, 2, 'one submission per turn; no resubmission permitted')
+  assert.equal(report.observedHandshakes.length, 2, 'nonempty actual socket observations required')
+  assert.equal(new Set(report.reservations.map(row => row.clientRequestId)).size, 2)
+  report.requestIdentityVerified = true
   report.passed = true
 } catch (error) {
   report.error = String(error)
