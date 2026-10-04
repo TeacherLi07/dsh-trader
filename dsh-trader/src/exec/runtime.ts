@@ -34,6 +34,7 @@ import { decisionContextConfig } from '../agents/context-config.js'
 import { protectPositionOrClose, protectionClientOrderId } from './protection.js'
 import { withExposureLock } from './exposure-lock.js'
 import { canonicalJson } from '../util/canonical.js'
+import { paperAccountScopeCandidate } from './account-scope.js'
 
 const DAY_MS = 86_400_000
 const LIVE_VENUES: readonly Exclude<Venue, 'paper'>[] = ['htx']
@@ -81,6 +82,7 @@ interface RiskOutcomeRow {
   entry_price: number
   size_qty: number | null
   entry_fill_qty: number | null
+  account_scope_invalid: number
 }
 
 const RISK_OUTCOME_SQL = [
@@ -90,7 +92,9 @@ const RISK_OUTCOME_SQL = [
   '        JOIN orders ord ON ord.order_id = f.order_id',
   '        JOIN order_intents oi ON oi.client_order_id = ord.client_order_id',
   '        WHERE oi.decision_id = d.decision_id',
-  '        ORDER BY f.ts ASC, f.fill_id ASC LIMIT 1) AS entry_fill_qty',
+  '        ORDER BY f.ts ASC, f.fill_id ASC LIMIT 1) AS entry_fill_qty,',
+  '       EXISTS (SELECT 1 FROM order_intents si WHERE si.decision_id = d.decision_id',
+  '         AND ? IS NOT NULL AND si.account_scope_hash IS NOT ?) AS account_scope_invalid',
   'FROM outcomes o',
   'JOIN decisions d ON d.decision_id = o.decision_id',
   'WHERE o.settled_at <= ? AND EXISTS (SELECT 1 FROM order_intents ri WHERE ri.decision_id = d.decision_id AND (? = \'*\' OR ri.venue = ?))',
@@ -112,15 +116,14 @@ export function createRiskStateProvider(
   journal?: DecisionJournal,
   options: { readonly venue?: string } = {},
 ): RiskStateProvider {
-  // 保留 journal 参数是为了让调用方明确这是同一份 journal 的数据源；查询走 Statements
-  // 缓存，避免高频 getAccount() 不断 prepare 新语句。
-  void journal
+  // 账户绑定在启动阶段才完成；每次读取同一journal的scope，拒绝把旧账户收益当当前风险。
   const statements = new Statements(db)
   let emptyAudited = false
 
   return () => {
     const venueFilter = options.venue ?? '*'
-    const rows = statements.get(RISK_OUTCOME_SQL).all(clock.now(), venueFilter, venueFilter) as RiskOutcomeRow[]
+    const scope = journal?.executionScopeHash ?? null
+    const rows = statements.get(RISK_OUTCOME_SQL).all(scope, scope, clock.now(), venueFilter, venueFilter) as RiskOutcomeRow[]
     if (rows.length === 0) {
       if (!emptyAudited && journal !== undefined) {
         emptyAudited = true
@@ -136,6 +139,9 @@ export function createRiskStateProvider(
 
     const pnl: { settledAt: number; usd: number }[] = []
     for (const row of rows) {
+      if (row.account_scope_invalid !== 0) {
+        throw new Error('RiskStateProvider：已结算结果含历史未知或不同账户 scope，拒绝归入当前账户风险')
+      }
       const qty = row.entry_fill_qty !== null && Math.abs(row.entry_fill_qty) > 0 ? row.entry_fill_qty : row.size_qty
       if (
         qty === null ||
@@ -393,7 +399,7 @@ export async function createExecRuntime(
   const bars = new BarArchive(deps.db)
   const features = new FeatureArchive(deps.db)
   const plans = new PlanStore(deps.db)
-  const local = new LocalStateReader(deps.db)
+  const local = new LocalStateReader(deps.db, () => journal.executionScopeHash)
   const heartbeat = new HeartbeatStore(new Statements(deps.db))
   const riskStateProvider = createRiskStateProvider(deps.db, deps.clock, journal, {
     venue: config.mode === 'paper' ? 'paper' : 'htx',
@@ -401,6 +407,7 @@ export async function createExecRuntime(
   const acknowledgeOrphans = config.liveAckOrphans ?? config.acknowledgeOrphans ?? false
 
   let broker: Broker
+  let candidateScopeHash: string
   let exchange: CcxtProExchangeLike | undefined
   let closeExchange: (() => Promise<void>) | undefined
 
@@ -415,12 +422,13 @@ export async function createExecRuntime(
         slippageBps: config.paperSlippageBps,
         feeBps: config.paperFeeBps,
       })
+      candidateScopeHash = paperAccountScopeCandidate().accountScopeHash
     } else {
       const venue = config.venue as 'htx'
       const factory: ExchangeFactory = deps.createExchange ?? defaultCreateExchange
       exchange = await factory(venue, { enableRateLimit: true, defaultType: config.accountType })
       applyProxyAwareFetch(exchange)
-      broker = new HtxBroker({
+      const htxBroker = new HtxBroker({
         exchange,
         venue,
         clock: deps.clock,
@@ -432,14 +440,22 @@ export async function createExecRuntime(
         sandbox: config.sandbox === true,
         riskStateProvider,
       })
+      broker = htxBroker
       closeExchange = async () => {
         const closable = exchange as CcxtProExchangeLike & { close?: () => Promise<void> }
         await closable.close?.()
       }
+      candidateScopeHash = (await htxBroker.resolveExecutionAccountScope()).accountScopeHash
     }
+    journal.bindExecutionScopeHash({
+      mode: config.mode === 'paper' ? 'paper' : 'live',
+      candidateHash: candidateScopeHash,
+      at: deps.clock.now(),
+    })
     startup.succeed('exchange')
   } catch (error) {
     startup.fail('exchange', error)
+    await closeExchange?.().catch(() => undefined)
     throw error
   }
 

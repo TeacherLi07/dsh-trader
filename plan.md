@@ -173,13 +173,19 @@ qty              = floorToStep(riskQuote / stopDistance)
 |---|---|---|
 | 行情 | `bars`, `features`, `bar_processing`, `market_observations`, `market_feature_recoveries` | 只处理已收盘 bar；PIT 观测按 event/available 双时间只追加；同一 bar 成功后才推进游标 |
 | 判断 | `decision_contexts`, `decision_runs`, `decisions`, `plan_cards` | context 全文可复现；终态 run 由 SQLite trigger 禁止改写；一轮一个最终裁决；每标的一张 active 卡 |
-| 执行 | `order_intents`, `orders`, `fills` | client id 唯一；状态单向迁移；重复回报不重复成交 |
+| 执行 | `order_intents`, `orders`, `fills`, `execution_scope_binding` | client id 唯一；状态单向迁移；重复回报不重复成交；新意图保存账户/执行模式 scope hash；每个数据库只绑定一个不可变 paper 或 live scope；旧意图的 scope 保持 NULL |
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
 | 触发 | `triggers`, `supervisor_window_cursors`, `supervisor_windows` | 去重、限流、带退避的有界重试、事件过期、重启恢复 |
 | 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger`, `model_call_reconciliations` | 审计 append-only；限额与成本版本化 |
 | 预测市场 | `pm_markets`, `pm_market_versions`, `pm_series`, `pm_quotes`, `pm_watches` | 当前投影可更新；历史市场元数据 append-only 并按本机 `available_at` 回放；概率序列与盘口分别同时约束 source event time 和本机可用时间；只读、别名有期限且有上限 |
 
-当前 schema 为 v12。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v13。v13 为新 `order_intents` 增加 nullable `account_scope_hash`，并用单行不可变
+`execution_scope_binding` 将一个数据库绑定到一个 paper 或 live 账户范围。HTX live 的 UID 只参与
+内存 SHA-256；数据库仅保留 scope hash，paper 首次生成独立 namespace hash 并在重启时复用。
+迁移不回填既有意图，旧行的 scope 保持 NULL；结算或恢复查询遇到 NULL/不同账户 scope 时必须拒绝混合。
+本地持仓镜像、非终态累计成交与已结算风险统计同样检查范围；旧未知来源不能被净额抵消或算入
+当前账户。工程与真实只读重启证据见 [账户来源](docs/execution-account-scope-2026-10-04.md)。
+v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
 必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
@@ -526,6 +532,11 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 **2026-10-03 最新连接障碍**：Luna稳定会话v6发出9次请求，8次有usage，第9次以1013上游限流关闭；前2条完整判断通过，第3条最终阶段未决，reservation保留。完整联网恢复另被HTX HTTP200业务401 IP白名单拒绝阻断，模型请求0但未到恢复阶段。真实DB副本3条终态各重放2次已证明零模型/零网络与账本不变；连接故障不冒充恢复成功。业务错误解码前的保护与完整证据见 `docs/provider-diagnostics-2026-10-03.md`，缓存实测见 `docs/codex-cache-investigation-2026-10-03.md`。
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
+
+2026-10-04 已完成 schema v13 账户来源基础：同凭据 UID 摘要、新意图范围、paper 独立 namespace、
+成交 ownership、恢复/镜像/风险范围拒绝和真实生产只读重启验证。旧数据库的 NULL 来源仍未知，
+新运行使用独立数据库并保留旧库，不自动改归属。支付数量归因、assessment/发布时间与非空收支
+来源仍阻塞 funding 生产接线；见 [账户范围验收](docs/execution-account-scope-2026-10-04.md)。
 
 **未决运行的恢复入口**：bar修订的feature-only重建与显式游标确认命令已接入，schema v11保留不可修改的恢复凭据；完整历史分页重启、PIT、幂等、拒绝与真实SIGKILL均已补验，见 `docs/feature-recovery-2026-10-04.md`。先停profile，查看计划、重建、单独确认，再重启；原隔离观测不删除，新bar不跳过。模型费用核销入口 `scripts/model-billing-reconciliation.mjs` 已接入 schema v12：停profile后默认只读查看，人工审阅外部账单与usage证据、校验原文件hash，再以精确planHash和原因apply；完整聚合审计对不上或历史缺少单次请求身份/原子记账凭据仍拒绝。原失败/终态run不改写，相同原请求不能重发。旧真实未知账单没有核销，凭据缺口仍是阻塞项；验收见 `docs/model-billing-reconciliation-2026-10-04.md`。
 

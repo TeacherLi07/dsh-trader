@@ -1,0 +1,160 @@
+{
+  "date": "2026-10-04",
+  "schemaVersion": 13,
+  "verify": {
+    "passed": true,
+    "testFiles": 84,
+    "tests": 984
+  },
+  "coverage": {
+    "lines": 87.77,
+    "branches": 77.37,
+    "functions": 91.18,
+    "statements": 83.7,
+    "accountScopePrimitive": {
+      "statements": 100.0,
+      "functions": 100.0,
+      "branches": 100.0
+    }
+  },
+  "behaviors": [
+    "UID read on the same credentials; only domain-separated hash persisted",
+    "Immutable per-database scope binding; paper namespace stable and isolated",
+    "Legacy intent scope remains NULL; migration does not backfill",
+    "Foreign/NULL histories rejected for fills, recovery, polling, local mirrors and risk",
+    "Mutable credentials checked before and after private requests",
+    "V5 cross requests and returned margin metadata agree; no position/open-order filter hides foreign modes"
+  ],
+  "realRuntime": {
+    "passed": true,
+    "proxy": "http://host.docker.internal:7890",
+    "directory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-final",
+    "instances": 2,
+    "uidReads": 2,
+    "scopeStableAcrossRestart": true,
+    "requests": 68,
+    "allMethodsGet": true,
+    "equityQuote": [
+      24.904121200514755,
+      24.904121200514755
+    ],
+    "openOrders": [
+      0,
+      0
+    ],
+    "frozenSymbols": [
+      [],
+      []
+    ],
+    "orders": 0,
+    "exchangeMutationAttempts": 0
+  },
+  "fundingReader": {
+    "passed": true,
+    "directory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-funding-scope-aligned",
+    "sameAccountScope": true,
+    "paymentRows": 0,
+    "knownDecisionFundingCost": false
+  },
+  "offlineStartup": {
+    "status": "passed",
+    "broker": "paper",
+    "commands": [
+      "halt",
+      "resume"
+    ],
+    "halt": {
+      "kind": "success",
+      "text": "已暂停交易并撤销普通挂单，保护单保留。"
+    },
+    "resume": {
+      "kind": "success",
+      "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+    },
+    "equityQuote": 24.914,
+    "modelCalls": 0,
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "command": "dsh --profile trade",
+    "isolatedProfile": true,
+    "output": ""
+  },
+  "credentialFiles": {
+    "paths": [
+      "/workspace/dsh-trader/.env",
+      "/home/ubuntu/.dsh/.env"
+    ],
+    "fourCredentialEntriesPresentAndEqual": true
+  },
+  "paidModelRequestsThisTask": 0,
+  "failuresRetained": {
+    "agent503": {
+      "status": "503 Service Unavailable",
+      "message": "Service temporarily unavailable",
+      "url": "https://ai.teacherli.net/responses",
+      "requestId": "83e01b94-2c00-438e-b3e7-2e03240133f7",
+      "worktree": "/workspace/.worktrees/funding-account-scope",
+      "rootCompletedWithoutRestartingPaidTurn": true
+    },
+    "initialChildTypecheck": 2,
+    "initialChildTargeted": 9,
+    "intermediateMarginFixtureMissing": 1,
+    "concurrentCoverage": {
+      "failed": 3,
+      "reason": "build removed lib while coverage child imports ran; missing lib/cost.js and two SIGKILL fixture timeouts",
+      "serialRerunPassed": true
+    },
+    "initialLiveSetup": {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-real/report.json",
+      "error": "Error: HTX账户身份只读查询失败",
+      "proxyEnvSetAfterNodeStartup": true,
+      "retryWithStartupProxyPassed": true
+    }
+  },
+  "rawLogs": [
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/child-initial-typecheck.log",
+      "sha256": "19a45d9b884b8a6371b21b61f652536d6bdf1f56f1d2a06da2b9981ee0363236"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/child-initial-targeted.log",
+      "sha256": "d352980b8dd5f1554b4b766224f1b7af94f2c8e4942a0581241297f50adc11dd"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/intermediate-verify.log",
+      "sha256": "05ecc6044dbaee1d7eeb73eaa68ec7e2bf5dc3d1c255303f9c82c9843e79eca7"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/verify.log",
+      "sha256": "b4ae72db8bf1e55546018b5058a2abe443d39dc790e5cfdfa92a1b865b4218fd"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/coverage-concurrent-failed.log",
+      "sha256": "1c54de0ef04bce8619e59badc9b6fd4618007a82ceca476a565de5d8188dff43"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/coverage.log",
+      "sha256": "48df227762ca3097afb00be4c1fbed2449e75f6f3b02eb8fac7d86351ae3cae2"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/offline-startup.json",
+      "sha256": "0c5cedb3743647211fa1021c8475146418448a055590b54298e00061ea84bad6"
+    }
+  ],
+  "limitations": [
+    "No production funding allocation/resolver yet; payment publication/assessment coverage unconfirmed",
+    "Empty funding response never treated as known-zero",
+    "Legacy scoped provenance unknown requires independent new runtime DB rather than automatic relabeling",
+    "No economic-effect or fourteen-day R6 claim"
+  ],
+  "secretScan": {
+    "privateReport": "/home/ubuntu/.dsh/trading/integration-2026-10-04/execution-account-scope-engineering/secret-scan.json",
+    "credentialEntries": 4,
+    "files": 22,
+    "bytes": 1124868,
+    "hits": [],
+    "passed": true
+  }
+}

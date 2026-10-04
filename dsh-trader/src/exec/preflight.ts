@@ -157,18 +157,19 @@ export async function runReadOnlyPreflight(
 export class LocalStateReader {
   readonly #statements: Statements
 
-  constructor(db: Database.Database) {
+  constructor(db: Database.Database, private readonly executionScopeHash?: () => string | undefined) {
     this.#statements = new Statements(db)
   }
 
   orders(): readonly LocalOrderSnapshot[] {
     const rows = this.#statements
       .get(
-         `SELECT client_order_id, symbol, state, exchange_order_id FROM order_intents
+         `SELECT client_order_id, symbol, state, exchange_order_id, account_scope_hash FROM order_intents
          WHERE state IN ('created', 'acked')
          ORDER BY created_at ASC, client_order_id ASC`,
       )
-      .all() as { client_order_id: string; symbol: string; state: string; exchange_order_id: string | null }[]
+      .all() as { client_order_id: string; symbol: string; state: string; exchange_order_id: string | null; account_scope_hash: string | null }[]
+    this.#assertScope(rows)
     return rows.map((row) => ({
       clientOrderId: row.client_order_id,
       ...(row.exchange_order_id === null ? {} : { exchangeOrderId: row.exchange_order_id }),
@@ -180,23 +181,26 @@ export class LocalStateReader {
   positions(): readonly LocalPositionSnapshot[] {
     const rows = this.#statements
       .get(
-        `SELECT symbol, qty, price, side FROM (
+        `SELECT symbol, qty, price, side, account_scope_hash FROM (
            SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price,
-                  COALESCE(oi.side, 'buy') AS side, f.ts AS fill_ts, f.fill_id AS fill_id
+                  COALESCE(oi.side, 'buy') AS side, f.ts AS fill_ts, f.fill_id AS fill_id,
+                  oi.account_scope_hash AS account_scope_hash
            FROM fills f
            JOIN orders o ON o.order_id = f.order_id
            JOIN order_intents oi ON oi.client_order_id = o.client_order_id
            UNION ALL
            -- 非终态累计成交尚未进入 fills；在本地仓位镜像中只取该订单最新累计量。
            SELECT oi.symbol AS symbol, o.filled_qty AS qty, o.avg_price AS price,
-                  COALESCE(oi.side, 'buy') AS side, o.updated_at AS fill_ts, o.order_id AS fill_id
+                  COALESCE(oi.side, 'buy') AS side, o.updated_at AS fill_ts, o.order_id AS fill_id,
+                  oi.account_scope_hash AS account_scope_hash
            FROM orders o
            JOIN order_intents oi ON oi.client_order_id = o.client_order_id
            WHERE o.filled_qty > 0 AND o.avg_price IS NOT NULL
              AND NOT EXISTS (SELECT 1 FROM fills f WHERE f.order_id = o.order_id)
          ) ORDER BY fill_ts ASC, fill_id ASC`,
       )
-      .all() as { symbol: string; qty: number; price: number; side: string }[]
+      .all() as { symbol: string; qty: number; price: number; side: string; account_scope_hash: string | null }[]
+    this.#assertScope(rows)
 
     const bySymbol = new Map<string, { qty: number; price: number; side: string }[]>()
     for (const row of rows) {
@@ -212,5 +216,12 @@ export class LocalStateReader {
       out.push({ symbol, qty: position.qty })
     }
     return out.sort((a, b) => a.symbol.localeCompare(b.symbol))
+  }
+
+  #assertScope(rows: readonly { readonly account_scope_hash: string | null }[]): void {
+    const expected = this.executionScopeHash?.()
+    if (expected !== undefined && rows.some(row => row.account_scope_hash !== expected)) {
+      throw new Error('本地执行镜像含历史未知或不同账户 scope，拒绝与当前账户对账')
+    }
   }
 }

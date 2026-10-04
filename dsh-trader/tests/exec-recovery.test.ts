@@ -109,6 +109,28 @@ describe('CrashRecovery：在途意图（plan §4.2 / P1 ⑤）', () => {
 
   })
 
+  it('历史 NULL scope 意图不使用当前 live 凭据查询，直接冻结且不回填', async () => {
+    crashScene('legacy-null-scope', 'ETH/USDT')
+    const hash = `sha256:${'a'.repeat(64)}`
+    const liveJournal = new DecisionJournal(db)
+    liveJournal.bindExecutionScopeHash({ mode: 'live', candidateHash: hash, at: NOW + 1 })
+    let intentLookupCalls = 0
+    const result = await new CrashRecovery({
+      journal: liveJournal,
+      clock,
+      broker: brokerStub({ lookup: () => {
+        intentLookupCalls += 1
+        return Promise.resolve(undefined)
+      } }),
+    }).run()
+
+    expect(intentLookupCalls).toBe(0)
+    expect(result.freezeSymbols).toEqual(['ETH/USDT'])
+    expect(result.alerts.some((alert) => alert.code === 'intent_account_scope_mismatch')).toBe(true)
+    expect(db.prepare('SELECT state, account_scope_hash FROM order_intents WHERE client_order_id = ?')
+      .get('legacy-null-scope')).toEqual({ state: 'unknown', account_scope_hash: null })
+  })
+
   it('broker 不支持按 client_order_id 查询 ⇒ 同样只能判未知（不许猜）', async () => {
     crashScene('co-3', 'SOL/USDT')
     const result = await new CrashRecovery({ journal, clock, broker: brokerStub({}) }).run()

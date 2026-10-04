@@ -212,7 +212,7 @@ describe('computeSettlement', () => {
     const result = computeSettlement(
       {
         decision,
-        fills: [{ fillId: 'f1', qty: 1, price: 100, fee: 0.5, side: 'buy', ts: T0, venue: 'paper' }],
+        fills: [{ fillId: 'f1', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 100, fee: 0.5, side: 'buy', ts: T0, venue: 'paper' }],
         entryPrice: 100,
         direction: 1,
         bars: [
@@ -248,8 +248,8 @@ describe('computeSettlement', () => {
       {
         decision,
         fills: [
-          { fillId: 'paper-entry', qty: 1, price: 100.1, fee: 0, side: 'buy', ts: T0, venue: 'paper' },
-          { fillId: 'paper-exit', qty: 1, price: 101.899, fee: 0, side: 'sell', ts: T0 + HOUR, venue: 'paper' },
+          { fillId: 'paper-entry', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 100.1, fee: 0, side: 'buy', ts: T0, venue: 'paper' },
+          { fillId: 'paper-exit', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 101.899, fee: 0, side: 'sell', ts: T0 + HOUR, venue: 'paper' },
         ],
         entryPrice: 100.1,
         direction: 1,
@@ -276,7 +276,7 @@ describe('computeSettlement', () => {
   it('benchmark 缺失或只有一个观测点时保留 unknown，不把零收益写成基准/alpha', () => {
     const base = {
       decision,
-      fills: [{ fillId: 'f-known', qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
+      fills: [{ fillId: 'f-known', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
       entryPrice: 100,
       direction: 1 as const,
       bars: [
@@ -315,7 +315,7 @@ describe('computeSettlement', () => {
     const result = computeSettlement(
       {
         decision,
-        fills: [{ fillId: 'f-funding', qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
+        fills: [{ fillId: 'f-funding', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 100, fee: 0, side: 'buy', ts: T0 }],
         entryPrice: 100,
         direction: 1,
         bars: [{ openTime: T0, high: 102, low: 99, close: 101 }],
@@ -333,7 +333,7 @@ describe('computeSettlement', () => {
     const result = computeSettlement(
       {
         decision: { ...decision, action: 'open', stopPrice: 110 },
-        fills: [{ fillId: 'f1', qty: 1, price: 100, fee: 0, side: 'sell', ts: T0 }],
+        fills: [{ fillId: 'f1', decisionId: 'd1', accountScopeHash: null, qty: 1, price: 100, fee: 0, side: 'sell', ts: T0 }],
         entryPrice: 100,
         direction: -1,
         bars: [{ openTime: T0, high: 112, low: 95, close: 96 }],

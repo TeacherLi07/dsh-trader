@@ -8,6 +8,7 @@
 
 import type { Clock } from '../clock.js'
 import { numericClientOrderId } from '../util/canonical.js'
+import { htxLiveAccountScope, type HtxLiveAccountScope } from './account-scope.js'
 import type {
   AccountSnapshot,
   Broker,
@@ -166,6 +167,8 @@ export interface CcxtProExchangeLike {
   ): Promise<readonly CcxtTradeLike[]>
   fetchTicker(symbol: string): Promise<CcxtTickerLike>
   setSandboxMode?(enabled: boolean): void
+  /** HTX GET /v2/user/uid；必须在同一已注入凭据的 exchange 实例上读取。 */
+  spotPrivateGetV2UserUid?(): Promise<unknown>
 }
 
 export interface RiskState {
@@ -240,6 +243,18 @@ function assertHtxBusinessSuccess(response: unknown, operation: string): void {
     const label = asString(response['code']) ?? (code === undefined ? 'error' : String(code))
     const detail = asString(response['message']) ?? asString(response['err-msg']) ?? '交易所拒绝请求'
     throw new Error(`HTX ${operation} rejected (${label}): ${detail}`)
+  }
+}
+
+function assertCrossMarginRows(rows: readonly unknown[], kind: string): void {
+  for (const row of rows) {
+    const info = isRecord(row) && isRecord(row['info']) ? row['info'] : undefined
+    const modes = isRecord(row)
+      ? [row['marginMode'], row['margin_mode'], info?.['margin_mode']].filter(value => value !== undefined)
+      : []
+    if (modes.length === 0 || modes.some(mode => mode !== 'cross')) {
+      throw new Error(`HTX ${kind} 缺少 cross 范围证明或包含非 cross 数据，拒绝继续`)
+    }
   }
 }
 
@@ -510,6 +525,8 @@ export class HtxBroker implements Broker {
   readonly #positionSide: string
   readonly #fillPollAttempts: number
   readonly #fillPollMs: number
+  #executionAccountScope: HtxLiveAccountScope | undefined
+  #executionAccountScopePromise: Promise<HtxLiveAccountScope> | undefined
   #marketsLoaded = false
   #marketsLoading: Promise<void> | undefined
   readonly #inFlight = new Map<string, Promise<OrderAck>>()
@@ -561,7 +578,7 @@ export class HtxBroker implements Broker {
     if (equity === undefined) {
       throw this.#safeError(new Error(`余额中没有可识别的 ${this.#quoteCurrency} equity`))
     }
-    const positions = await this.#call(() => this.#exchange.fetchPositions())
+    const positions = await this.#fetchPositionsAll()
     // HTX 的保护单在算法端点，普通列表为空并不表示没有挂单；账户计数必须和对账/撤单使用同一合并视图。
     const openOrders = await this.#fetchOpenOrdersMerged()
 
@@ -605,10 +622,39 @@ export class HtxBroker implements Broker {
     return equity
   }
 
+  /** 只读读取已注入同一 exchange 实例的 UID，并冻结 live 账单范围。 */
+  resolveExecutionAccountScope(): Promise<HtxLiveAccountScope> {
+    this.#assertCredentialsUnchanged()
+    if (this.#accountType !== 'swap' || this.#quoteCurrency !== 'USDT') {
+      throw new Error('HTX账户 scope 仅支持显式 swap/USDT 配置')
+    }
+    if (this.#executionAccountScope !== undefined) return Promise.resolve(this.#executionAccountScope)
+    if (this.#executionAccountScopePromise !== undefined) return this.#executionAccountScopePromise
+    this.#executionAccountScopePromise = (async () => {
+      const endpoint = this.#exchange.spotPrivateGetV2UserUid
+      if (typeof endpoint !== 'function') throw new Error('当前 CCXT 实例不支持 HTX UID 只读端点')
+      let response: unknown
+      try {
+        response = await endpoint.call(this.#exchange)
+      } catch {
+        // UID 不应进入错误、日志或审计；底层错误文本可能回显请求内容。
+        throw new Error('HTX账户身份只读查询失败')
+      }
+      if (!isRecord(response) || response['code'] !== 200 || response['data'] === undefined) {
+        throw new Error('HTX账户身份响应未确认成功')
+      }
+      const scope = htxLiveAccountScope(response['data'])
+      this.#assertCredentialsUnchanged()
+      this.#executionAccountScope = scope
+      return scope
+    })()
+    return this.#executionAccountScopePromise
+  }
+
   async getPositions(): Promise<readonly PositionSnapshot[]> {
     await this.#ensureMarketsLoaded()
     const [positions, openOrders] = await Promise.all([
-      this.#call(() => this.#exchange.fetchPositions()),
+      this.#fetchPositionsAll(),
       this.#fetchOpenOrdersMerged(),
     ])
     const observedAt = this.#clock.now()
@@ -669,6 +715,7 @@ export class HtxBroker implements Broker {
   }
 
   async placeOrder(request: OrderRequest): Promise<OrderAck> {
+    this.#assertCredentialsUnchanged()
     const running = this.#inFlight.get(request.clientOrderId)
     if (running !== undefined) return running
 
@@ -695,7 +742,7 @@ export class HtxBroker implements Broker {
     }
 
     await this.#ensureMarketsLoaded()
-    const positions = await this.#call(() => this.#exchange.fetchPositions())
+    const positions = await this.#fetchPositionsAll()
     const position = positions
       .map((candidate) => this.#readPosition(candidate))
       .find((candidate) => candidate?.snapshot.symbol === request.symbol && candidate.snapshot.qty !== 0)
@@ -709,7 +756,7 @@ export class HtxBroker implements Broker {
       throw this.#safeError(new Error(`placeProtective：${request.symbol} 实际持仓小于已确认成交暴露`))
     }
 
-    const params: CcxtParams = { clientOrderId, reduceOnly: true }
+    const params: CcxtParams = { clientOrderId, reduceOnly: true, marginMode: 'cross' }
     // HTX 线性永续的算法触发单必须显式带 position_side（实测 code 1067）。
     params['position_side'] = this.#positionSide
     addParam(params, 'stopLossPrice', request.stopLossPrice)
@@ -741,6 +788,7 @@ export class HtxBroker implements Broker {
   }
 
   async #cancelOrder(exchangeOrderId: string, symbol: string | undefined): Promise<void> {
+    this.#assertCredentialsUnchanged()
     // ★ HTX 的**算法单（sl/tp/trigger/trailing）**在普通撤单端点查不到（实测 `not.found`），
     // 必须带对应标志走 `v5/algo/cancel_orders`。逐个尝试，全 miss 才报错。
     const attempts: readonly CcxtParams[] = [
@@ -753,7 +801,7 @@ export class HtxBroker implements Broker {
     let canceled = false
     for (const params of attempts) {
       try {
-        await this.#exchange.cancelOrder(exchangeOrderId, symbol, params)
+        await this.#call(() => this.#exchange.cancelOrder(exchangeOrderId, symbol, params))
         canceled = true
         break
       } catch (error) {
@@ -780,7 +828,7 @@ export class HtxBroker implements Broker {
       if (orders.some((order) => !isProtectionOrder(order))) {
         throw this.#safeError(new Error('仍有未撤普通/未知挂单；为避免裸仓而拒绝撤保护单'))
       }
-      const positions = await this.#call(() => this.#exchange.fetchPositions())
+      const positions = await this.#fetchPositionsAll()
       const openPosition = positions
         .map((position) => this.#readPosition(position))
         .some((position) => position !== undefined && position.snapshot.qty !== 0 &&
@@ -811,7 +859,7 @@ export class HtxBroker implements Broker {
         if (remainingOrders.some((candidate) => !isProtectionOrder(candidate))) {
           throw this.#safeError(new Error('撤保护前发现新增普通/未知挂单，拒绝继续'))
         }
-        const currentPositions = await this.#call(() => this.#exchange.fetchPositions())
+        const currentPositions = await this.#fetchPositionsAll()
         const currentOpenPosition = currentPositions
           .map((candidate) => this.#readPosition(candidate))
           .some((candidate) => candidate !== undefined && candidate.snapshot.qty !== 0 &&
@@ -836,8 +884,9 @@ export class HtxBroker implements Broker {
     // 不能回退到 spreadSymbol。ArgumentsRequired/未找到只代表无法解析，不应遮掉后续安全撤单策略。
     if (this.#can('fetchOrder')) {
       try {
-        const order = await this.#exchange.fetchOrder(exchangeOrderId)
+        const order = await this.#call(() => this.#exchange.fetchOrder(exchangeOrderId, undefined, { marginMode: 'cross' }))
         if (order !== undefined && exchangeOrderIdFrom(order) === exchangeOrderId) {
+          assertCrossMarginRows([order], '撤单查询')
           return asString(order['symbol'])
         }
       } catch (error) {
@@ -873,6 +922,7 @@ export class HtxBroker implements Broker {
   }
 
   async findOrderByClientOrderId(clientOrderId: string, symbol?: string): Promise<OrderAck | undefined> {
+    this.#assertCredentialsUnchanged()
     await this.#ensureMarketsLoaded()
     const marketSymbol = symbol ?? this.#spreadSymbol
 
@@ -882,7 +932,7 @@ export class HtxBroker implements Broker {
       // 两条路都查不到 —— 实测开仓成交后 `findOrderByClientOrderId` 返回 undefined。
       // 顺序：先普通单，再逐个算法类型；查不到不猜。
       const attempts: readonly { readonly params: CcxtParams; readonly algo: boolean }[] = [
-        { params: { clientOrderId }, algo: false },
+        { params: { clientOrderId, marginMode: 'cross' }, algo: false },
         { params: { clientOrderId, stopLoss: true }, algo: true },
         { params: { clientOrderId, takeProfit: true }, algo: true },
         { params: { clientOrderId, trigger: true }, algo: true },
@@ -893,8 +943,9 @@ export class HtxBroker implements Broker {
         // 普通单没有 symbol 就无法查询（ccxt 会抛）；算法单不强制，但也尽量带上。
         if (!attempt.algo && marketSymbol === undefined) continue
         try {
-          const order = await this.#exchange.fetchOrder(clientOrderId, marketSymbol, attempt.params)
+          const order = await this.#call(() => this.#exchange.fetchOrder(clientOrderId, marketSymbol, attempt.params))
           if (order !== undefined && clientOrderIdFrom(order) === clientOrderId) {
+            assertCrossMarginRows([order], '订单查询')
             return this.#orderAck(order, { clientOrderId, ...(marketSymbol === undefined ? {} : { symbol: marketSymbol }) }, 'acked')
           }
         } catch (error) {
@@ -918,9 +969,12 @@ export class HtxBroker implements Broker {
 
     if (marketSymbol !== undefined && this.#can('fetchMyTrades')) {
       try {
-        const trades = await this.#exchange.fetchMyTrades(marketSymbol, undefined, undefined, { clientOrderId })
+        const trades = await this.#call(() => this.#exchange.fetchMyTrades(marketSymbol, undefined, undefined, { clientOrderId }))
         for (const trade of trades) {
-          if (clientOrderIdFrom(trade) === clientOrderId) return this.#tradeAck(trade, clientOrderId)
+          if (clientOrderIdFrom(trade) === clientOrderId) {
+            assertCrossMarginRows([trade], '成交查询')
+            return this.#tradeAck(trade, clientOrderId)
+          }
         }
       } catch (error) {
         if (!lookupMiss(error)) throw this.#safeError(error)
@@ -932,15 +986,24 @@ export class HtxBroker implements Broker {
   }
 
   async findOrderByExchangeOrderId(exchangeOrderId: string, symbol?: string): Promise<OrderAck | undefined> {
+    this.#assertCredentialsUnchanged()
     await this.#ensureMarketsLoaded()
     if (!this.#can('fetchOrder')) return undefined
     try {
       let order: CcxtOrderLike | undefined
       // 普通单与算法单使用不同查询端点；exchange id 查询不应携带 clientOrderId 改变查找含义。
-      for (const params of [{}, { stopLoss: true }, { takeProfit: true }, { trigger: true }, { trailing: true }, { stopLossTakeProfit: true }]) {
+      const attempts: readonly CcxtParams[] = [
+        { marginMode: 'cross' }, { stopLoss: true }, { takeProfit: true }, { trigger: true },
+        { trailing: true }, { stopLossTakeProfit: true },
+      ]
+      for (const params of attempts) {
         try {
-          const found = await this.#exchange.fetchOrder(exchangeOrderId, symbol, params)
-          if (found !== undefined && exchangeOrderIdFrom(found) === exchangeOrderId) { order = found; break }
+          const found = await this.#call(() => this.#exchange.fetchOrder(exchangeOrderId, symbol, params))
+          if (found !== undefined && exchangeOrderIdFrom(found) === exchangeOrderId) {
+            assertCrossMarginRows([found], '订单查询')
+            order = found
+            break
+          }
         } catch (error) {
           if (!lookupMiss(error)) throw error
         }
@@ -957,10 +1020,12 @@ export class HtxBroker implements Broker {
       try {
         trades = await this.#call(() => this.#exchange.fetchMyTrades(symbol))
       } catch {
+        this.#assertCredentialsUnchanged()
         // 成交状态已由订单端点确认；费用查询失败只延迟结算，不能把已知订单降成未知。
         return ack
       }
       const matched = trades.filter((trade) => tradeOrderId(trade) === exchangeOrderId)
+      try { assertCrossMarginRows(matched, '成交费用查询') } catch { return ack }
       if (matched.length === 0) return ack
       const costs = matched.map((trade) => feeFrom(trade as Readonly<Record<string, unknown>>))
       const currencies = matched.map((trade) => feeCurrencyFrom(trade as Readonly<Record<string, unknown>>))
@@ -984,6 +1049,7 @@ export class HtxBroker implements Broker {
     const params: CcxtParams = {
       clientOrderId: request.clientOrderId,
       reduceOnly: request.reduceOnly === true,
+      marginMode: 'cross',
     }
     // HTX 的标量 stopLossPrice/takeProfitPrice/trailingPercent 会把普通开仓路由到算法单端点，
     // 并非附带保护。主单只传普通订单字段；确认成交后由执行链独立挂保护并核验覆盖。
@@ -1011,24 +1077,28 @@ export class HtxBroker implements Broker {
     let current = ack
     for (let attempt = 0; attempt < this.#fillPollAttempts; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, this.#fillPollMs))
+      let order: CcxtOrderLike | undefined
       try {
-        const order = await this.#call(() =>
-          this.#exchange.fetchOrder(ack.exchangeOrderId as string, symbol),
+        order = await this.#call(() =>
+          this.#exchange.fetchOrder(ack.exchangeOrderId as string, symbol, { marginMode: 'cross' }),
         )
-        if (order === undefined) continue
-        const refreshed = this.#orderAck(
-          order,
-          { clientOrderId: ack.clientOrderId, intentId: ack.intentId, symbol },
-          'acked',
-        )
-        if (refreshed !== undefined) {
-          current = refreshed
-          if (refreshed.state === 'filled' || refreshed.state === 'rejected' || refreshed.state === 'canceled') {
-            return refreshed
-          }
-        }
       } catch {
+        this.#assertCredentialsUnchanged()
         // 单次查询失败继续轮询；到点仍未确认则返回原 ack（由恢复流程兜底）
+        continue
+      }
+      if (order === undefined) continue
+      assertCrossMarginRows([order], '订单轮询')
+      const refreshed = this.#orderAck(
+        order,
+        { clientOrderId: ack.clientOrderId, intentId: ack.intentId, symbol },
+        'acked',
+      )
+      if (refreshed !== undefined) {
+        current = refreshed
+        if (refreshed.state === 'filled' || refreshed.state === 'rejected' || refreshed.state === 'canceled') {
+          return refreshed
+        }
       }
     }
     return current
@@ -1058,11 +1128,14 @@ export class HtxBroker implements Broker {
    * 非 HTX venue 只取普通挂单（其它 venue 的算法单语义不同，不能照搬）。
    */
   async #fetchOpenOrdersMerged(symbol?: string): Promise<readonly CcxtOrderLike[]> {
+    this.#assertCredentialsUnchanged()
     const collected: CcxtOrderLike[] = []
     const seenIds = new Set<string>()
     const seenClientIds = new Set<string>()
     const seenAnonymous = new Set<string>()
     const push = (orders: readonly CcxtOrderLike[]): void => {
+      // 去重前核验每个来源，重复ID不能掩盖另一端点的矛盾账户字段。
+      assertCrossMarginRows(orders, '挂单')
       for (const order of orders) {
         const exchangeOrderId = exchangeOrderIdFrom(order)
         const clientOrderId = clientOrderIdFrom(order)
@@ -1086,7 +1159,7 @@ export class HtxBroker implements Broker {
     // HTX 的普通挂单端点看不到算法单；五种标志都走同一 merged 视图。
     for (const flag of ['stopLossTakeProfit', 'stopLoss', 'takeProfit', 'trigger', 'trailing'] as const) {
       try {
-        const algo = await this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true })
+        const algo = await this.#call(() => this.#exchange.fetchOpenOrders(symbol, undefined, undefined, { [flag]: true }))
         if (Array.isArray(algo)) push(algo)
       } catch (error) {
         if (!lookupMiss(error)) throw this.#safeError(error)
@@ -1096,7 +1169,22 @@ export class HtxBroker implements Broker {
   }
 
   #balanceParams(): CcxtParams {
+    // HTX 线性 swap 使用 V5；显式标记目标抵押账户，不能靠 multiAssetMode 的隐式默认值。
+    if (this.#accountType === 'swap') return { type: 'swap', multiAssetMode: true }
     return this.#accountType === undefined ? {} : { type: this.#accountType }
+  }
+
+  async #fetchPositionsAll(): Promise<readonly CcxtPositionLike[]> {
+    // 不传 margin_mode 过滤器：必须看见隔离仓并拒绝混用，不能把它筛掉后伪装为空仓。
+    const positions = await this.#call(() => this.#exchange.fetchPositions())
+    assertCrossMarginRows(positions, '持仓')
+    return positions
+  }
+
+  #assertCredentialsUnchanged(): void {
+    if (this.#exchange.apiKey !== this.#apiKey || this.#exchange.secret !== this.#apiSecret) {
+      throw new Error('HTX执行实例凭据已变化，拒绝继续使用原账户 scope')
+    }
   }
 
   #market(symbol: string): CcxtMarketLike | undefined {
@@ -1211,8 +1299,12 @@ export class HtxBroker implements Broker {
 
   async #call<T>(operation: () => Promise<T>): Promise<T> {
     try {
-      return await operation()
+      this.#assertCredentialsUnchanged()
+      const result = await operation()
+      this.#assertCredentialsUnchanged()
+      return result
     } catch (error) {
+      this.#assertCredentialsUnchanged()
       throw this.#safeError(error)
     }
   }

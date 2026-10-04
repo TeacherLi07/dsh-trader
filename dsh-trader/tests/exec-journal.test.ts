@@ -31,6 +31,132 @@ const decision = (over: Partial<DecisionRecord> = {}): DecisionRecord => ({
 })
 
 describe('DecisionJournal', () => {
+  it('persists an immutable account binding; paper reuses its DB namespace across restart', () => {
+    const paperA = `sha256:${'a'.repeat(64)}`
+    const paperB = `sha256:${'b'.repeat(64)}`
+    const first = new DecisionJournal(db)
+    expect(first.bindExecutionScopeHash({ mode: 'paper', candidateHash: paperA, at: NOW })).toBe(paperA)
+    expect(first.bindExecutionScopeHash({ mode: 'paper', candidateHash: paperB, at: NOW + 1 })).toBe(paperA)
+
+    const restarted = new DecisionJournal(db)
+    expect(restarted.bindExecutionScopeHash({ mode: 'paper', candidateHash: paperB, at: NOW + 2 })).toBe(paperA)
+    expect(restarted.executionScopeHash).toBe(paperA)
+    expect(() => restarted.bindExecutionScopeHash({ mode: 'live', candidateHash: paperA, at: NOW + 3 }))
+      .toThrow(/不可换绑/)
+
+    const otherDb = new Database(':memory:')
+    migrate(otherDb)
+    try {
+      const other = new DecisionJournal(otherDb)
+      expect(other.bindExecutionScopeHash({ mode: 'paper', candidateHash: paperB, at: NOW })).toBe(paperB)
+      expect(other.executionScopeHash).not.toBe(restarted.executionScopeHash)
+    } finally {
+      otherDb.close()
+    }
+  })
+
+  it('live UID scope changes and post-write rebinding are rejected', () => {
+    const hashA = `sha256:${'a'.repeat(64)}`
+    const hashB = `sha256:${'b'.repeat(64)}`
+    const scoped = new DecisionJournal(db)
+    expect(scoped.bindExecutionScopeHash({ mode: 'live', candidateHash: hashA, at: NOW })).toBe(hashA)
+    expect(scoped.bindExecutionScopeHash({ mode: 'live', candidateHash: hashA, at: NOW + 1 })).toBe(hashA)
+    expect(() => scoped.bindExecutionScopeHash({ mode: 'live', candidateHash: hashB, at: NOW + 2 }))
+      .toThrow(/不可换绑/)
+
+    const restarted = new DecisionJournal(db)
+    expect(() => restarted.bindExecutionScopeHash({ mode: 'live', candidateHash: hashB, at: NOW + 3 }))
+      .toThrow(/数据库已绑定其他执行账户 scope/)
+
+    const unboundDb = new Database(':memory:')
+    migrate(unboundDb)
+    const unbound = new DecisionJournal(unboundDb)
+    unbound.recordDecision(decision({ decisionId: 'd-unbound' }))
+    unbound.recordIntent({
+      intentId: 'unscoped-before-bind', clientOrderId: 'unscoped-before-bind', decisionId: 'd-unbound',
+      venue: 'paper', symbol: 'BTC/USDT', state: 'canceled', type: 'market', side: 'buy', qty: 1,
+      reduceOnly: false, createdAt: NOW,
+    })
+    expect(() => unbound.bindExecutionScopeHash({ mode: 'live', candidateHash: hashA, at: NOW + 4 }))
+      .toThrow(/未绑定 scope 的意图写入/)
+    unboundDb.close()
+    expect(() => new DecisionJournal(db).recordIntent({
+      intentId: 'unvalidated', clientOrderId: 'unvalidated', decisionId: 'd1',
+      venue: 'htx', symbol: 'BTC/USDT:USDT', state: 'created', type: 'market', side: 'buy',
+      qty: 1, reduceOnly: false, createdAt: NOW,
+    })).toThrow(/必须校验并绑定/)
+  })
+
+  it('records scope by the shared journal entry and rejects cross-account idempotency collisions', () => {
+    const hashA = `sha256:${'c'.repeat(64)}`
+    const hashB = `sha256:${'d'.repeat(64)}`
+    const scoped = new DecisionJournal(db)
+    scoped.bindExecutionScopeHash({ mode: 'live', candidateHash: hashA, at: NOW })
+    scoped.recordDecision(decision())
+    const intent = {
+      intentId: 'scoped-i1', clientOrderId: 'scoped-co1', decisionId: 'd1', venue: 'htx',
+      symbol: 'BTC/USDT:USDT', state: 'filled' as const, type: 'market', side: 'buy', qty: 1,
+      reduceOnly: false, createdAt: NOW,
+    }
+    expect(scoped.recordIntent(intent)).toBe(true)
+    expect(db.prepare('SELECT account_scope_hash FROM order_intents WHERE client_order_id = ?').get('scoped-co1'))
+      .toEqual({ account_scope_hash: hashA })
+    expect(scoped.recordIntent({ ...intent, intentId: 'scoped-i2' })).toBe(false)
+    expect(() => scoped.recordIntent({ ...intent, intentId: 'scoped-i3', clientOrderId: 'scoped-co2', accountScopeHash: hashB }))
+      .toThrow(/不匹配/)
+    expect(() => scoped.recordIntent({ ...intent, intentId: 'scoped-paper', clientOrderId: 'scoped-paper', venue: 'paper' }))
+      .toThrow(/venue 与已绑定执行账户模式不匹配/)
+
+    db.prepare(`INSERT INTO order_intents
+      (intent_id, client_order_id, decision_id, venue, symbol, state, type, side, qty, reduce_only, created_at, account_scope_hash)
+      VALUES ('foreign-i', 'scoped-co-foreign', 'd1', 'htx', 'BTC/USDT:USDT', 'filled', 'market', 'buy', 1, 0, ?, ?)`)
+      .run(NOW, hashB)
+    expect(() => scoped.recordIntent({ ...intent, intentId: 'local-i', clientOrderId: 'scoped-co-foreign' }))
+      .toThrow(/其他账户 scope/)
+  })
+
+  it('exposes decision and account scope on nonempty fills and rejects NULL/mixed scope history', () => {
+    const hashA = `sha256:${'e'.repeat(64)}`
+    const hashB = `sha256:${'f'.repeat(64)}`
+    // 真正的旧NULL成交必须早于数据库scope绑定；新helper不能继续写未知来源。
+    const legacy = new DecisionJournal(db)
+    legacy.recordDecision(decision({ decisionId: 'd-legacy' }))
+    legacy.recordIntent({
+      intentId: 'legacy-fill-i', clientOrderId: 'legacy-fill-co', decisionId: 'd-legacy', venue: 'paper',
+      symbol: 'BTC/USDT', state: 'filled', type: 'market', side: 'buy', qty: 1,
+      reduceOnly: false, createdAt: NOW,
+    })
+    legacy.recordOrder({ orderId: 'legacy-fill-o', venue: 'paper', exchangeOrderId: 'legacy-fill-ex',
+      clientOrderId: 'legacy-fill-co', symbol: 'BTC/USDT', status: 'filled', qty: 1, filledQty: 1,
+      avgPrice: 100, updatedAt: NOW })
+    legacy.recordFill({ fillId: 'legacy-fill-f', orderId: 'legacy-fill-o', qty: 1, price: 100,
+      fee: 0.05, feeCurrency: 'USDT', ts: NOW })
+    const scoped = new DecisionJournal(db)
+    scoped.bindExecutionScopeHash({ mode: 'paper', candidateHash: hashA, at: NOW })
+    scoped.recordDecision(decision())
+    scoped.recordIntent({
+      intentId: 'fill-scope-i', clientOrderId: 'fill-scope-co', decisionId: 'd1', venue: 'paper',
+      symbol: 'BTC/USDT', state: 'filled', type: 'market', side: 'buy', qty: 1,
+      reduceOnly: false, createdAt: NOW,
+    })
+    scoped.recordOrder({ orderId: 'fill-scope-o', venue: 'paper', exchangeOrderId: 'fill-scope-ex',
+      clientOrderId: 'fill-scope-co', symbol: 'BTC/USDT', status: 'filled', qty: 1, filledQty: 1,
+      avgPrice: 100, updatedAt: NOW })
+    scoped.recordFill({ fillId: 'fill-scope-f', orderId: 'fill-scope-o', qty: 1, price: 100,
+      fee: 0.05, feeCurrency: 'USDT', ts: NOW })
+
+    const fills = scoped.fillsForDecision('d1')
+    expect(fills).toHaveLength(1)
+    expect(fills[0]).toMatchObject({ decisionId: 'd1', accountScopeHash: hashA })
+    expect(() => scoped.fillsForSymbolBefore('BTC/USDT', NOW + 1, 'paper')).toThrow(/NULL 或不同账户 scope/)
+    expect(() => scoped.fillsForSymbolBefore('BTC/USDT', NOW + 1, 'paper', hashB))
+      .toThrow(/不同账户 scope/)
+
+    expect(db.prepare('SELECT account_scope_hash FROM order_intents WHERE client_order_id = ?').get('legacy-fill-co'))
+      .toEqual({ account_scope_hash: null })
+    expect(() => scoped.fillsForDecision('d-legacy')).toThrow(/NULL 或不同账户 scope/)
+  })
+
   it('records a decision and reports it once', () => {
     expect(journal.recordDecision(decision())).toBe(true)
     expect(journal.recordDecision(decision())).toBe(false)

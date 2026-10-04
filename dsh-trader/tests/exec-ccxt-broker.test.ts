@@ -22,6 +22,8 @@ const API_KEY = 'test-api-key'
 const API_SECRET = 'test-api-secret'
 
 class FakeExchange implements CcxtProExchangeLike {
+  apiKey: string | undefined
+  secret: string | undefined
   options: Record<string, unknown> = { defaultType: 'spot', adjustForTimeDifference: true }
   readonly id = 'fake'
   readonly has: Readonly<Record<string, unknown>> = {
@@ -68,6 +70,20 @@ class FakeExchange implements CcxtProExchangeLike {
   ticker: CcxtTickerLike = { bid: 100, ask: 100.2 }
   createError: unknown
   createStatus = 'open'
+  marginMode: 'cross' | 'isolated' = 'cross'
+  uid = 63628520
+  uidCalls = 0
+  uidCredentialsAtCall: { readonly apiKey: string | undefined; readonly secret: string | undefined } | undefined
+
+  #scopeMeta<T extends { readonly marginMode?: unknown; readonly info?: unknown }>(value: T): T {
+    const info = value.info !== null && typeof value.info === 'object' && !Array.isArray(value.info)
+      ? value.info as Record<string, unknown>
+      : {}
+    const mode = typeof value.marginMode === 'string'
+      ? value.marginMode
+      : typeof info['margin_mode'] === 'string' ? info['margin_mode'] : this.marginMode
+    return { ...value, marginMode: mode, info: { ...info, margin_mode: mode } }
+  }
 
   async loadMarkets(): Promise<unknown> {
     this.loads += 1
@@ -79,6 +95,12 @@ class FakeExchange implements CcxtProExchangeLike {
     return this.balance
   }
 
+  async spotPrivateGetV2UserUid(): Promise<unknown> {
+    this.uidCalls += 1
+    this.uidCredentialsAtCall = { apiKey: this.apiKey, secret: this.secret }
+    return { code: 200, data: this.uid }
+  }
+
   amountToPrecision(symbol: string, amount: number): string {
     const step = this.markets[symbol]?.precision?.amount ?? 1
     return String(Math.floor(amount / step) * step)
@@ -87,7 +109,7 @@ class FakeExchange implements CcxtProExchangeLike {
   async fetchPositions(): Promise<readonly CcxtPositionLike[]> {
     this.positionsReadCount += 1
     if (this.positionsOnRead?.read === this.positionsReadCount) this.positions = this.positionsOnRead.value
-    return this.positions
+    return this.positions.map((position) => this.#scopeMeta(position))
   }
 
   async fetchOpenOrders(
@@ -99,9 +121,10 @@ class FakeExchange implements CcxtProExchangeLike {
     this.fetchOpenOrdersCalls.push({ symbol, params })
     const flag = Object.keys(params ?? {})[0] as keyof typeof this.algorithmOrders | undefined
     const source = flag === undefined ? this.openOrders : this.algorithmOrders[flag] ?? []
+    const scoped = source.map((order) => this.#scopeMeta(order))
     return symbol === undefined
-      ? source
-      : source.filter((order) => order.symbol === undefined || order.symbol === symbol)
+      ? scoped
+      : scoped.filter((order) => order.symbol === undefined || order.symbol === symbol)
   }
 
   async createOrder(
@@ -122,6 +145,8 @@ class FakeExchange implements CcxtProExchangeLike {
       side,
       amount,
       status: this.createStatus,
+      marginMode: this.marginMode,
+      info: { margin_mode: this.marginMode },
     }
     this.openOrders = [...this.openOrders, order]
     return order
@@ -147,7 +172,7 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>,
   ): Promise<CcxtOrderLike | undefined> {
     this.fetchOrderCalls.push({ id, params })
-    return this.directOrder
+    return this.directOrder === undefined ? undefined : this.#scopeMeta(this.directOrder)
   }
 
   async fetchMyTrades(
@@ -157,7 +182,7 @@ class FakeExchange implements CcxtProExchangeLike {
     params?: Readonly<Record<string, unknown>>,
   ): Promise<readonly CcxtTradeLike[]> {
     this.fetchMyTradesCalls.push({ params })
-    return this.trades
+    return this.trades.map((trade) => this.#scopeMeta(trade))
   }
 
   async fetchTicker(_symbol: string): Promise<CcxtTickerLike> {
@@ -197,6 +222,101 @@ const orderRequest = (over: Partial<OrderRequest> = {}): OrderRequest => ({
 })
 
 describe('CcxtBroker', () => {
+  it('同一凭据只读UID只请求一次；并发调用与重启候选具有相同scope', async () => {
+    const exchange = new FakeExchange()
+    const broker = makeBroker(exchange, { accountType: 'swap' })
+    const [first, second] = await Promise.all([
+      broker.resolveExecutionAccountScope(), broker.resolveExecutionAccountScope(),
+    ])
+    expect(first).toBe(second)
+    expect(exchange.uidCalls).toBe(1)
+    expect(exchange.uidCredentialsAtCall).toEqual({ apiKey: API_KEY, secret: API_SECRET })
+    expect(await broker.resolveExecutionAccountScope()).toBe(first)
+    expect(exchange.uidCalls).toBe(1)
+    expect(JSON.stringify(first)).not.toContain(String(exchange.uid))
+    const other = new FakeExchange()
+    expect((await makeBroker(other, { accountType: 'swap' }).resolveExecutionAccountScope()).accountScopeHash)
+      .toBe(first.accountScopeHash)
+    const changed = new FakeExchange()
+    changed.uid++
+    expect((await makeBroker(changed, { accountType: 'swap' }).resolveExecutionAccountScope()).accountScopeHash)
+      .not.toBe(first.accountScopeHash)
+  })
+
+  it('不为错误账户类型或计价币生成固定的swap/USDT来源', () => {
+    const exchange = new FakeExchange()
+    expect(() => makeBroker(exchange).resolveExecutionAccountScope()).toThrow(/显式 swap\/USDT/)
+    expect(() => makeBroker(exchange, { accountType: 'swap', quoteCurrency: 'USDC' }).resolveExecutionAccountScope())
+      .toThrow(/显式 swap\/USDT/)
+    expect(exchange.uidCalls).toBe(0)
+  })
+
+  it.each([{ code: 401, data: 63628520 }, { code: 200 }, { code: 200, data: 'bad-uid' }])(
+    'UID未确认时不绑定、不重试、错误不回显身份：%j', async response => {
+      const exchange = new FakeExchange()
+      exchange.spotPrivateGetV2UserUid = async () => { exchange.uidCalls++; return response }
+      const broker = makeBroker(exchange, { accountType: 'swap' })
+      await expect(broker.resolveExecutionAccountScope()).rejects.toThrow(/身份响应未确认成功|UID 响应无效/)
+      await expect(broker.resolveExecutionAccountScope()).rejects.toThrow(/身份响应未确认成功|UID 响应无效/)
+      expect(exchange.uidCalls).toBe(1)
+      expect(exchange.createCalls).toHaveLength(0)
+    },
+  )
+
+  it('UID读取过程中替换凭据，或读取后替换凭据，均不能复用旧scope或发出交易请求', async () => {
+    const exchange = new FakeExchange()
+    exchange.spotPrivateGetV2UserUid = async () => {
+      exchange.uidCalls++
+      exchange.secret = 'replacement-secret'
+      return { code: 200, data: exchange.uid }
+    }
+    const broker = makeBroker(exchange, { accountType: 'swap' })
+    await expect(broker.resolveExecutionAccountScope()).rejects.toThrow(/凭据已变化/)
+    expect(() => broker.resolveExecutionAccountScope()).toThrow(/凭据已变化/)
+    await expect(broker.placeOrder(orderRequest())).rejects.toThrow(/凭据已变化/)
+    await expect(broker.cancelOrder('foreign-order')).rejects.toThrow(/凭据已变化/)
+    expect(exchange.uidCalls).toBe(1)
+    expect(exchange.createCalls).toHaveLength(0)
+    expect(exchange.cancelCalls).toHaveLength(0)
+  })
+
+  it('余额请求期间替换凭据的响应不归入旧账户，底层异常不泄漏新凭据', async () => {
+    const exchange = new FakeExchange()
+    const broker = makeBroker(exchange, { accountType: 'swap' })
+    await broker.resolveExecutionAccountScope()
+    exchange.fetchBalance = async () => {
+      exchange.secret = 'replacement-secret'
+      throw new Error('replacement-secret')
+    }
+    await expect(broker.getAccount()).rejects.toThrow(/凭据已变化/)
+    expect(exchange.positionsReadCount).toBe(0)
+    expect(exchange.createCalls).toHaveLength(0)
+  })
+
+  it.each([
+    { symbol: SYMBOL, side: 'long', contracts: 1 },
+    { symbol: SYMBOL, side: 'long', contracts: 1, marginMode: 'isolated' },
+    { symbol: SYMBOL, side: 'long', contracts: 1, marginMode: 'cross', info: { margin_mode: 'isolated' } },
+  ])('不筛掉无来源或非cross持仓：%j', async position => {
+    const exchange = new FakeExchange()
+    exchange.fetchPositions = async () => [position]
+    await expect(makeBroker(exchange).getAccount()).rejects.toThrow(/缺少 cross 范围证明或包含非 cross/)
+    expect(exchange.createCalls).toHaveLength(0)
+  })
+
+  it('重复挂单ID也不能遮掉另一算法来源的矛盾margin_mode', async () => {
+    const exchange = new FakeExchange()
+    exchange.openOrders = [{ id: 'duplicate-id', symbol: SYMBOL, type: 'limit', status: 'open', amount: 1, price: 100 }]
+    exchange.algorithmOrders.stopLoss = [{ id: 'duplicate-id', symbol: SYMBOL,
+      marginMode: 'cross', info: { margin_mode: 'isolated' } }]
+    // 保留矛盾的原生字段，避免fake默认值掩盖来源错误。
+    exchange.fetchOpenOrders = async (_symbol, _since, _limit, params) =>
+      params?.['stopLoss'] === true ? exchange.algorithmOrders.stopLoss! :
+        params === undefined ? [{ ...exchange.openOrders[0], info: { margin_mode: 'cross' } }] : []
+    await expect(makeBroker(exchange).getOpenOrders()).rejects.toThrow(/缺少 cross 范围证明或包含非 cross/)
+    expect(exchange.cancelCalls).toHaveLength(0)
+  })
+
   it('HTX 解码入口拒绝未知业务401，持仓查询不能将错误变成空数组', async () => {
     const exchange = new FakeExchange() as FakeExchange & { handleErrors(...args: unknown[]): unknown }
     let handled = 0
@@ -276,7 +396,7 @@ describe('CcxtBroker', () => {
     await broker.placeOrder(orderRequest({ type, price: type === 'limit' ? 100 : undefined,
       stopLossPrice: 97, takeProfitPrice: 103, trailingPercent: 1 }))
     expect(exchange.createCalls).toHaveLength(1)
-    expect(exchange.createCalls[0]?.params).toEqual({ clientOrderId: orderRequest().clientOrderId, reduceOnly: false })
+    expect(exchange.createCalls[0]?.params).toEqual({ clientOrderId: orderRequest().clientOrderId, reduceOnly: false, marginMode: 'cross' })
     expect(exchange.createCalls[0]?.type).toBe(type)
   })
   it('算法订单按 exchange id 查询必须尝试其端点，不能把 client id 未匹配误报为 venue 不支持', async () => {
@@ -284,7 +404,7 @@ describe('CcxtBroker', () => {
     exchange.fetchOrder = async (id, _symbol, params) => {
       exchange.fetchOrderCalls.push({ id, ...(params === undefined ? {} : { params }) })
       if (params?.['stopLoss'] !== true) throw new Error('OrderNotFound')
-      return { id, clientOrderId: 'own-protection-id', symbol: SYMBOL, status: 'open', side: 'sell', amount: 2, stopLossPrice: 95 }
+      return { id, clientOrderId: 'own-protection-id', symbol: SYMBOL, status: 'open', side: 'sell', amount: 2, stopLossPrice: 95, info: { margin_mode: 'cross' } }
     }
     const found = await makeBroker(exchange).findOrderByExchangeOrderId('remote-algo-id', SYMBOL)
     expect(found).toMatchObject({ exchangeOrderId: 'remote-algo-id', clientOrderId: 'own-protection-id', state: 'acked' })
@@ -529,7 +649,7 @@ describe('CcxtBroker', () => {
     directExchange.directOrder = { id: 'direct-1', clientOrderId: 'target', status: 'closed', average: 101 }
     const direct = await makeBroker(directExchange).findOrderByClientOrderId('target')
     expect(direct).toMatchObject({ exchangeOrderId: 'direct-1', state: 'filled', avgPrice: 101 })
-    expect(directExchange.fetchOrderCalls[0]?.params).toEqual({ clientOrderId: 'target' })
+    expect(directExchange.fetchOrderCalls[0]?.params).toEqual({ clientOrderId: 'target', marginMode: 'cross' })
 
     const openExchange = new FakeExchange()
     openExchange.openOrders = [{ id: 'open-1', clientOrderId: 'target', status: 'open' }]
@@ -802,7 +922,7 @@ describe('CcxtBroker', () => {
   it('★ 按 accountType 读对应账户（HTX 现货/永续分离），否则会给 sizing 一个假的 0', async () => {
     const swap = new FakeExchange()
     await makeBroker(swap, { accountType: 'swap' }).readOnlyBalance()
-    expect(swap.balanceParams.at(-1)).toEqual({ type: 'swap' })
+    expect(swap.balanceParams.at(-1)).toEqual({ type: 'swap', multiAssetMode: true })
 
     const spot = new FakeExchange()
     await makeBroker(spot).readOnlyBalance()

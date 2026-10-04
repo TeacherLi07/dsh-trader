@@ -8,6 +8,7 @@ import type { CcxtBalanceLike, CcxtMarketLike, CcxtOrderLike, CcxtPositionLike, 
 import type { AccountSnapshot, OrderRequest } from '../src/exec/broker.js'
 import { validateIntent } from '../src/exec/gate.js'
 import { DecisionJournal } from '../src/exec/journal.js'
+import { htxLiveAccountScope } from '../src/exec/account-scope.js'
 import { executeAction } from '../src/exec/execute-action.js'
 import { createExecRuntime, createRiskStateProvider } from '../src/exec/runtime.js'
 import type { ExecRuntimeConfig } from '../src/exec/ports.js'
@@ -40,6 +41,20 @@ class FakeExchange implements CcxtProExchangeLike {
   createOrderCalls = 0
   fetchOpenOrdersCalls = 0
   failFetchOpenOrdersCall: number | undefined
+  marginMode: 'cross' | 'isolated' = 'cross'
+  uidCalls = 0
+  uid = 12345678
+  uidCredentialsAtCall: { readonly apiKey: string | undefined; readonly secret: string | undefined } | undefined
+
+  #scopeMeta<T extends { readonly marginMode?: unknown; readonly info?: unknown }>(value: T): T {
+    const info = value.info !== null && typeof value.info === 'object' && !Array.isArray(value.info)
+      ? value.info as Record<string, unknown>
+      : {}
+    const mode = typeof value.marginMode === 'string'
+      ? value.marginMode
+      : typeof info['margin_mode'] === 'string' ? info['margin_mode'] : this.marginMode
+    return { ...value, marginMode: mode, info: { ...info, margin_mode: mode } }
+  }
 
   async loadMarkets(): Promise<unknown> {
     this.loads += 1
@@ -52,7 +67,13 @@ class FakeExchange implements CcxtProExchangeLike {
   }
 
   async fetchPositions(): Promise<readonly CcxtPositionLike[]> {
-    return this.positions
+    return this.positions.map((position) => this.#scopeMeta(position))
+  }
+
+  async spotPrivateGetV2UserUid(): Promise<unknown> {
+    this.uidCalls += 1
+    this.uidCredentialsAtCall = { apiKey: this.apiKey, secret: this.secret }
+    return { code: 200, data: this.uid }
   }
 
   async fetchOpenOrders(
@@ -63,9 +84,10 @@ class FakeExchange implements CcxtProExchangeLike {
   ): Promise<readonly CcxtOrderLike[]> {
     this.fetchOpenOrdersCalls += 1
     if (this.fetchOpenOrdersCalls === this.failFetchOpenOrdersCall) throw new Error('temporary order read failure')
-    return symbol === undefined
+    const orders = symbol === undefined
       ? this.openOrders
       : this.openOrders.filter((order) => order.symbol === undefined || order.symbol === symbol)
+    return orders.map((order) => this.#scopeMeta(order))
   }
 
   async createOrder(
@@ -88,6 +110,8 @@ class FakeExchange implements CcxtProExchangeLike {
       ...(params?.['reduceOnly'] === undefined ? {} : { reduceOnly: params['reduceOnly'] }),
       ...(params?.['stopLossPrice'] === undefined ? {} : { stopPrice: params['stopLossPrice'] }),
       status: 'open',
+      marginMode: this.marginMode,
+      info: { margin_mode: this.marginMode },
     }
     this.createdOrders.push(order)
     this.openOrders = [...this.openOrders, order]
@@ -105,9 +129,10 @@ class FakeExchange implements CcxtProExchangeLike {
     _symbol?: string,
     _params?: Readonly<Record<string, unknown>>,
   ): Promise<CcxtOrderLike | undefined> {
-    return this.directOrder?.id === _id
+    const order = this.directOrder?.id === _id
       ? this.directOrder
       : this.openOrders.find((order) => order.id === _id)
+    return order === undefined ? undefined : this.#scopeMeta(order)
   }
 
   async fetchMyTrades(
@@ -116,7 +141,7 @@ class FakeExchange implements CcxtProExchangeLike {
     _limit?: number,
     _params?: Readonly<Record<string, unknown>>,
   ): Promise<readonly CcxtTradeLike[]> {
-    return this.trades
+    return this.trades.map((trade) => this.#scopeMeta(trade))
   }
 
   async fetchTicker(): Promise<{ bid: number; ask: number }> {
@@ -162,7 +187,7 @@ class DeferredPositionsExchange extends FakeExchange {
       blocked.entered.resolve()
       await blocked.release.promise
     }
-    return this.positions
+    return super.fetchPositions()
   }
 
   override async fetchOpenOrders(
@@ -330,7 +355,10 @@ describe('ExecRuntime 组合根', () => {
 
     const equity = await (live.broker as unknown as { readOnlyBalance: () => Promise<number> }).readOnlyBalance()
     expect(equity).toBe(1234.5)
-    expect(exchange.balanceParams.at(-1)).toEqual({ type: 'swap' })
+    expect(exchange.balanceParams.at(-1)).toEqual({ type: 'swap', multiAssetMode: true })
+    expect(exchange.uidCalls).toBe(1)
+    expect(exchange.uidCredentialsAtCall).toEqual({ apiKey: 'key', secret: 'secret' })
+    expect(live.getPorts().journal.executionScopeHash).toBe(htxLiveAccountScope(exchange.uid).accountScopeHash)
     expect(live.broker.venue).toBe('htx')
     await live.dispose()
 
@@ -347,6 +375,50 @@ describe('ExecRuntime 组合根', () => {
     )).rejects.toThrow(/API key 与 secret/)
     expect(missingCredentialExchangeCalls).toBe(0)
     db.close()
+  })
+
+  it('paper scope 按数据库 namespace 稳定重启；另一个数据库隔离且不读取 HTX UID', async () => {
+    const db = openDatabase()
+    const otherDb = openDatabase()
+    const clock = new ReplayClock(NOW)
+    try {
+      const first = await createExecRuntime(config(), { db, clock })
+      const firstHash = first.getPorts().journal.executionScopeHash
+      expect(firstHash).toMatch(/^sha256:[0-9a-f]{64}$/)
+      expect(db.prepare('SELECT mode, account_scope_hash FROM execution_scope_binding').get())
+        .toEqual({ mode: 'paper', account_scope_hash: firstHash })
+      await first.dispose()
+
+      const restarted = await createExecRuntime(config({ paperInitialEquityQuote: 20_000 }), { db, clock })
+      expect(restarted.getPorts().journal.executionScopeHash).toBe(firstHash)
+      await restarted.dispose()
+
+      const independent = await createExecRuntime(config(), { db: otherDb, clock })
+      expect(independent.getPorts().journal.executionScopeHash).not.toBe(firstHash)
+      await independent.dispose()
+    } finally {
+      db.close()
+      otherDb.close()
+    }
+  })
+
+  it('HTX UID 改变后同一数据库拒绝新 scope，且身份失败发生在下单之前', async () => {
+    const db = openDatabase()
+    const clock = new ReplayClock(NOW)
+    try {
+      const exchange = new FakeExchange()
+      const cfg = config({ mode: 'live_auto', liveArmed: true, venue: 'htx', apiKey: 'key', apiSecret: 'secret', accountType: 'swap' })
+      const first = await createExecRuntime(cfg, { db, clock, createExchange: () => exchange })
+      await first.dispose()
+
+      const otherAccount = new FakeExchange()
+      otherAccount.uid = 87654321
+      await expect(createExecRuntime(cfg, { db, clock, createExchange: () => otherAccount }))
+        .rejects.toThrow(/数据库已绑定其他执行账户 scope/)
+      expect(otherAccount.createOrderCalls).toBe(0)
+    } finally {
+      db.close()
+    }
   })
 
   it('HTX live_auto 无论 spot 或永续符号都拒绝 spot accountType，且在构造交易所前失败', async () => {
@@ -449,6 +521,17 @@ describe('ExecRuntime 组合根', () => {
     expect(state.dailyLossUsd).toBeGreaterThan(0)
     expect(state.consecutiveLosses).toBeGreaterThan(0)
     expect(state.drawdownUsd).toBeGreaterThan(0)
+    const scoped = new DecisionJournal(db)
+    const hash = `sha256:${'a'.repeat(64)}`
+    scoped.bindExecutionScopeHash({ mode: 'paper', candidateHash: hash, at: NOW })
+    const scopedRisk = createRiskStateProvider(db, clock, scoped)
+    expect(() => scopedRisk()).toThrow(/历史未知或不同账户 scope/)
+    // 用非空内存夹具分别验证正确、不同账户；生产旧行仍禁止自动回填。
+    db.prepare('UPDATE order_intents SET account_scope_hash = ? WHERE client_order_id = ?').run(hash, 'loss-client')
+    expect(scopedRisk()).toEqual(state)
+    db.prepare('UPDATE order_intents SET account_scope_hash = ? WHERE client_order_id = ?')
+      .run(`sha256:${'b'.repeat(64)}`, 'loss-client')
+    expect(() => scopedRisk()).toThrow(/历史未知或不同账户 scope/)
     db.close()
   })
 
@@ -506,6 +589,7 @@ describe('ExecRuntime 组合根', () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     const journal = new DecisionJournal(db)
+    journal.bindExecutionScopeHash({ mode: 'live', candidateHash: htxLiveAccountScope(12345678).accountScopeHash, at: NOW })
     journal.recordDecision({
       decisionId: 'missing-order-decision', symbol: SYMBOL, decidedAt: NOW,
       contextHash: 'missing-order-context', action: 'open', executed: false,
@@ -541,6 +625,7 @@ describe('ExecRuntime 组合根', () => {
     const db = openDatabase()
     const clock = new ReplayClock(NOW)
     const journal = new DecisionJournal(db)
+    journal.bindExecutionScopeHash({ mode: 'live', candidateHash: htxLiveAccountScope(12345678).accountScopeHash, at: NOW })
     journal.recordDecision({
       decisionId: 'late-open-decision', symbol: SYMBOL, decidedAt: NOW,
       contextHash: 'late-open-context', action: 'open', executed: false,

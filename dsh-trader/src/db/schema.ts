@@ -15,9 +15,9 @@
  * 版本号不是“当前代码能建出的表”的装饰：线上旧库必须先经过同一条、可重复的
  * migration 链，才能继续被 runtime 使用。v5 把完整 DecisionContext 与 decision run
  * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
- * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型；v9 为 PM 元数据保存按本机获知时间回放的 append-only 版本；v10 为 PM 盘口补本机可用时刻。
+ * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型；v9 为 PM 元数据保存按本机获知时间回放的 append-only 版本；v10 为 PM 盘口补本机可用时刻；v13 为新执行意图保存账户 scope hash 并固定数据库账户绑定。
  */
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -227,8 +227,29 @@ CREATE TABLE IF NOT EXISTS order_intents (
   params_json TEXT,
   created_at INTEGER NOT NULL,
   acked_at INTEGER,
-  exchange_order_id TEXT
+  exchange_order_id TEXT,
+  -- 仅保存账户与执行模式的不可逆指纹；历史行保持 NULL，不按当前凭据回填。
+  account_scope_hash TEXT
 );
+
+-- 一个数据库只能绑定一个 paper 或 live 账户范围。paper 的首次 namespace 只以 hash 持久化，
+-- 重启复用原 hash；live 账户 UID 只在内存散列，切换账号/模式必须使用独立数据库。
+CREATE TABLE IF NOT EXISTS execution_scope_binding (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  mode TEXT NOT NULL CHECK (mode IN ('paper', 'live')),
+  account_scope_hash TEXT NOT NULL CHECK (
+    length(account_scope_hash) = 71 AND substr(account_scope_hash, 1, 7) = 'sha256:'
+  ),
+  created_at INTEGER NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS execution_scope_binding_no_update
+  BEFORE UPDATE ON execution_scope_binding BEGIN
+    SELECT RAISE(ABORT, 'execution scope binding is immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS execution_scope_binding_no_delete
+  BEFORE DELETE ON execution_scope_binding BEGIN
+    SELECT RAISE(ABORT, 'execution scope binding is immutable');
+  END;
 
 CREATE TABLE IF NOT EXISTS orders (
   order_id TEXT PRIMARY KEY,
@@ -543,6 +564,7 @@ export function migrate(db: SqliteLike): void {
   if (fromVersion < 8 || needsV8Repair(db)) migrateToV8(db)
   if (fromVersion < 9 || needsV9Repair(db)) migrateToV9(db)
   if (fromVersion < 10 || needsV10Repair(db)) migrateToV10(db)
+  if (fromVersion < 13 || needsV13Repair(db)) migrateToV13(db)
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION};`)
 }
 
@@ -869,6 +891,40 @@ function needsV10Repair(db: SqliteLike): boolean {
   if (db.prepare === undefined) return false
   return db.prepare(`SELECT 1 FROM sqlite_master
     WHERE type = 'index' AND name = 'pm_quotes_pit'`).all().length === 0
+}
+
+/** v13 只给新意图加 scope hash；旧成交与意图保持 NULL，不能猜测其历史账户。 */
+function migrateToV13(db: SqliteLike): void {
+  if (db.prepare === undefined) return
+  withMigrationTransaction(db, () => {
+    if (!hasColumn(db, 'order_intents', 'account_scope_hash')) {
+      db.exec('ALTER TABLE order_intents ADD COLUMN account_scope_hash TEXT;')
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS execution_scope_binding (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      mode TEXT NOT NULL CHECK (mode IN ('paper', 'live')),
+      account_scope_hash TEXT NOT NULL CHECK (
+        length(account_scope_hash) = 71 AND substr(account_scope_hash, 1, 7) = 'sha256:'
+      ),
+      created_at INTEGER NOT NULL
+    );`)
+    db.exec(`CREATE TRIGGER IF NOT EXISTS execution_scope_binding_no_update
+      BEFORE UPDATE ON execution_scope_binding BEGIN
+        SELECT RAISE(ABORT, 'execution scope binding is immutable');
+      END;`)
+    db.exec(`CREATE TRIGGER IF NOT EXISTS execution_scope_binding_no_delete
+      BEFORE DELETE ON execution_scope_binding BEGIN
+        SELECT RAISE(ABORT, 'execution scope binding is immutable');
+      END;`)
+  })
+}
+
+function needsV13Repair(db: SqliteLike): boolean {
+  if (!hasColumn(db, 'order_intents', 'account_scope_hash') || !hasTable(db, 'execution_scope_binding')) return true
+  if (db.prepare === undefined) return false
+  const triggers = db.prepare(`SELECT name FROM sqlite_master
+    WHERE type = 'trigger' AND name IN ('execution_scope_binding_no_update', 'execution_scope_binding_no_delete')`).all()
+  return triggers.length !== 2
 }
 
 function needsV8Repair(db: SqliteLike): boolean {

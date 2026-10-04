@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 /** V5资金费来源只读检查，空页不生成FundingCost；每次使用新的私有目录保存证据。 */
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, appendFileSync, writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ccxt from 'ccxt'
@@ -17,7 +16,7 @@ assert.ok(!existsSync(output), 'new output directory required')
 assert.ok(process.env.TRADER_API_KEY && process.env.TRADER_API_SECRET, 'HTX credentials not injected')
 const clock = systemClock(), exchange = new ccxt.htx({ enableRateLimit: true, timeout: 20000 })
 applyProxyAwareFetch(exchange)
-new HtxBroker({ exchange, clock, venue: 'htx', accountType: 'swap', positionSide: 'both',
+const broker = new HtxBroker({ exchange, clock, venue: 'htx', accountType: 'swap', positionSide: 'both',
   symbol: 'FIL/USDT:USDT', apiKey: process.env.TRADER_API_KEY, apiSecret: process.env.TRADER_API_SECRET })
 const secrets = ['TRADER_API_KEY', 'TRADER_API_SECRET', 'SUB2API_KEY', 'DEEPSEEK_API_KEY'].map(k => process.env[k]).filter(Boolean)
 const safe = value => {
@@ -28,12 +27,9 @@ const safe = value => {
 mkdirSync(output, { recursive: true, mode: 0o700 })
 const report = { at: clock.now(), readOnly: true, exchangeActions: 0, passed: false }
 try {
-  const identity = await exchange.spotPrivateGetV2UserUid()
-  assert.equal(identity.code, 200, 'account identity request rejected')
-  const uid = identity.data
-  assert.ok((typeof uid === 'number' && Number.isSafeInteger(uid) && uid > 0) ||
-    (typeof uid === 'string' && /^[1-9]\d*$/.test(uid)), 'account identity unavailable')
-  const accountId = 'htx:' + createHash('sha256').update(String(uid)).digest('hex')
+  const scope = await broker.resolveExecutionAccountScope()
+  const accountId = scope.accountIdHash
+  report.accountScopeHash = scope.accountScopeHash
   const reader = new HtxFundingLedger(async params => {
     const raw = await exchange.contractPrivateGetV5AccountBills(params)
     appendFileSync(output + '/responses.jsonl', JSON.stringify(safe({ params, response: raw })) + '\n', { mode: 0o600 })

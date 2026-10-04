@@ -386,4 +386,36 @@ describe('LocalStateReader（只读本地状态）', () => {
     expect(reader.positions()).toEqual([])
     db.close()
   })
+
+  it('已绑定账户拒绝旧NULL挂单/成交，且不把不同来源净额抵消成空仓', () => {
+    const db = seeded()
+    const expected = `sha256:${'a'.repeat(64)}`
+    const reader = new LocalStateReader(db, () => expected)
+    expect(new LocalStateReader(db).orders().length).toBeGreaterThan(0)
+    expect(new LocalStateReader(db).positions().length).toBeGreaterThan(0)
+    expect(() => reader.orders()).toThrow(/历史未知或不同账户 scope/)
+    expect(() => reader.positions()).toThrow(/历史未知或不同账户 scope/)
+    // 内存夹具对照已知来源；这不是生产迁移的回填授权。
+    db.prepare('UPDATE order_intents SET account_scope_hash = ?').run(expected)
+    expect(reader.orders()).toHaveLength(2)
+    expect(reader.positions()).toMatchObject([{ symbol: SYMBOL, qty: 0.05 }])
+    db.prepare('UPDATE order_intents SET account_scope_hash = ? WHERE client_order_id = ?')
+      .run(`sha256:${'b'.repeat(64)}`, 'co-filled')
+    expect(() => reader.positions()).toThrow(/历史未知或不同账户 scope/)
+    db.close()
+  })
+
+  it('非终态累计成交镜像同样核验scope，不能因尚未进入fills而漏检', () => {
+    const db = seeded()
+    const expected = `sha256:${'a'.repeat(64)}`
+    db.prepare('UPDATE order_intents SET account_scope_hash = ?').run(expected)
+    new DecisionJournal(db).recordOrder({ orderId: 'partial-order', venue: 'paper',
+      clientOrderId: 'co-created', symbol: SYMBOL, status: 'partial', qty: 1, filledQty: 0.2,
+      avgPrice: 100, updatedAt: NOW + 4000 })
+    const reader = new LocalStateReader(db, () => expected)
+    expect(reader.positions()[0]?.qty).toBeCloseTo(0.25)
+    db.prepare('UPDATE order_intents SET account_scope_hash = NULL WHERE client_order_id = ?').run('co-created')
+    expect(() => reader.positions()).toThrow(/历史未知或不同账户 scope/)
+    db.close()
+  })
 })

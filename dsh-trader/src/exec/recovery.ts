@@ -66,6 +66,21 @@ export class CrashRecovery {
     const freeze = new Set<string>()
 
     for (const intent of inFlight) {
+      if (journal.executionScopeHash !== undefined && intent.accountScopeHash !== journal.executionScopeHash) {
+        // 旧 NULL 或另一账户的意图不能拿当前凭据去查询；保留原 scope 并冻结，等待人工核对。
+        journal.markIntentUnknown(intent.clientOrderId, this.deps.clock.now())
+        freeze.add(intent.symbol)
+        alerts.push({
+          level: 'critical',
+          code: 'intent_account_scope_mismatch',
+          message: `在途意图 ${intent.clientOrderId}（${intent.symbol}）的账户 scope 与当前实例不匹配，未向交易所查询并冻结标的。`,
+        })
+        resolved.push({
+          clientOrderId: intent.clientOrderId,
+          outcome: { kind: 'unknown', reason: '账户 scope 不匹配或历史 scope 未知' },
+        })
+        continue
+      }
       const outcome = await this.#classify(intent)
       resolved.push({ clientOrderId: intent.clientOrderId, outcome })
 

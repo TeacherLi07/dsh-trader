@@ -43,6 +43,7 @@ export interface InFlightIntent {
   readonly clientOrderId: string
   readonly intentId: string
   readonly decisionId: string | null
+  readonly accountScopeHash: string | null
   readonly symbol: string
   readonly venue: string
   readonly state: 'created' | 'unknown'
@@ -59,6 +60,8 @@ export interface OrderIntentRecord {
   readonly intentId: string
   readonly clientOrderId: string
   readonly decisionId: string
+  /** 运行时缺省继承已绑定 scope；历史/独立测试记录可以保持 NULL。 */
+  readonly accountScopeHash?: string | null
   readonly venue: string
   readonly symbol: string
   readonly state: 'created' | 'acked' | 'rejected' | 'unknown' | 'canceled' | 'filled'
@@ -106,6 +109,8 @@ export interface FillRecord {
 /** 结算视角的成交（`fillsForDecision` 的返回形状）。 */
 export interface FillView {
   readonly fillId: string
+  readonly decisionId: string | null
+  readonly accountScopeHash: string | null
   readonly qty: number
   readonly price: number
   readonly fee: number | null
@@ -375,9 +380,68 @@ function parseJsonArray(json: string): readonly string[] {
 
 export class DecisionJournal {
   readonly #statements: Statements
+  #boundExecutionScopeHash: string | undefined
+  #boundExecutionMode: 'paper' | 'live' | undefined
+  #unscopedIntentAttempted = false
 
   constructor(private readonly db: Database.Database) {
     this.#statements = new Statements(db)
+  }
+
+  /** 当前运行实例的账户范围；未绑定的纯数据库 helper 返回 undefined。 */
+  get executionScopeHash(): string | undefined {
+    return this.#boundExecutionScopeHash
+  }
+
+  /**
+   * 把本数据库固定到一个执行账户。旧行不回填；live 精确比对当前 UID hash，
+   * paper 首次绑定生成独立 namespace，重启时返回已保存 hash 而忽略新候选值。
+   */
+  bindExecutionScopeHash(input: {
+    readonly mode: 'paper' | 'live'
+    readonly candidateHash: string
+    readonly at: number
+  }): string {
+    if (!/^sha256:[0-9a-f]{64}$/.test(input.candidateHash) ||
+        !Number.isSafeInteger(input.at) || input.at < 0) {
+      throw new Error('执行账户范围 hash 或绑定时刻无效')
+    }
+    if (this.#unscopedIntentAttempted) throw new Error('已有未绑定 scope 的意图写入，本实例不能再绑定账户')
+    if (this.#boundExecutionScopeHash !== undefined) {
+      if (this.#boundExecutionMode !== input.mode ||
+          (input.mode === 'live' && this.#boundExecutionScopeHash !== input.candidateHash)) {
+        throw new Error('执行账户 scope 在实例生命周期内不可换绑')
+      }
+      return this.#boundExecutionScopeHash
+    }
+
+    const existing = this.#statements
+      .get('SELECT mode, account_scope_hash FROM execution_scope_binding WHERE singleton = 1')
+      .get() as { mode: 'paper' | 'live'; account_scope_hash: string } | undefined
+    if (existing !== undefined) {
+      if (!/^sha256:[0-9a-f]{64}$/.test(existing.account_scope_hash) || existing.mode !== input.mode ||
+          (input.mode === 'live' && existing.account_scope_hash !== input.candidateHash)) {
+        throw new Error('数据库已绑定其他执行账户 scope；请为不同账户或 paper/live 模式使用独立数据库')
+      }
+      this.#boundExecutionMode = existing.mode
+      this.#boundExecutionScopeHash = existing.account_scope_hash
+      return existing.account_scope_hash
+    }
+
+    this.#statements
+      .get(`INSERT INTO execution_scope_binding (singleton, mode, account_scope_hash, created_at)
+        VALUES (1, @mode, @scopeHash, @createdAt) ON CONFLICT (singleton) DO NOTHING`)
+      .run({ mode: input.mode, scopeHash: input.candidateHash, createdAt: input.at })
+    const bound = this.#statements
+      .get('SELECT mode, account_scope_hash FROM execution_scope_binding WHERE singleton = 1')
+      .get() as { mode: 'paper' | 'live'; account_scope_hash: string } | undefined
+    if (bound === undefined || !/^sha256:[0-9a-f]{64}$/.test(bound.account_scope_hash) || bound.mode !== input.mode ||
+        (input.mode === 'live' && bound.account_scope_hash !== input.candidateHash)) {
+      throw new Error('执行账户 scope 并发绑定冲突')
+    }
+    this.#boundExecutionMode = bound.mode
+    this.#boundExecutionScopeHash = bound.account_scope_hash
+    return bound.account_scope_hash
   }
 
   /** 决策幂等根：内容哈希（不含"是否已执行"，那是结果而非内容）。 */
@@ -630,13 +694,32 @@ export class DecisionJournal {
   }
 
   recordIntent(intent: OrderIntentRecord): boolean {
+    if (this.#boundExecutionScopeHash === undefined) {
+      // 新helper不能在已绑定的生产库里悄悄制造NULL来源；必须先校验当前账户。
+      const binding = this.#statements.get('SELECT 1 FROM execution_scope_binding WHERE singleton = 1').get()
+      if (binding !== undefined) throw new Error('数据库已有账户 scope，写意图前必须校验并绑定本实例')
+      this.#unscopedIntentAttempted = true
+    }
+    if (intent.accountScopeHash !== undefined && intent.accountScopeHash !== null &&
+        !/^sha256:[0-9a-f]{64}$/.test(intent.accountScopeHash)) {
+      throw new Error('order intent accountScopeHash 无效')
+    }
+    if (this.#boundExecutionScopeHash !== undefined && intent.accountScopeHash !== undefined &&
+        intent.accountScopeHash !== this.#boundExecutionScopeHash) {
+      throw new Error('order intent 与当前实例账户 scope 不匹配')
+    }
+    const accountScopeHash = this.#boundExecutionScopeHash ?? intent.accountScopeHash ?? null
+    if (this.#boundExecutionMode !== undefined &&
+        intent.venue !== (this.#boundExecutionMode === 'paper' ? 'paper' : 'htx')) {
+      throw new Error('order intent venue 与已绑定执行账户模式不匹配')
+    }
     const result = this.#statements.get(
         `INSERT INTO order_intents
            (intent_id, client_order_id, decision_id, venue, symbol, state, type, side, qty,
-            price, stop_price, notional_usd, reduce_only, created_at, exchange_order_id)
+            price, stop_price, notional_usd, reduce_only, created_at, exchange_order_id, account_scope_hash)
          VALUES
            (@intentId, @clientOrderId, @decisionId, @venue, @symbol, @state, @type, @side, @qty,
-            @price, @stopPrice, @notionalUsd, @reduceOnly, @createdAt, @exchangeOrderId)
+            @price, @stopPrice, @notionalUsd, @reduceOnly, @createdAt, @exchangeOrderId, @accountScopeHash)
          ON CONFLICT (client_order_id) DO NOTHING`,
       )
       .run({
@@ -655,8 +738,25 @@ export class DecisionJournal {
         reduceOnly: intent.reduceOnly ? 1 : 0,
         createdAt: intent.createdAt,
         exchangeOrderId: intent.exchangeOrderId ?? null,
+        accountScopeHash,
       })
-    return Number(result.changes) > 0
+    if (Number(result.changes) > 0) return true
+    const existing = this.#statements
+      .get('SELECT account_scope_hash FROM order_intents WHERE client_order_id = ?')
+      .get(intent.clientOrderId) as { account_scope_hash: string | null } | undefined
+    if (existing === undefined || existing.account_scope_hash !== accountScopeHash) {
+      throw new Error('幂等 client order id 已属于其他账户 scope，拒绝混用')
+    }
+    return false
+  }
+
+  #assertRowsMatchScope(
+    rows: readonly { readonly account_scope_hash: string | null }[],
+    expected: string | undefined,
+  ): void {
+    if (expected !== undefined && rows.some((row) => row.account_scope_hash !== expected)) {
+      throw new Error('成交历史含旧 NULL 或不同账户 scope，拒绝混合归因')
+    }
   }
 
   /**
@@ -756,7 +856,7 @@ export class DecisionJournal {
     const rows = this.#statements
       .get(
         `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts,
-                oi.side, oi.venue, oi.reduce_only
+                oi.decision_id, oi.account_scope_hash, oi.side, oi.venue, oi.reduce_only
          FROM fills f
          JOIN orders o ON o.order_id = f.order_id
          JOIN order_intents oi ON oi.client_order_id = o.client_order_id
@@ -769,12 +869,17 @@ export class DecisionJournal {
       price: number
       fee: number | null
       ts: number
+      decision_id: string | null
+      account_scope_hash: string | null
       side: string | null
       venue: string
       reduce_only: number
     }[]
+    this.#assertRowsMatchScope(rows, this.#boundExecutionScopeHash)
     return rows.map((row) => ({
       fillId: row.fill_id,
+      decisionId: row.decision_id,
+      accountScopeHash: row.account_scope_hash,
       qty: row.qty,
       price: row.price,
       fee: row.fee,
@@ -790,11 +895,16 @@ export class DecisionJournal {
    * 用途：结算 `reduce`/`close` 决策时重建当时的持仓与**真实入场均价** ——
    * 否则会把"平仓成交"当成新入场，把一笔 +20% 的回合记成 ~0%（实测）。
    */
-  fillsForSymbolBefore(symbol: string, beforeTs: number, venue?: string): readonly FillView[] {
+  fillsForSymbolBefore(
+    symbol: string,
+    beforeTs: number,
+    venue?: string,
+    expectedScopeHash?: string,
+  ): readonly FillView[] {
     const rows = this.#statements
       .get(
         `SELECT f.fill_id, f.qty, f.price, f.fee, f.ts,
-                oi.side, oi.venue, oi.reduce_only
+                oi.decision_id, oi.account_scope_hash, oi.side, oi.venue, oi.reduce_only
          FROM fills f
          JOIN orders o ON o.order_id = f.order_id
          JOIN order_intents oi ON oi.client_order_id = o.client_order_id
@@ -807,12 +917,17 @@ export class DecisionJournal {
       price: number
       fee: number | null
       ts: number
+      decision_id: string | null
+      account_scope_hash: string | null
       side: string | null
       venue: string
       reduce_only: number
     }[]
+    this.#assertRowsMatchScope(rows, expectedScopeHash ?? this.#boundExecutionScopeHash)
     return rows.map((row) => ({
       fillId: row.fill_id,
+      decisionId: row.decision_id,
+      accountScopeHash: row.account_scope_hash,
       qty: row.qty,
       price: row.price,
       fee: row.fee,
@@ -828,6 +943,7 @@ export class DecisionJournal {
     | {
         readonly intentId: string
         readonly decisionId: string | null
+        readonly accountScopeHash: string | null
         readonly symbol: string
         readonly side: string | null
         readonly qty: number | null
@@ -835,11 +951,12 @@ export class DecisionJournal {
       }
     | undefined {
     const row = this.#statements
-      .get('SELECT intent_id, decision_id, symbol, side, qty, price FROM order_intents WHERE client_order_id = ?')
+      .get('SELECT intent_id, decision_id, account_scope_hash, symbol, side, qty, price FROM order_intents WHERE client_order_id = ?')
       .get(clientOrderId) as
       | {
           intent_id: string
           decision_id: string | null
+          account_scope_hash: string | null
           symbol: string
           side: string | null
           qty: number | null
@@ -850,6 +967,7 @@ export class DecisionJournal {
     return {
       intentId: row.intent_id,
       decisionId: row.decision_id,
+      accountScopeHash: row.account_scope_hash,
       symbol: row.symbol,
       side: row.side,
       qty: row.qty,
@@ -1128,7 +1246,7 @@ export class DecisionJournal {
     const rows = this.#statements
       .get(
         `SELECT client_order_id, intent_id, decision_id, symbol, venue, state, type, side, qty,
-                price, reduce_only, created_at, exchange_order_id
+                price, reduce_only, created_at, exchange_order_id, account_scope_hash
          FROM order_intents
          WHERE acked_at IS NULL AND state IN ('created', 'unknown')
          ORDER BY created_at ASC, client_order_id ASC`,
@@ -1145,6 +1263,7 @@ export class DecisionJournal {
       qty: number | null
       price: number | null
       exchange_order_id: string | null
+      account_scope_hash: string | null
       reduce_only: number
       created_at: number
     }[]
@@ -1152,6 +1271,7 @@ export class DecisionJournal {
       clientOrderId: row.client_order_id,
       intentId: row.intent_id,
       decisionId: row.decision_id,
+      accountScopeHash: row.account_scope_hash,
       symbol: row.symbol,
       venue: row.venue,
       state: row.state as 'created' | 'unknown',
@@ -1173,6 +1293,7 @@ export class DecisionJournal {
     readonly qty: number
     readonly price: number | null
     readonly decisionId: string | null
+    readonly accountScopeHash: string | null
     readonly side: string | null
     readonly type: string | null
     readonly stopPrice: number | null
@@ -1183,7 +1304,7 @@ export class DecisionJournal {
     const rows = this.#statements
       .get(
         `SELECT oi.client_order_id, oi.exchange_order_id, oi.symbol, oi.qty, oi.price,
-                oi.decision_id, oi.side, oi.type, oi.stop_price, oi.reduce_only, oi.state,
+                oi.decision_id, oi.account_scope_hash, oi.side, oi.type, oi.stop_price, oi.reduce_only, oi.state,
                 EXISTS (
                   SELECT 1 FROM orders o JOIN fills f ON f.order_id = o.order_id
                   WHERE o.client_order_id = oi.client_order_id AND o.filled_qty > 0 AND f.fee IS NULL
@@ -1210,7 +1331,9 @@ export class DecisionJournal {
       reduce_only: number
       state: OrderState
       fee_pending: number
+      account_scope_hash: string | null
     }[]
+    this.#assertRowsMatchScope(rows, this.#boundExecutionScopeHash)
     return rows.map((row) => ({
         clientOrderId: row.client_order_id,
         exchangeOrderId: row.exchange_order_id,
@@ -1218,6 +1341,7 @@ export class DecisionJournal {
         qty: row.qty,
         price: row.price,
         decisionId: row.decision_id,
+        accountScopeHash: row.account_scope_hash,
         side: row.side,
         type: row.type,
         stopPrice: row.stop_price,

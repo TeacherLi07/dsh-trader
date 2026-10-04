@@ -50,6 +50,7 @@ describe('schema (plan §4.1 invariants)', () => {
       'decisions',
       'outcomes',
       'order_intents',
+      'execution_scope_binding',
       'orders',
       'fills',
       'lessons',
@@ -77,13 +78,13 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
   })
 
-  it('v11 to v12 keeps previous budgets and adds immutable billing reconciliation evidence', () => {
+  it('v11 to v13 keeps budgets and creates immutable billing and execution-scope evidence', () => {
     db.prepare("INSERT INTO budget_ledger (day, scope, tokens_in, est_usd, cost_known) VALUES ('2026-10-04', 'global', 100, 0.1, 0)").run()
     db.exec('DROP TABLE model_call_reconciliations; PRAGMA user_version=11')
     const before = db.prepare('SELECT * FROM budget_ledger').all()
     migrate(db)
     migrate(db)
-    expect(db.pragma('user_version', { simple: true })).toBe(12)
+    expect(db.pragma('user_version', { simple: true })).toBe(13)
     expect(db.prepare('SELECT * FROM budget_ledger').all()).toEqual(before)
     expect(db.prepare('SELECT COUNT(*) AS n FROM model_call_reconciliations').get()).toEqual({ n: 0 })
     const insert = db.prepare('INSERT INTO model_call_reconciliations VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -92,6 +93,29 @@ describe('schema (plan §4.1 invariants)', () => {
     expect(() => db.prepare("UPDATE model_call_reconciliations SET reason='changed'").run()).toThrow('immutable')
     expect(() => db.prepare('DELETE FROM model_call_reconciliations').run()).toThrow('immutable')
     expect(() => insert.run('another-call', 'provider', 'receipt', 'hash', '{}', '{}', 'fixture', 1)).toThrow('UNIQUE')
+  })
+
+  it('v12 migration adds nullable intent scope without backfilling old rows', () => {
+    db.prepare(`INSERT INTO order_intents
+      (intent_id, client_order_id, venue, symbol, state, created_at)
+      VALUES ('legacy-intent', 'legacy-client', 'htx', 'BTC/USDT:USDT', 'canceled', 10)`).run()
+    db.exec(`DROP TRIGGER execution_scope_binding_no_update;
+      DROP TRIGGER execution_scope_binding_no_delete;
+      DROP TABLE execution_scope_binding;
+      ALTER TABLE order_intents DROP COLUMN account_scope_hash;
+      PRAGMA user_version = 12;`)
+
+    migrate(db)
+    const columns = db.prepare('PRAGMA table_info(order_intents)').all() as { name: string }[]
+    expect(columns.map((column) => column.name)).toContain('account_scope_hash')
+    expect(db.prepare('SELECT account_scope_hash FROM order_intents WHERE intent_id = ?').get('legacy-intent'))
+      .toEqual({ account_scope_hash: null })
+    expect(db.prepare('SELECT COUNT(*) AS n FROM execution_scope_binding').get()).toEqual({ n: 0 })
+    expect(() => db.prepare('DELETE FROM execution_scope_binding').run()).not.toThrow()
+    db.prepare(`INSERT INTO execution_scope_binding (singleton, mode, account_scope_hash, created_at)
+      VALUES (1, 'paper', ?, 20)`).run('sha256:' + 'a'.repeat(64))
+    expect(() => db.prepare('UPDATE execution_scope_binding SET created_at = 21').run()).toThrow('immutable')
+    expect(() => db.prepare('DELETE FROM execution_scope_binding').run()).toThrow('immutable')
   })
 
   it('v10 给旧 PM quotes 保留未知 availability，并在同 source key 首次重读时补真实可见时刻', () => {
