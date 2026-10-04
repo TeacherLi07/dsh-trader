@@ -398,6 +398,54 @@ describe('acceptReflection', () => {
 })
 
 describe('SettlementScheduler', () => {
+  it('基准中间缺bar时保存gross但不比较不完整的基准收益', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104])
+    seedBars(BENCH, [0, 1, 3].map(h => ({ openTime: T0 + h * HOUR, close: 100 + h })))
+    executedDecision({ decisionId: 'benchmark-gap' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+    const result = await scheduler().runOnce(NOW)
+    expect(result.scanned).toBe(1)
+    expect(result.settled).toBe(1)
+    expect(journal.outcomeFor('benchmark-gap')).toMatchObject({ realizedGrossPct: 3, benchmarkPct: null, alphaPct: null })
+  })
+
+  it('中间缺少路径bar时保持pending，真实回补后才幂等结算', async () => {
+    seedBars('BTC/USDT', [0, 1, 3].map(h => ({ openTime: T0 + h * HOUR, close: 100 + h })))
+    flatBars(BENCH, [100, 100, 100, 100, 100])
+    executedDecision({ decisionId: 'path-gap' }, { side: 'buy', price: 100, qty: 1, fee: 0 })
+    let fundingCalls = 0
+    const settle = scheduler(undefined, HORIZON, () => { fundingCalls++; return { amountQuote: 0, source: 'fixture:zero' } })
+    const first = await settle.runOnce(NOW)
+    expect(first.scanned).toBe(1)
+    expect(first).toMatchObject({ settled: 0, deferred: 1 })
+    expect(fundingCalls).toBe(0)
+    expect(journal.outcomeFor('path-gap')).toBeUndefined()
+    seedBars('BTC/USDT', [{ openTime: T0 + 2 * HOUR, close: 130, high: 140, low: 100 }])
+    const after = await settle.runOnce(NOW)
+    expect(after.settled).toBe(1)
+    expect(fundingCalls).toBe(1)
+    expect(journal.outcomeFor('path-gap')?.mfePct).toBeCloseTo(40)
+    const repeated = await settle.runOnce(NOW)
+    expect(repeated.scanned).toBe(0)
+    expect(fundingCalls).toBe(1)
+  })
+
+  it('实际成交视界未结束时不按较早的调度提示结算或查询未来资金费', async () => {
+    flatBars('BTC/USDT', [100, 101, 102, 103, 104, 105])
+    flatBars(BENCH, [100, 100, 100, 100, 100, 100])
+    executedDecisionWithFills({ decisionId: 'late-fill', reflectionDueAt: T0 + HORIZON },
+      [{ side: 'buy', price: 100, qty: 1, fee: 0, ts: T0 + HOUR }])
+    let fundingCalls = 0
+    const settle = scheduler(undefined, HORIZON, () => { fundingCalls++; return { amountQuote: 0, source: 'fixture:zero' } })
+    const early = await settle.runOnce(NOW)
+    expect(early.scanned).toBe(1)
+    expect(early).toMatchObject({ settled: 0, deferred: 1 })
+    expect(fundingCalls).toBe(0)
+    expect(journal.outcomeFor('late-fill')).toBeUndefined()
+    const mature = await settle.runOnce(NOW + HOUR)
+    expect(mature.settled).toBe(1)
+    expect(fundingCalls).toBe(1)
+  })
+
   it('真实成交手续费未知时保持 pending，不把未知成本按 0 结算', async () => {
     flatBars('BTC/USDT', [100, 101, 102, 103, 104])
     flatBars(BENCH, [100, 100, 100, 100, 100])
@@ -618,6 +666,8 @@ describe('SettlementScheduler', () => {
     seedBars('BTC/USDT', [
       { openTime: T0, close: 100, high: 101, low: 99 },
       { openTime: T0 + HOUR, close: 108, high: 112, low: 100 },
+      { openTime: T0 + 2 * HOUR, close: 108, high: 109, low: 107 },
+      { openTime: T0 + 3 * HOUR, close: 108, high: 109, low: 107 },
     ])
     flatBars(BENCH, [100, 100, 100])
     executedDecision(

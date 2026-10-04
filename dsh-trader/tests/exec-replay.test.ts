@@ -17,7 +17,8 @@ import { makeCard } from './helpers/plan.js'
 const SYMBOL = 'BTC/USDT'
 const TF = '1h'
 const HOUR = 3_600_000
-const START = 1_700_000_000_000
+// 真实1h行情使用UTC小时边界；错位夹具不能证明完整结算路径。
+const START = Math.floor(1_700_000_000_000 / HOUR) * HOUR
 const BARS = 720 // 30 天 × 24 根 1h
 
 /** 起始参数在启动时提供（plan §6.5）；这里放宽单笔上限，让开仓真的能成交。 */

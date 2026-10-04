@@ -63,3 +63,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04：V5资金费来源读取器
 
 [来源验收](htx-funding-source-2026-10-04.md)：官方动态合同已取得，非空普通账单2+2条核验prev游标；from=0拒绝保留。来源读取器29用例，全库83文件/957测试通过，UID hash绑定的只读CLI返回funding0行且knownDecisionFundingCost=false。没有模型或交易请求。生产resolver尚待账户/数量归因与非空支付证据，net仍NULL，未冒充接线完成。
+
+## 2026-10-04：完整结算路径
+
+[路径验收](settlement-path-completeness-2026-10-04.md)：资产中间缺 bar 与未成熟成交视界延期，缺完整基准不生成 alpha；回补后非空 MFE=40% 且重复执行无增量。全库83文件/960测试通过，旧夹具失败与修正留档。没有新增网络、模型或订单，资金费与经济/长期缺口继续保留。

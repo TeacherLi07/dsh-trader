@@ -361,6 +361,10 @@ RiskCritic 只寻找数据缺口、反事实、组合风险、执行风险和失
 模拟滑点仅由撮合模型施加。手续费、资金费和相应行情/基准必须有来源；缺成交/行情则推迟，
 缺成本或基准则相应净额/超额结果标记未知，不能用 0 或未经校准的 alpha 替代。
 
+资产路径必须包含持仓区间内所有完整 UTC bar，缺中间 bar 延期；实际成交视界未结束时不能仅按
+reflection_due_at 提前结算。基准路径不完整则 benchmark/alpha 为 NULL。回归证据见
+[结算路径完整性](docs/settlement-path-completeness-2026-10-04.md)。
+
 outcome 是由权威成交/费用/行情计算的可复核记录；lesson 是可选派生意见。lesson 只在外部结果可核验后生成，必须有 evidence
 refs、regime、TTL 和适用范围，且不能修改 prompt、配置、DSL、限额或代码。没有接线 reflector 时
 必须明确记录“仅完成结算”，不得宣称学习闭环已完成。lesson 默认不进入生产判断，直到 R5 的

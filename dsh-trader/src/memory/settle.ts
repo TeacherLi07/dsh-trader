@@ -693,6 +693,11 @@ export class SettlementScheduler {
 
         const timeframeMs = BAR_MS_BY_TIMEFRAME[this.deps.timeframe]
         if (timeframeMs === undefined) throw new Error(`未知结算时间框架：${this.deps.timeframe}`)
+        if (pathEnd > now) {
+          // reflection_due_at是调度提示；成交迟到时不能据此提前结束真实持仓视界。
+          deferredIds.push(decision.decisionId)
+          continue
+        }
         // 只用完全落在“实际持仓开始 → 出场/视界结束”内的已收盘 bar；出场后行情不能参与 MFE/MAE/止损或基准。
         const loadPathBars = (symbol: string) => this.deps.bars.closedBars(symbol, this.deps.timeframe, {
           since: pathStart,
@@ -701,7 +706,14 @@ export class SettlementScheduler {
           bar.closeTime === bar.openTime + timeframeMs && bar.closeTime <= pathEnd)
         const bars = loadPathBars(decision.symbol)
         // 没有完整持仓路径 bar 时保留 pending；不能拿出场后的 bar 补齐路径指标。
-        if (bars.length === 0) {
+        const firstFullOpen = Math.ceil(pathStart / timeframeMs) * timeframeMs
+        const lastFullClose = Math.floor(pathEnd / timeframeMs) * timeframeMs
+        const expectedBars = (lastFullClose - firstFullOpen) / timeframeMs
+        const pathComplete = (series: readonly { readonly openTime: number }[]): boolean =>
+          expectedBars > 0 && series.length === expectedBars &&
+          series.every((bar, index) => bar.openTime === firstFullOpen + index * timeframeMs)
+        if (!pathComplete(bars)) {
+          // 中间缺bar会同时漏掉MFE/MAE和价格mark；等待回补，不能用残缺路径结算。
           deferredIds.push(decision.decisionId)
           continue
         }
@@ -725,7 +737,8 @@ export class SettlementScheduler {
             grossPctOverride = (totalGrossQuote / totalNotional) * 100
           }
         }
-        const benchmarkBars = loadPathBars(this.deps.benchmarkSymbol)
+        const benchmarkPath = loadPathBars(this.deps.benchmarkSymbol)
+        const benchmarkBars = pathComplete(benchmarkPath) ? benchmarkPath : []
         const fundingCost = await this.deps.resolveFundingCost?.({
           decision,
           from: fundingFrom,

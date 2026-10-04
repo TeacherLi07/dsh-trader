@@ -1,0 +1,72 @@
+{
+  "date": "2026-10-04",
+  "verify": {
+    "passed": true,
+    "files": 83,
+    "tests": 960
+  },
+  "regressions": [
+    {
+      "case": "interior asset bar gap",
+      "before": {
+        "settled": 0,
+        "deferred": 1,
+        "fundingCalls": 0
+      },
+      "afterBackfill": {
+        "settled": 1,
+        "mfePct": 40,
+        "fundingCalls": 1
+      },
+      "repeat": {
+        "scanned": 0,
+        "additionalFundingCalls": 0
+      }
+    },
+    {
+      "case": "actual fill horizon later than scheduling hint",
+      "before": {
+        "settled": 0,
+        "deferred": 1,
+        "fundingCalls": 0
+      },
+      "afterHorizon": {
+        "settled": 1,
+        "fundingCalls": 1
+      }
+    },
+    {
+      "case": "benchmark interior gap",
+      "settled": 1,
+      "grossPct": 3,
+      "benchmarkPct": null,
+      "alphaPct": null
+    }
+  ],
+  "fixturesCorrected": [
+    "short-stop fixture: add two missing hourly bars",
+    "replay fixture: align synthetic hourly bars to UTC hour boundary"
+  ],
+  "initialVerify": {
+    "failed": 1,
+    "passed": 959,
+    "reason": "replay fixture hourly timestamps not aligned"
+  },
+  "networkRequests": 0,
+  "modelRequests": 0,
+  "exchangeActions": 0,
+  "rawLogs": [
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/settlement-path-completeness/verify-initial.log",
+      "sha256": "b7f7fb4609f548e1a3daef3b12894ee102c465f4be4066df11b766891a036f67"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/settlement-path-completeness/verify-final.log",
+      "sha256": "b036c41f7130e5bdd8514fa93f2d587050bfe14ddce48c5814652f916a685b4d"
+    }
+  ],
+  "limitations": [
+    "Offline regression fixtures; no economic-effect claim",
+    "Funding resolver remains unwired and unknown cost remains NULL"
+  ]
+}
