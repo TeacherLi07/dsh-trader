@@ -1,8 +1,12 @@
 import { once } from 'node:events'
+import { writeFileSync, statSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { createServer, type IncomingMessage, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocket, WebSocketServer } from 'ws'
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import {
   ReasoningEffortId,
   ToolCallId,
@@ -16,6 +20,9 @@ import {
 import { DEEPSEEK_PRICE_SEED, selectPrice } from '../src/cost.js'
 import { ACTION_KINDS } from '../src/plan/schema.js'
 import { DECISION_ENVELOPE_TOOL } from '../src/agents/decision-envelope.js'
+import { runDecisionWorkflowStages } from '../src/agents/decision-workflow.js'
+import { freezeDecisionContext, serializeDecisionContextForPrompt } from '../src/agents/decision-context.js'
+import type { StructuredGenerateOptions } from '../src/llm-options.js'
 import type { ResponseStreamEvent } from 'openai/resources/responses/responses'
 import {
   SUB2API_RESPONSES_WS_PROVIDER,
@@ -28,6 +35,27 @@ import {
 const FAKE_KEY = 'sk-fake-loopback-only-key'
 const MODEL_ALIAS = 'sub2api:gpt-5.6-sol'
 const WIRE_MODEL_ID = 'gpt-5.6-sol'
+
+const TWO_STRICT_TOOLS = [
+  {
+    name: 'submit_decision_envelope',
+    description: 'Submit the primary decision.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: { outcome: { type: 'string', enum: ['act', 'no_trade'] } },
+      required: ['outcome'],
+    },
+  },
+  {
+    name: 'submit_risk_review',
+    description: 'Submit an independent risk review.',
+    parameters: {
+      type: 'object', additionalProperties: false,
+      properties: { verdict: { type: 'string', enum: ['clear', 'block'] } },
+      required: ['verdict'],
+    },
+  },
+] as const
 
 function header(request: IncomingMessage, name: string): string | undefined {
   const value = request.headers[name]
@@ -189,6 +217,7 @@ function sendResponseCompleted(
   socket: WebSocket,
   argumentsJson = '{"outcome":"no_trade"}',
   toolName = 'submit_decision_envelope',
+  wireModel = WIRE_MODEL_ID,
 ): void {
   const outputItem = {
     id: 'fc_item_1', type: 'function_call', status: 'completed', call_id: 'call_1',
@@ -197,7 +226,7 @@ function sendResponseCompleted(
   const events: ResponseStreamEvent[] = [
     {
       type: 'response.created', sequence_number: 0,
-      response: { id: 'resp_1', object: 'response', created_at: 1, status: 'in_progress', model: WIRE_MODEL_ID, output: [] },
+      response: { id: 'resp_1', object: 'response', created_at: 1, status: 'in_progress', model: wireModel, output: [] },
     } as unknown as ResponseStreamEvent,
     { type: 'response.output_item.added', sequence_number: 1, output_index: 0, item: { ...outputItem, arguments: '' } } as unknown as ResponseStreamEvent,
     { type: 'response.function_call_arguments.delta', sequence_number: 2, output_index: 0, item_id: 'fc_item_1', delta: argumentsJson } as unknown as ResponseStreamEvent,
@@ -206,7 +235,7 @@ function sendResponseCompleted(
     {
       type: 'response.completed', sequence_number: 5,
       response: {
-        id: 'resp_1', object: 'response', created_at: 1, status: 'completed', model: WIRE_MODEL_ID,
+        id: 'resp_1', object: 'response', created_at: 1, status: 'completed', model: wireModel,
         output: [outputItem],
         usage: {
           input_tokens: 20, output_tokens: 8, total_tokens: 28,
@@ -241,6 +270,157 @@ afterEach(async () => {
 })
 
 describe('Sub2API Responses WebSocket provider', () => {
+  it('通过 DSH ctx.llm.stream 保留具名选择并在两个 strict 工具中强制第二个', async () => {
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket, '{"verdict":"clear"}', 'submit_risk_review'))
+    const context = new Context()
+    const llmFiber = await context.plugin(LlmRuntime)
+    const registration = context.llm.registerAdapter(
+      [SUB2API_RESPONSES_WS_PROVIDER],
+      adapter(gateway.baseURL, undefined, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true),
+    )
+    try {
+      const request = requestOptions({ tools: [...TWO_STRICT_TOOLS] })
+      // 触发 DSH 对默认 maxTokens/reasoningEffort 的补齐，验证 spread 投影仍保留扩展字段。
+      delete request.maxTokens
+      delete request.reasoningEffort
+      const options: StructuredGenerateOptions = {
+        ...request,
+        toolChoice: { type: 'function', name: 'submit_risk_review' },
+      }
+      const chunks: StreamChunk[] = []
+      for await (const chunk of context.llm.stream(options)) chunks.push(chunk)
+
+      expect(gateway.handshakes()).toBe(1)
+      expect(gateway.httpFallbacks).toEqual([])
+      expect(gateway.requests).toHaveLength(1)
+      const submitted = gateway.requests[0] as { tools: Array<Record<string, unknown>>; tool_choice: unknown; max_output_tokens: number; reasoning: { effort: string } }
+      expect(submitted.tools.map((tool) => tool['name'])).toEqual(['submit_decision_envelope', 'submit_risk_review'])
+      expect(submitted.tools.every((tool) => tool['strict'] === true)).toBe(true)
+      expect(submitted.tool_choice).toEqual({ type: 'function', name: 'submit_risk_review' })
+      expect(submitted.max_output_tokens).toBe(65_536)
+      expect(submitted.reasoning).toEqual({ effort: 'high' })
+      expect(chunks.some((chunk) => chunk.type === 'tool-call-delta' && chunk.name === 'submit_risk_review')).toBe(true)
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+    } finally {
+      registration()
+      await llmFiber.dispose()
+    }
+  })
+
+  it('后续 DSH system 原样映射为 developer，不能把同文 user 或 tool-result 升级为指令', async () => {
+    const gateway = await startGateway(socket => sendResponseCompleted(socket))
+    const messages = [
+      createSystemMessage('Stable policy', 'fixture'),
+      createUserMessage({ content: [{ type: 'text', text: 'same content' }], source: { kind: 'user' } }),
+      createAssistantMessage({ content: [{ type: 'tool-call', id: ToolCallId('call-history'), name: 'lookup', arguments: '{}' }],
+        source: { provider: 'openai', model: WIRE_MODEL_ID } }),
+      createToolResultMessage({ callId: ToolCallId('call-history'), isError: false, content: [{ type: 'text', text: 'same content' }] }),
+      createUserMessage({ content: [{ type: 'text', text: 'same content' }], source: { kind: 'user' } }),
+      createSystemMessage('same content', 'fixture'),
+    ]
+    for await (const _chunk of adapter(gateway.baseURL).stream(requestOptions({ messages }))) { /* 消费真实 loopback 流。 */ }
+    expect(gateway.requests).toHaveLength(1)
+    const request = gateway.requests[0] as { instructions: string; input: Array<Record<string, unknown>> }
+    expect(request.instructions).toBe('Stable policy')
+    expect(request.input.filter(item => item['role'] === 'user' || item['role'] === 'developer').map(item => item['role']))
+      .toEqual(['user', 'user', 'developer'])
+    expect(request.input.filter(item => item['type'] === 'function_call_output')).toHaveLength(1)
+    expect(request.input.at(-1)).toMatchObject({ role: 'developer', content: [{ type: 'input_text', text: 'same content' }] })
+  })
+
+  it('八次真实 DSH/WS loopback 覆盖两个完整快照的 draft/repair/critic/final：稳定工具和政策，完整 user 后接阶段 developer', async () => {
+    const candidate = { outcome: 'no_trade', thesis: '不新增敞口', rejectedAlternatives: ['开仓'], claims: [],
+      uncertainties: ['仅验证协议'], confidence: .5, riskFraction: .001, immediateAction: { action: 'noop' } }
+    let replies = 0
+    const gateway = await startGateway((socket, _request, payload) => {
+      const index = replies++ % 4, choice = payload['tool_choice'] as { name: string }
+      const result = index === 2 ? { issues: [], uncertainties: [] }
+        : index === 0 ? { ...candidate, unknownField: true } : candidate
+      sendResponseCompleted(socket, JSON.stringify(result), choice.name, 'gpt-6-luna')
+    })
+    const ctx = new Context(), fiber = await ctx.plugin(LlmRuntime)
+    const unregister = ctx.llm.registerAdapter([SUB2API_RESPONSES_WS_PROVIDER],
+      adapter(gateway.baseURL, undefined, 'sub2api:gpt-6-luna', 'gpt-6-luna', 'max', true))
+    try {
+      const snapshots = [100, 105].map((close, index) => freezeDecisionContext({
+        symbol: 'ADA/USDT:USDT', primaryTimeframe: '1h', asOf: 1_700_000_000_000 + index * 60_000,
+        sections: {
+          mandate: { asOf: 1_700_000_000_000, source: 'fixture', missing: [], value: { mode: 'paper' } },
+          market: { asOf: 1_700_000_000_000 + index * 60_000, source: 'fixture', missing: [], value: { close } },
+          derivatives: { asOf: null, source: 'fixture', missing: ['funding'], value: null },
+          benchmark: { asOf: null, source: 'fixture', missing: [], value: null },
+          portfolio: { asOf: 1_700_000_000_000, source: 'fixture', missing: [], value: { equityQuote: 25, positions: [] } },
+          activePlan: { asOf: null, source: 'fixture', missing: [], value: null },
+          history: { asOf: null, source: 'fixture', missing: [], value: [] },
+          lessons: { asOf: null, source: 'disabled', missing: [], value: null },
+          predictions: { asOf: null, source: 'disabled', missing: [], value: null },
+        },
+      }))
+      for (const frozen of snapshots) {
+        const result = await runDecisionWorkflowStages({ strategy: 'critique', context: frozen,
+          model: { stream: options => ctx.llm.stream(options) }, sessionId: 'stable-workspace-fixture',
+          route: { provider: SUB2API_RESPONSES_WS_PROVIDER, model: 'sub2api:gpt-6-luna', maxTokens: 32_768, maxChars: 50_000 } })
+        expect(result.failure).toBeUndefined()
+        expect(result.calls).toHaveLength(4)
+        expect(result.repairCalls).toBe(1)
+      }
+      expect(gateway.requests).toHaveLength(8)
+      expect(gateway.handshakes()).toBe(8)
+      expect(gateway.httpFallbacks).toEqual([])
+      const first = gateway.requests[0] as Record<string, unknown>
+      for (const [index, raw] of gateway.requests.entries()) {
+        const request = raw as Record<string, unknown>
+        expect(request['tools']).toEqual(first['tools'])
+        expect(request['instructions']).toEqual(first['instructions'])
+        expect(request['prompt_cache_key']).toBe('stable-workspace-fixture')
+        expect(request['model']).toBe('gpt-6-luna')
+        expect(request['reasoning']).toEqual({ effort: 'max' })
+        expect(request['store']).toBe(false)
+        expect(request['previous_response_id']).toBeUndefined()
+        const input = request['input'] as Array<{ role: string; content: Array<{ text: string }> }>
+        expect(input.map(message => message.role)).toEqual(['user', 'developer'])
+        expect(input[0]?.content[0]?.text).toContain(serializeDecisionContextForPrompt(snapshots[Math.floor(index / 4)]!))
+        expect(input[0]?.content[0]?.text).not.toContain('本轮阶段指令')
+        expect(input[1]?.content[0]?.text).toContain('本轮阶段指令')
+      }
+      const evidence = process.env['TRADER_CONTEXT_PREFIX_EVIDENCE']
+      if (evidence !== undefined) {
+        expect(statSync(dirname(evidence)).mode & 0o077).toBe(0)
+        writeFileSync(evidence, JSON.stringify({ kind: 'DSH SDK WS loopback', requests: 8, snapshots: 2,
+          repairCalls: 2, toolsAndInstructionsStable: true, snapshotsComplete: true,
+          stageRoles: ['user', 'developer'], reasoningEffort: 'max', model: 'gpt-6-luna',
+          paidModelCalls: 0, realExchangeOrdersSubmitted: 0, cacheBenefitConfirmed: false,
+          snapshotHashes: snapshots.map(snapshot => snapshot.contextHash), frames: gateway.requests,
+        }, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+      }
+    } finally { unregister(); await fiber.dispose() }
+  })
+
+  it('在读凭据或连接前拒绝无效、未注册、重复及无工具的具名选择', async () => {
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket))
+    let credentialReads = 0
+    const model = adapter(gateway.baseURL, () => { credentialReads += 1 }, MODEL_ALIAS, WIRE_MODEL_ID, 'high', true)
+    const malformed = { type: 'custom', name: 'submit_risk_review' }
+    const unknown = { type: 'function', name: 'not_registered' }
+    const duplicateTools = [...TWO_STRICT_TOOLS, TWO_STRICT_TOOLS[1]]
+    const invalid: GenerateOptions[] = [
+      { ...requestOptions({ tools: [...TWO_STRICT_TOOLS] }), toolChoice: malformed } as unknown as GenerateOptions,
+      { ...requestOptions({ tools: [...TWO_STRICT_TOOLS] }), toolChoice: unknown } as unknown as GenerateOptions,
+      { ...requestOptions({ tools: duplicateTools }), toolChoice: { type: 'function', name: 'submit_risk_review' } } as unknown as GenerateOptions,
+      { ...requestOptions({ tools: undefined }), toolChoice: { type: 'function', name: 'submit_risk_review' } } as unknown as GenerateOptions,
+    ]
+
+    for (const options of invalid) {
+      await expect(async () => {
+        for await (const _chunk of model.stream(options)) { /* 仅消费到拒绝结果。 */ }
+      }).rejects.toMatchObject({ code: 'INVALID_TOOL_CHOICE' })
+    }
+    expect(credentialReads).toBe(0)
+    expect(gateway.handshakes()).toBe(0)
+    expect(gateway.requests).toEqual([])
+    expect(gateway.httpFallbacks).toEqual([])
+  })
+
   it('调用前已取消时不读取凭据、不建立握手或发送请求', async () => {
     const gateway = await startGateway((socket) => sendResponseCompleted(socket))
     const controller = new AbortController()

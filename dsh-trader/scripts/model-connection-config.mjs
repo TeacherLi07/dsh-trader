@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { estimateCost } from '../lib/cost.js'
 
 export function readLunaGatewayConfig(path = resolve(process.env.HOME, '.codex/config.toml')) {
   const fields = JSON.parse(execFileSync('python3', ['-c', `
@@ -50,4 +51,18 @@ export async function traceResponsesWs(log, onCreate = () => {}) {
     } }
   }
   return () => { ResponsesWS.prototype.send = send; ResponsesWS.prototype.stream = stream }
+}
+
+
+/** 先核算已返回的权威 usage，再判断输出是否合格；结构失败不能抹去已计费调用。 */
+export function referenceProbeCost(rounds, reservations, price, model, at) {
+  const costs = rounds.map(({ usage }) => estimateCost({
+    tokensIn: usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0),
+    tokensCached: usage.cacheReadTokens ?? 0, tokensOut: usage.outputTokens,
+  }, [price], model, at))
+  return {
+    knownUsageCalls: rounds.length,
+    referenceEstimateUsd: costs.every(cost => cost.known) ? costs.reduce((sum, cost) => sum + cost.usd, 0) : null,
+    unresolvedUpperReservationUsd: reservations.slice(rounds.length).reduce((sum, row) => sum + row.upperUsd, 0),
+  }
 }

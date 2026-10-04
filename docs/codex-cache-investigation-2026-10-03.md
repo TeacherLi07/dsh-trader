@@ -41,6 +41,9 @@ v6 共发出9次 WS 请求，8次有终态；第9次被1013“upstream rate limi
 
 usage.attribution.request_fields 是此端点返回的观测扩展，未作为公开 API 合同依赖。Envelope tools 为1739 tokens，Critic tools为237；阶段 instructions 内容和工具列表均不同。v5的1.3394%与v6的1.2594%来自不同实时事实和请求，不能当受控A/B；没有收益证据。
 
-Luna进一步建议固定完整工具列表/顺序，以具名 tool_choice 或 allowed_tools 限制本阶段函数，并把阶段指令放在固定公共前缀之后。该候选**尚未实施**；落地时须同步请求预算、hash和回归测试，保留完整当次冻结事实与原 schema 校验。目标网关对 explicit cache 参数的兼容性未核验，不能据上游主分支源码直接启用。未发送额外预热或研究请求。
+Luna进一步建议固定完整工具列表/顺序，以具名 tool_choice 或 allowed_tools 限制本阶段函数，并把阶段指令放在固定公共前缀之后。该候选现已实施，接口、消息边界、预算/hash与回归证据见 [2026-10-04补验](context-prefix-verification-2026-10-04.md)；真实收益仍未证实。原设计要求同步请求预算、hash和回归测试，保留完整当次冻结事实与原 schema 校验。目标网关对 explicit cache 参数的兼容性未核验，不能据上游主分支源码直接启用。未发送额外预热或研究请求。
 
 同版本完整联网恢复被HTX HTTP200中的401 IP白名单拒绝阻断，未到decision replay；它不是恢复成功证据。新增 `terminal-run-replay-check.mjs` 在实际v6 DB副本上对3条终态各重放2次，6次均使用原runId/结果/失败原因，模型和网络调用均0，账本与原DB不变。复现入口与原始输出在 [Luna验收](r5-luna-teacherli-2026-10-03.md)。
+
+
+最新实现将标识扩展为profile/cohort稳定，完整快照独立成消息；本节的run-scoped v6为历史对照，不能当成新布局的效果验证。

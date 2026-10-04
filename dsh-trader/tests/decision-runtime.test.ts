@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StructuredGenerateOptions } from '../src/llm-options.js'
 import { ReplayClock } from '../src/clock.js'
 import { EXAMPLE_LIMITS } from '../src/config.js'
 import { DEEPSEEK_PRICE_SEED } from '../src/cost.js'
@@ -38,14 +39,14 @@ class FakeDecisionModel implements DecisionModel {
     private readonly onStream?: () => void,
     private readonly includeUsage = true,
   ) {}
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.sessionIds.push(options.sessionId)
     this.onStream?.()
     if (this.includeUsage) yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 80, totalTokens: 380 } } as StreamChunk
     yield {
       type: 'block-end', index: 0,
-      block: { type: 'tool-call', id: 'r3-call', name: String(options.tools?.[0]?.name), arguments: JSON.stringify(this.output) },
+      block: { type: 'tool-call', id: 'r3-call', name: String(options.toolChoice?.name ?? options.tools?.[0]?.name), arguments: JSON.stringify(this.output) },
     } as unknown as StreamChunk
     yield { type: 'finish', reason: { kind: 'tool-calls' } } as StreamChunk
   }
@@ -54,10 +55,10 @@ class FakeDecisionModel implements DecisionModel {
 class SequencedDecisionModel implements DecisionModel {
   calls = 0
   constructor(private readonly outputs: readonly unknown[]) {}
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     const output = this.outputs[this.calls]
     this.calls += 1
-    const tool = options.tools?.[0]
+    const tool = options.tools?.find(tool => tool.name === options.toolChoice?.name) ?? options.tools?.[0]
     yield { type: 'usage', usage: { inputTokens: 200, outputTokens: 60, totalTokens: 260 } } as StreamChunk
     yield {
       type: 'block-end', index: 0,
@@ -236,7 +237,8 @@ describe('R3 decision runtime', () => {
       })
       expect(first.status).toBe('completed')
       expect(first.replayed).toBe(false)
-      expect(model.sessionIds).toEqual([first.runId])
+      expect(model.sessionIds).toHaveLength(1)
+      expect(model.sessionIds[0]).toMatch(/^decision-[a-f0-9]{64}$/)
       expect(first.envelope).toMatchObject({ outcome: 'no_trade', runId: first.runId, contextHash: first.contextHash })
       expect(new DecisionRunStore(db).get(first.runId)).toMatchObject({
         status: 'completed', costKnown: true, tokensIn: 300, tokensOut: 80,
@@ -312,6 +314,31 @@ describe('R3 decision runtime', () => {
         rmSync(directory, { recursive: true, force: true })
       }
     }
+  })
+
+  it('同一 DB/model/prompt 的会话跨不同 run 和 SQLite 重启固定，结果身份仍独立且终态不重发', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-model-session-'))
+    const path = join(directory, 'state.sqlite')
+    let db: Database.Database | undefined
+    try {
+      db = new Database(path); migrate(db); new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+      const firstModel = new FakeDecisionModel(noTrade), firstRuntime = makeRuntime(db)
+      const first = await runDecisionRuntime({ ...firstRuntime, model: firstModel, config,
+        trigger: { ...trigger, id: 'first-session-run' }, symbol: SYMBOL, timeframe: '1h' })
+      expect(firstModel.calls).toBe(1)
+      const session = firstModel.sessionIds[0]
+      expect(session).toMatch(/^decision-[a-f0-9]{64}$/)
+      db.close(); db = new Database(path); migrate(db)
+      const secondModel = new FakeDecisionModel(noTrade), secondRuntime = makeRuntime(db)
+      const second = await runDecisionRuntime({ ...secondRuntime, model: secondModel, config,
+        trigger: { ...trigger, id: 'second-session-run' }, symbol: SYMBOL, timeframe: '1h' })
+      expect(secondModel.calls).toBe(1)
+      expect(secondModel.sessionIds).toEqual([session])
+      expect(second.runId).not.toBe(first.runId)
+      await runDecisionRuntime({ ...secondRuntime, model: secondModel, config,
+        trigger: { ...trigger, id: 'second-session-run' }, symbol: SYMBOL, timeframe: '1h' })
+      expect(secondModel.calls).toBe(1)
+    } finally { db?.close(); rmSync(directory, { recursive: true, force: true }) }
   })
 
   it('keeps a provider stream failure unresolved across SQLite restart despite a configured dailyTokenCap', async () => {
@@ -471,7 +498,7 @@ describe('R3 decision runtime', () => {
     const rawJsonBearer = 'MODEL-JSON-AUTH-BEARER-SECRET-DO-NOT-PERSIST'
     const model: DecisionModel & { calls: number } = {
       calls: 0,
-      async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+      async *stream(_options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
         this.calls += 1
         yield { type: 'text-delta', index: 0, text: JSON.stringify({ apiSecret: rawSecret }) } as StreamChunk
         throw new Error(`upstream Authorization: Bearer ${rawSecret}; token: Bearer ${rawToken}; {"Authorization":"Bearer ${rawJsonBearer}", "authorization":"Basic ${rawBasic}"}`)

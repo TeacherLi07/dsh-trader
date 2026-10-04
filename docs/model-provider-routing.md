@@ -76,3 +76,8 @@ Loopback WS 服务模拟覆盖了非空 `response.create`、pi-ai 事件处理�
 Sub2API WS 请求使用配套 `codex_cli_rs` UA/originator/version，默认版本0.160.0可用 `codexVersion` 配置。会话身份从 DSH `sessionId` 读取，缺省生成UUID；session-id/thread-id/x-client-request-id 与 prompt_cache_key、client_metadata 共用身份。API key 仍由网关 credential ref 解析。指纹来源与真实往返见 [Luna验收](r5-luna-teacherli-2026-10-03.md)。
 
 `strictTools: true` 可开启服务端 strict 结构。只对互斥 discriminator 的 oneOf 做等价 anyOf 转换，复用SDK required/closed-object 处理，optional null 仅还原原schema中允许缺省的字段。必填null/未知字段仍交原校验拒绝。目标服务端实测不支持uniqueItems，该约束保留在原工具schema与本地计划校验，派生wire只约束服务端支持的结构；原执行合同始终要验。授权Luna测试已开启，通用provider默认关闭，没有失败自动降级。
+
+
+## 稳定请求与具名工具选择
+
+通用 StructuredGenerateOptions 可给出具名 toolChoice，Sub2API映射为原生Responses字段并在凭据/连接前核验。provider没有交易导入。生产判断器使用固定只读工具列表和公共政策，完整user快照后接developer阶段任务；其它provider即使忽略selector，错误阶段工具仍被本地拒绝。profile/cohort标识跨run固定，事实与runId仍独立。源代码与非空验证见 [前缀补验](context-prefix-verification-2026-10-04.md)。

@@ -5,7 +5,7 @@ import { EXAMPLE_LIMITS } from '../src/config.js'
 import { migrate } from '../src/db/schema.js'
 import { PriceTableStore } from '../src/cost-ledger.js'
 import { buildDecisionContext } from '../src/agents/decision-context-builder.js'
-import { canonicalDecisionContext } from '../src/agents/decision-context.js'
+import { canonicalDecisionContext, serializeDecisionContextForPrompt } from '../src/agents/decision-context.js'
 import { renderDecisionRequest, DecisionRequestTooLargeError } from '../src/agents/decision-request.js'
 import type { TradePorts } from '../src/exec/ports.js'
 import type { AccountSnapshot, Broker, OrderAck, PositionSnapshot } from '../src/exec/broker.js'
@@ -194,7 +194,7 @@ describe('R2 DecisionContext assembly and request rendering', () => {
     const fakeModel = async (input: ReturnType<typeof renderDecisionRequest>) => { captured = input }
     await fakeModel(request)
     expect(captured?.contextHash).toBe(context.contextHash)
-    expect(captured?.messages[1]?.content).toContain(canonicalDecisionContext(context))
+    expect(captured?.messages[1]?.content).toContain(serializeDecisionContextForPrompt(context))
     expect(captured?.messages[1]?.content).toContain('fixture thesis stays complete')
     expect(captured?.messages[1]?.content).toContain('realizedNetPct')
     expect(captured?.messages[1]?.content).not.toContain('MUST-NOT-ENTER-CONTEXT')

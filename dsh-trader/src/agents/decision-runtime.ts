@@ -1,3 +1,4 @@
+import { resolve } from 'node:path'
 /** R3 生产边界：冻结 R2 context、限预算调用模型、资格检查后才落卡/执行。 */
 
 import { BudgetLedger, GLOBAL_SCOPE, PriceTableStore, dayKey, symbolScope } from '../cost-ledger.js'
@@ -207,6 +208,19 @@ function stageArtifact(stages: DecisionWorkflowStages, stage: 'draft' | 'critiqu
 /**
  * 按 W1/W2/W3 的持久身份幂等执行。模型请求只有通过调用前预算预留才会发出。
  */
+const memoryModelNamespaces = new WeakMap<object, string>()
+
+function modelSessionIdentity(db: TradePorts['db'], config: DecisionRuntimeConfig, promptVersion: string): string {
+  let namespace = db.name
+  if (namespace === ':memory:') {
+    namespace = memoryModelNamespaces.get(db) ?? randomUUID()
+    memoryModelNamespaces.set(db, namespace)
+  } else namespace = resolve(namespace)
+  // 同一持久 profile/cohort 跨 run、跨重启固定，运行身份仍独立；缓存不提供旧事实或旧裁决。
+  return `decision-${fingerprint({ application: 'dsh-trader', namespace,
+    provider: config.route.provider, model: config.route.model, promptVersion }).slice(7)}`
+}
+
 export async function runDecisionRuntime(input: {
   readonly ports: TradePorts
   readonly model: DecisionModel
@@ -465,7 +479,7 @@ export async function runDecisionRuntime(input: {
   const rejectedOutputs = reservationStatements.get(`SELECT COUNT(*) AS n FROM audit_events
     WHERE kind = 'model_call_output_rejected' AND json_extract(payload_json, '$.runId') = ?`).get(runId) as { n: number }
   const stages = await runDecisionWorkflowStages({
-    sessionId: runId,
+    sessionId: modelSessionIdentity(ports.db, config, promptVersion),
     strategy: config.strategy,
     context,
     model,

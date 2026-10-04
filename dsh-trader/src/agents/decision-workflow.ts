@@ -19,12 +19,13 @@ import {
   type DecisionEnvelopeCandidate,
 } from './decision-envelope.js'
 import { fingerprint } from '../util/canonical.js'
+import type { StructuredGenerateOptions } from '../llm-options.js'
 import { V0_ALLOWED_PATHS } from '../plan/evaluate.js'
 
 export type DecisionStrategy = 'single' | 'critique'
 
 export interface DecisionModel {
-  stream(options: GenerateOptions): AsyncIterable<StreamChunk>
+  stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk>
 }
 
 export interface DecisionModelRoute {
@@ -76,7 +77,7 @@ interface ToolSchema {
   readonly parameters: Record<string, unknown>
 }
 
-export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v4' as const
+export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v5' as const
 const ENVELOPE_NAME = DECISION_ENVELOPE_TOOL.name
 
 const CRITIQUE_TOOL: ToolSchema = {
@@ -97,6 +98,9 @@ const CRITIQUE_TOOL: ToolSchema = {
     }, required: ['issues', 'uncertainties'],
   },
 }
+
+// 完整只读提交工具按固定顺序发送；当前阶段由具名选择器和本地校验共同约束。
+export const DECISION_WORKFLOW_TOOLS: readonly ToolSchema[] = [DECISION_ENVELOPE_TOOL, CRITIQUE_TOOL]
 
 const STAGE_INSTRUCTIONS = {
   single: [
@@ -190,20 +194,19 @@ async function callStructuredTool(input: {
   const request = renderDecisionRequest(input.context, {
     maxChars: input.route.maxChars,
     promptVersion,
-    // 明确当前工具的顶层边界，防止模型把 plan 的嵌套字段提升到 envelope。
-    instructions: `${input.instructions}\n\n${OUTPUT_CONTRACT}\n本次工具只允许以下顶层字段：${Object.keys(input.tool.parameters['properties'] as Record<string, unknown>).join(', ')}。嵌套字段必须保留在其所属对象中。`,
+    instructions: OUTPUT_CONTRACT,
+    // 完整冻结事实放在阶段差异之前，工具与公共系统指令不随角色/repair 改写。
+    stageInstructions: `${input.instructions}\n本次只能提交 ${input.tool.name}。本次工具只允许以下顶层字段：${Object.keys(input.tool.parameters['properties'] as Record<string, unknown>).join(', ')}。嵌套字段必须保留在其所属对象中。`,
+    toolChoice: { type: 'function', name: input.tool.name },
     ...(input.materials === undefined ? {} : { materials: input.materials }),
-    outputSchema: input.tool,
+    outputSchema: DECISION_WORKFLOW_TOOLS,
   })
-  const options: GenerateOptions = {
+  const options: StructuredGenerateOptions = {
     provider: input.route.provider,
     model: input.route.model,
     messages: modelMessages(request),
-    tools: [{
-      name: input.tool.name,
-      description: input.tool.description,
-      parameters: input.tool.parameters,
-    }],
+    tools: DECISION_WORKFLOW_TOOLS.map((tool) => ({ ...tool })),
+    toolChoice: { type: 'function', name: input.tool.name },
     maxTokens: input.route.maxTokens,
     temperature: 0,
     ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId as NonNullable<GenerateOptions['sessionId']> }),
@@ -221,7 +224,8 @@ async function callStructuredTool(input: {
     estimatedInputTokens: request.estimatedInputTokens,
     messages: request.messages,
     tools: options.tools,
-    outputSchema: input.tool,
+    toolChoice: options.toolChoice,
+    outputSchema: DECISION_WORKFLOW_TOOLS,
   }
   await input.beforeCall?.(request, input.stage)
   let output: unknown

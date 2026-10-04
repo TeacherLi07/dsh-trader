@@ -1,0 +1,84 @@
+{
+  "updatedAt": "2026-10-04T03:18:37.594962+00:00",
+  "scope": "context/protocol engineering, no economic conclusion",
+  "promptVersion": "decision-r3-v5",
+  "requestVersion": "decision-context-r2-v2",
+  "contextSchemaChanged": false,
+  "verification": {
+    "command": "pnpm verify",
+    "files": 81,
+    "tests": 891,
+    "passed": true
+  },
+  "loopback": {
+    "kind": "DSH SDK WS loopback",
+    "requests": 8,
+    "snapshots": 2,
+    "repairCalls": 2,
+    "toolsAndInstructionsStable": true,
+    "snapshotsComplete": true,
+    "stageRoles": [
+      "user",
+      "developer"
+    ],
+    "reasoningEffort": "max",
+    "model": "gpt-6-luna",
+    "paidModelCalls": 0,
+    "realExchangeOrdersSubmitted": 0,
+    "cacheBenefitConfirmed": false,
+    "snapshotHashes": [
+      "sha256:0d6c8e65f1eb52cfc7dd174cc658ddde0ef805fc334785246aa52ff8661e882b",
+      "sha256:0de7d947fee53cd2859b765335fe5a42403ba195b42c9969c49e4deca7f21f80"
+    ]
+  },
+  "wireEvidence": "/home/ubuntu/.dsh/trading/integration-2026-10-03/context-prefix-v5-local/ws-frames.json",
+  "wireSha256": "0986ffd7e7ae1c0a6fa8cd545cfde53f3a69cd0ee3d179e4ae7337d628c6f473",
+  "realSnapshotReordering": {
+    "source": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/paper.sqlite",
+    "sourceHash": "932de32d70b24d97440f9e6fff8d3e910d8892365a6ffcdd8645c743c6a3f8e3",
+    "sourceUnmodified": true,
+    "realContextRows": 3,
+    "cases": [
+      {
+        "oldCommonPrefixChars": 15,
+        "newCommonPrefixChars": 1252,
+        "factsPreserved": true
+      },
+      {
+        "oldCommonPrefixChars": 14,
+        "newCommonPrefixChars": 1249,
+        "factsPreserved": true
+      }
+    ],
+    "paidModelCalls": 0,
+    "cacheBenefitConfirmed": false
+  },
+  "profileIdentity": "database namespace + provider/model + prompt/schema; stable across runs and restarts; runId remains distinct",
+  "invariants": [
+    "Full facts, metadata, identity, limits and failures preserved",
+    "Two fixed readonly tool schemas; named stage choice plus local validation",
+    "Complete user snapshot before subsequent developer stage instructions/materials",
+    "All schemas and selector included in budget and request hash",
+    "store:false; no previous_response_id",
+    "Unknown fees retained, no automatic resubmission"
+  ],
+  "liveCacheBenefitConfirmed": false,
+  "officialSources": [
+    "https://openai.com/index/practical-guide-building-gpt-6/",
+    "https://developers.openai.com/api/docs/guides/prompt-caching",
+    "https://developers.openai.com/api/docs/guides/function-calling"
+  ],
+  "providerProbe": {
+    "maximumRequests": 2,
+    "maxOutputTokens": 8192,
+    "reasoningEffort": "max",
+    "referenceBudgetUsd": 0.05,
+    "knownUsageAccountedBeforeOutputValidation": true,
+    "interruptedEvidenceCannotBeReplayed": true
+  },
+  "source": {
+    "subagentCommit": "7835ada962624d3c7214642ef584b41d96365141",
+    "integratedByRoot": true,
+    "independentWorktree": "/workspace/.worktrees/provider-tool-choice"
+  }
+}

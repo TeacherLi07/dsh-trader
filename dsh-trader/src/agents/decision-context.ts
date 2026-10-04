@@ -162,3 +162,35 @@ export function canonicalDecisionContext(context: DecisionContext): string {
   assertDecisionContext(context)
   return canonicalJson(context)
 }
+
+
+function promptObject(
+  value: Readonly<Record<string, unknown>>,
+  firstKeys: readonly string[],
+  encode: (key: string, value: unknown) => string = (_key, item) => canonicalJson(item),
+): string {
+  const keys = [...firstKeys.filter((key) => Object.hasOwn(value, key)),
+    ...Object.keys(value).filter((key) => !firstKeys.includes(key)).sort()]
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${encode(key, value[key])}`).join(',')}}`
+}
+
+/**
+ * JSON Pointer 与事实 hash 不依赖对象键顺序；prompt 先放配置，再放动态事实和身份。
+ * 不复制静态字段、不摘要或丢字段，DB 的 canonical 审计格式仍由 canonicalDecisionContext 负责。
+ */
+export function serializeDecisionContextForPrompt(context: DecisionContext): string {
+  assertDecisionContext(context)
+  return promptObject(context as unknown as Record<string, unknown>, ['version', 'primaryTimeframe', 'sections'], (key, item) => {
+    if (key !== 'sections') return canonicalJson(item)
+    return promptObject(context.sections, DECISION_CONTEXT_SECTIONS, (name, section) => {
+      if (name !== 'mandate') return canonicalJson(section)
+      return promptObject(context.sections.mandate as unknown as Record<string, unknown>, ['value', 'source', 'missing', 'asOf', 'hash'], (field, value) => {
+        if (field !== 'value' || typeof value !== 'object' || value === null || Array.isArray(value)) return canonicalJson(value)
+        return promptObject(value as Record<string, unknown>, [
+          'allowedPlanActions', 'allowedDecisionOutcomes', 'decisionOnlyOutcomes',
+          'riskReducingActionsStillRequiringVerification', 'contextConfig', 'runtime', 'runtimeFingerprint',
+        ])
+      })
+    })
+  })
+}

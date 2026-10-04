@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StructuredGenerateOptions } from '../src/llm-options.js'
 import { ReplayClock } from '../src/clock.js'
 import { DEEPSEEK_PRICE_SEED } from '../src/cost.js'
 import { migrate } from '../src/db/schema.js'
@@ -111,9 +112,9 @@ const noTrade: DecisionEnvelopeCandidate = {
 class FakeR5Model implements DecisionModel {
   calls = 0
 
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
-    const name = options.tools?.[0]?.name
+    const name = options.toolChoice?.name ?? options.tools?.[0]?.name
     const output = name === 'submit_risk_critique'
       ? { issues: [], uncertainties: ['fixture-only'] }
       : noTrade

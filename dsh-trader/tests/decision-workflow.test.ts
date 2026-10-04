@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { freezeDecisionContext } from '../src/agents/decision-context.js'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { StructuredGenerateOptions } from '../src/llm-options.js'
+import { freezeDecisionContext, serializeDecisionContextForPrompt } from '../src/agents/decision-context.js'
 import type { DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.js'
+import { canonicalJson, fingerprint } from '../src/util/canonical.js'
+import { renderDecisionRequest } from '../src/agents/decision-request.js'
 import { compileExpression } from '../src/plan/dsl.js'
 import { runDecisionWorkflowStages, toLedgerUsage, type DecisionModel, type DecisionWorkflowResume } from '../src/agents/decision-workflow.js'
 
@@ -40,15 +43,15 @@ function envelope(over: Record<string, unknown> = {}) {
 }
 
 class FakeDecisionModel implements DecisionModel {
-  readonly requests: GenerateOptions[] = []
+  readonly requests: StructuredGenerateOptions[] = []
   constructor(readonly replies: readonly unknown[]) {}
-  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
     const reply = this.replies[this.requests.length - 1]
     yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 40, totalTokens: 140 } } as StreamChunk
     yield {
       type: 'block-end', index: 0,
-      block: { type: 'tool-call', id: 'call-r3', name: String(options.tools?.[0]?.name), arguments: JSON.stringify(reply) },
+      block: { type: 'tool-call', id: 'call-r3', name: String(options.toolChoice?.name ?? options.tools?.[0]?.name), arguments: JSON.stringify(reply) },
     } as unknown as StreamChunk
     yield { type: 'finish', reason: { kind: 'tool-calls' } } as StreamChunk
   }
@@ -115,6 +118,60 @@ describe('R3 Decision workflow', () => {
     expect(result.calls.every(call => call.request['sessionId'] === 'run-cache-fixture')).toBe(true)
   })
 
+  it('draft/repair/critic/final 的 tools、系统前缀和完整事实一致，阶段选择和全部 schemas 进入预算与 hash', async () => {
+    const valid = envelope({ outcome: 'no_trade', immediateAction: { action: 'noop' } })
+    const model = new FakeDecisionModel([{ ...valid, invalid: true }, valid, { issues: [], uncertainties: [] }, valid])
+    const frozen = context(), renderedContext = serializeDecisionContextForPrompt(frozen)
+    const result = await runDecisionWorkflowStages({ strategy: 'critique', context: frozen, model, route })
+    expect(result.failure).toBeUndefined()
+    expect(result.calls).toHaveLength(4)
+    expect(model.requests.map(request => request.toolChoice?.name)).toEqual([
+      'submit_decision_envelope', 'submit_decision_envelope', 'submit_risk_critique', 'submit_decision_envelope',
+    ])
+    const first = model.requests[0]!
+    expect(first.tools?.map(tool => tool.name)).toEqual(['submit_decision_envelope', 'submit_risk_critique'])
+    for (const [index, request] of model.requests.entries()) {
+      expect(request.tools).toEqual(first.tools)
+      expect(request.messages[0]?.content).toEqual(first.messages[0]?.content)
+      const text = request.messages[1]?.content[0]
+      if (text?.type !== 'text') throw Error('expected complete frozen context')
+      expect(text.text.split(renderedContext)).toHaveLength(2)
+      expect(request.messages).toHaveLength(3)
+      expect(request.messages[2]?.role).toBe('system')
+      expect(JSON.stringify(request.messages[2]?.content)).toContain('本轮阶段指令（代码生成')
+      expect(text.text).not.toContain('本轮阶段指令（代码生成')
+      const call = result.calls[index]!
+      expect(call.request['toolChoice']).toEqual(request.toolChoice)
+      const payload = { promptVersion: call.promptVersion, messages: call.request['messages'],
+        outputSchema: call.request['tools'], toolChoice: request.toolChoice }
+      expect(call.requestChars).toBe(canonicalJson(payload).length)
+      expect(call.estimatedInputTokens).toBe(Buffer.byteLength(canonicalJson(payload), 'utf8') + 4_096)
+      expect(call.requestHash).toBe(fingerprint({ contextHash: frozen.contextHash, requestPayload: payload }))
+    }
+    expect(new Set(result.calls.map(call => call.requestHash)).size).toBe(4)
+    const selectorA = renderDecisionRequest(frozen, { toolChoice: { type: 'function', name: 'submit_decision_envelope' } })
+    const selectorB = renderDecisionRequest(frozen, { toolChoice: { type: 'function', name: 'submit_risk_critique' } })
+    expect(selectorA.requestHash).not.toEqual(selectorB.requestHash)
+  })
+
+  it('即使 provider 忽略具名选择，返回其它已注册阶段工具仍被拒绝，最多一次修复', async () => {
+    let calls = 0
+    const model: DecisionModel = { async *stream(options) {
+      calls++
+      expect(options.tools?.map(tool => tool.name)).toEqual(['submit_decision_envelope', 'submit_risk_critique'])
+      expect(options.toolChoice?.name).toBe('submit_decision_envelope')
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 10, totalTokens: 20 } } as StreamChunk
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'wrong-stage',
+        name: 'submit_risk_critique', arguments: '{"issues":[],"uncertainties":[]}' } } as unknown as StreamChunk
+      yield { type: 'finish', reason: { kind: 'tool-calls' } } as StreamChunk
+    } }
+    const result = await runDecisionWorkflowStages({ strategy: 'single', context: context(), model, route })
+    expect(calls).toBe(2)
+    expect(result.repairCalls).toBe(1)
+    expect(result.final).toBeUndefined()
+    expect(result.failure).toBeTruthy()
+  })
+
   it('实测误放字段进入明确 repair，字段清单来自当前工具而不混入 critic', async () => {
     const valid = envelope({ outcome: 'no_trade', immediateAction: { action: 'noop' } })
     const critic = { issues: [], uncertainties: [] }
@@ -125,8 +182,8 @@ describe('R3 Decision workflow', () => {
     expect(result.failure).toBeUndefined()
     expect(JSON.stringify(model.requests[1])).toContain('forbidden')
     expect(JSON.stringify(model.requests[1])).toContain('noTrade')
-    const strategist = model.requests[0]?.messages[0]?.content
-    const riskCritic = model.requests[2]?.messages[0]?.content
+    const strategist = model.requests[0]?.messages[2]?.content
+    const riskCritic = model.requests[2]?.messages[2]?.content
     expect(JSON.stringify(strategist)).toContain('顶层字段：outcome, thesis')
     expect(JSON.stringify(riskCritic)).toContain('顶层字段：issues, uncertainties')
     expect(JSON.stringify(riskCritic)).not.toContain('顶层字段：outcome')

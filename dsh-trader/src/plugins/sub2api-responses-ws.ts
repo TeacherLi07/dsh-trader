@@ -43,6 +43,8 @@ import type {
 } from 'openai/resources/responses/responses'
 import z from '@deepseek-ai/schemastery'
 import { systemClock } from '../clock.js'
+import type { StructuredGenerateOptions } from '../llm-options.js'
+export type { StructuredGenerateOptions } from '../llm-options.js'
 
 export const name = 'llm-sub2api-responses-ws'
 export const inject = ['llm', 'credentials']
@@ -247,7 +249,7 @@ function emptyPiUsage(): PiAiUsage {
 }
 
 /** 与官方 DSH pi-ai adapter 相同地映射 system/user/assistant/tool-result history。 */
-function toPiAiContext(options: GenerateOptions): PiAiContext {
+function toPiAiContext(options: GenerateOptions): PiAiContext & { readonly userInputRoles: readonly ('user' | 'developer')[] } {
   let systemPrompt = options.system
   let sourceMessages = options.messages
   if (systemPrompt === undefined && sourceMessages[0]?.role === 'system') {
@@ -255,9 +257,11 @@ function toPiAiContext(options: GenerateOptions): PiAiContext {
     sourceMessages = sourceMessages.slice(1)
   }
   const messages: PiAiContext['messages'] = []
+  const userInputRoles: Array<'user' | 'developer'> = []
   const toolNames = new Map<string, string>()
   for (const message of sourceMessages) {
     if (message.role === 'system') {
+      userInputRoles.push('developer')
       messages.push({ role: 'user', content: flattenText(message.content), timestamp: 0 })
       continue
     }
@@ -294,7 +298,10 @@ function toPiAiContext(options: GenerateOptions): PiAiContext {
     }
     const text = flattenText(message.content.filter((block) => block.type !== 'tool-result'))
     const results = message.content.filter((block) => block.type === 'tool-result')
-    if (text.length > 0 || results.length === 0) messages.push({ role: 'user', content: text, timestamp: 0 })
+    if (text.length > 0 || results.length === 0) {
+      userInputRoles.push('user')
+      messages.push({ role: 'user', content: text, timestamp: 0 })
+    }
     for (const result of results) {
       const toolCallId = String(result.toolCallId)
       messages.push({
@@ -306,6 +313,7 @@ function toPiAiContext(options: GenerateOptions): PiAiContext {
   }
   return {
     ...(systemPrompt === undefined ? {} : { systemPrompt }),
+    userInputRoles,
     messages,
     ...(options.tools === undefined ? {} : { tools: options.tools.map((tool) => ({ ...tool })) }),
   }
@@ -427,8 +435,47 @@ function responseIsTerminal(event: ResponseStreamEvent): boolean {
   return event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed'
 }
 
+function validateToolChoice(options: GenerateOptions): StructuredGenerateOptions['toolChoice'] {
+  const raw = (options as GenerateOptions & { readonly toolChoice?: unknown }).toolChoice
+  if (raw === undefined) return undefined
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new LlmError('Sub2API Responses toolChoice must be a named function selector', 'INVALID_TOOL_CHOICE')
+  }
+  const selector = raw as Record<string, unknown>
+  const keys = Object.keys(selector)
+  if (
+    Object.getPrototypeOf(selector) !== Object.prototype
+    || keys.length !== 2
+    || !keys.includes('type')
+    || !keys.includes('name')
+    || selector['type'] !== 'function'
+    || typeof selector['name'] !== 'string'
+    || selector['name'].length === 0
+    || selector['name'].trim() !== selector['name']
+  ) {
+    throw new LlmError('Sub2API Responses toolChoice must be a named function selector', 'INVALID_TOOL_CHOICE')
+  }
+  const tools = options.tools
+  if (tools === undefined || tools.length === 0) {
+    throw new LlmError('Sub2API Responses toolChoice requires at least one registered function tool', 'INVALID_TOOL_CHOICE')
+  }
+  const names = new Set<string>()
+  for (const tool of tools) {
+    if (names.has(tool.name)) {
+      throw new LlmError(`Sub2API Responses toolChoice cannot select from duplicate tool name ${tool.name}`, 'INVALID_TOOL_CHOICE')
+    }
+    names.add(tool.name)
+  }
+  const name = selector['name']
+  if (!names.has(name)) {
+    throw new LlmError(`Sub2API Responses toolChoice names an unregistered tool ${name}`, 'INVALID_TOOL_CHOICE')
+  }
+  return { type: 'function', name }
+}
+
 function makeResponseCreateEvent(
   options: GenerateOptions,
+  toolChoice: StructuredGenerateOptions['toolChoice'],
   configuredModel: ResolvedSub2ApiWsModel,
   model: PiAiModel<'openai-responses'>,
   identity: ReturnType<typeof codexClientIdentity>,
@@ -437,6 +484,18 @@ function makeResponseCreateEvent(
   const context = toPiAiContext(options)
   // 与 DSH ChatGPT OAuth route 一致：系统指令写入 Responses.instructions，输入转换跳过同一份系统提示。
   const input = convertResponsesMessages(model, context, new Set(['openai']), { includeSystemPrompt: false })
+  // pi-ai 的 history 类型没有 developer；保留后续 DSH system 消息的指令身份和原始消息边界。
+  // 只投影 user 项的角色，assistant/tool-result 的原生编码仍由官方转换器完成。
+  let userIndex = 0
+  for (const item of input) {
+    if ('role' in item && item.role === 'user') {
+      const role = context.userInputRoles[userIndex++]
+      if (role === undefined) throw new LlmError('Responses conversion lost input role identity', 'INVALID_REQUEST')
+      item.role = role
+    }
+  }
+  if (userIndex !== context.userInputRoles.length) throw new LlmError('Responses conversion dropped an input message', 'INVALID_REQUEST')
+
   const tools = context.tools === undefined
     ? []
     : strictTools
@@ -461,7 +520,9 @@ function makeResponseCreateEvent(
     ...identity.body,
     max_output_tokens: options.maxTokens ?? configuredModel.maxTokens,
     ...(options.temperature === undefined || reasoningEnabled ? {} : { temperature: options.temperature }),
-    ...(tools.length === 0 ? {} : { tools, tool_choice: 'required', parallel_tool_calls: false }),
+    // OpenAI Responses 用具名 tool_choice 强制调用指定函数；见官方 Function Calling 文档。
+    // https://developers.openai.com/api/docs/guides/function-calling
+    ...(tools.length === 0 ? {} : { tools, tool_choice: toolChoice ?? 'required', parallel_tool_calls: false }),
     ...(reasoning === undefined ? {} : { reasoning }),
   }
 }
@@ -528,16 +589,18 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     })
   }
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  override async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     this.#assertProvider(options.provider)
     if (options.signal?.aborted) throw new LlmError('Sub2API WebSocket request already aborted before connection', 'ABORTED')
     if (options.stop !== undefined) throw new LlmError('Sub2API Responses WebSocket route does not support stop sequences', 'UNSUPPORTED_OPTION')
+    // 先校验客户端选择器和工具注册表，避免无效请求读取凭据或打开网络连接。
+    const toolChoice = validateToolChoice(options)
     const configuredModel = this.#models.get(options.model)
     if (configuredModel === undefined) throw new LlmError(`Sub2API WebSocket model is not configured: ${options.model}`, 'UNKNOWN_MODEL')
 
     const identity = codexClientIdentity(options.sessionId?.toString(), this.#codexVersion)
     const model = piModel(configuredModel, this.#baseURL)
-    const request = makeResponseCreateEvent(options, configuredModel, model, identity, this.#strictTools)
+    const request = makeResponseCreateEvent(options, toolChoice, configuredModel, model, identity, this.#strictTools)
     const strictToolSchemas = this.#strictTools && options.tools !== undefined
       ? new Map(options.tools.map((tool) => [tool.name, tool.parameters as JsonSchemaObject]))
       : undefined

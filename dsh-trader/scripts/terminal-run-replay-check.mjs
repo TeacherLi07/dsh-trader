@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import Database from 'better-sqlite3'
-import { createExecRuntime, migrate, runDecisionRuntime, systemClock } from '../lib/internal-api.js'
+import { createExecRuntime, migrate, runDecisionRuntime, systemClock, DECISION_WORKFLOW_PROMPT_VERSION, DECISION_ENVELOPE_SCHEMA_VERSION } from '../lib/internal-api.js'
 
 assert.ok(process.argv[2] && process.argv[3], 'usage: terminal-run-replay-check.mjs connectionDirectory newOutputDirectory')
 const sourceDirectory = resolve(process.argv[2]), output = resolve(process.argv[3])
@@ -20,6 +20,11 @@ copyFileSync(source, copy); chmodSync(copy, 0o600)
 const db = new Database(copy); migrate(db)
 const runs = db.prepare("SELECT * FROM decision_runs WHERE status <> 'running' ORDER BY created_at, run_id").all()
 assert.ok(runs.length > 0, 'requires nonempty terminal real runs')
+const expectedPrompt = `${DECISION_WORKFLOW_PROMPT_VERSION}:${policy.strategy}:schema-${DECISION_ENVELOPE_SCHEMA_VERSION}`
+if (!runs.every(row => row.prompt_version === expectedPrompt)) {
+  db.close()
+  throw Error('use a source-frozen checkout matching the saved prompt/schema; do not replay old evidence with a changed model request')
+}
 const snapshot = () => ({ budget: db.prepare('SELECT * FROM budget_ledger ORDER BY day, scope').all(),
   runs: db.prepare('SELECT * FROM decision_runs ORDER BY run_id').all(),
   orders: db.prepare('SELECT * FROM order_intents ORDER BY intent_id').all() })

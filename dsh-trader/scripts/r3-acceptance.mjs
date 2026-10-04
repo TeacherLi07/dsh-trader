@@ -34,7 +34,7 @@ class StubDecisionModel {
   constructor(output) { this.output = output }
   async *stream(options) {
     this.calls += 1
-    const tool = options.tools?.[0]
+    const tool = options.tools?.find(tool => tool.name === options.toolChoice?.name) ?? options.tools?.[0]
     assert.equal(tool?.name, 'submit_decision_envelope')
     yield { type: 'usage', usage: { inputTokens: 256, outputTokens: 48, totalTokens: 304 } }
     yield {

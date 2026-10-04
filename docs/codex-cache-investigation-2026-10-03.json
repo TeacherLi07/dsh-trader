@@ -1420,10 +1420,12 @@
     "terminalReplayEvidenceDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-terminal-replay-v6-final"
   },
   "nextCandidate": {
-    "implemented": false,
+    "implemented": true,
     "proposal": "Stable full tool list/order; named tool_choice restricts active stage; stable common instructions before stage/dynamic inputs; preserve complete facts, strict local validation, max reasoning and audit budget/hash",
     "explicitCacheOptions": "Target gateway compatibility unverified; do not send speculative fields or auto retry rejected request",
     "privateGatewayAccountTypeAndVersion": "unverified",
-    "extraPaidResearchCalls": 0
+    "extraPaidResearchCalls": 0,
+    "evidence": "context-prefix-verification-2026-10-04.json",
+    "liveBenefitConfirmed": false
   }
 }
