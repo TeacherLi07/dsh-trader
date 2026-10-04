@@ -1,0 +1,91 @@
+{
+  "date": "2026-10-04",
+  "officialDocumentUrl": "https://www.htx.com/oplt/api/open_api/interface/detail?interface_id=8cb89359-77b5-11ed-9966-19b930b8bee",
+  "officialDocumentSha256": "c7fa12cba34aab9dc17d94c20dc3a38253d38bb0c010c6caf22f245ee3d11b76",
+  "interface": "/v5/account/bills",
+  "method": "GET",
+  "requestParameters": {
+    "contract_code": {
+      "type": "String",
+      "description": "contract code"
+    },
+    "margin_mode": {
+      "type": "String",
+      "description": "Margin mode"
+    },
+    "type": {
+      "type": "String",
+      "description": "Financial Type, leave blank to query all types, [separate multiple types with commas]"
+    },
+    "start_time": {
+      "type": "String",
+      "description": "Starting time of the history, Unix timestamp format in milliseconds.\nDefault value:(now) – 48h"
+    },
+    "end_time": {
+      "type": "String",
+      "description": "Ending time of the history, Unix timestamp format in milliseconds.\nDefault value:now"
+    },
+    "from": {
+      "type": "Long",
+      "description": "D for the query starts at 0 by default."
+    },
+    "limit": {
+      "type": "Integer",
+      "description": "Pagination size defaults to 10, with a maximum limit of 100."
+    },
+    "direct": {
+      "type": "String",
+      "description": "prev, next"
+    }
+  },
+  "returnFields": [
+    "id",
+    "contract_code",
+    "margin_mode",
+    "type",
+    "currency",
+    "amount",
+    "created_time"
+  ],
+  "fromZeroRejected": true,
+  "omittingInitialAnchorPassed": true,
+  "positiveLedgerPaginationControl": {
+    "firstRows": 2,
+    "olderRows": 2,
+    "cursorExclusive": true,
+    "fundingRows": 0,
+    "fundingSignObserved": false
+  },
+  "realReader": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-funding-reader-real",
+    "passed": true,
+    "accountUidBoundWithoutLoggingUid": true,
+    "pages": 1,
+    "payments": 0,
+    "knownDecisionFundingCost": false,
+    "exchangeActions": 0
+  },
+  "verify": {
+    "passed": true,
+    "testFiles": 83,
+    "tests": 957,
+    "targetedTests": 29
+  },
+  "remaining": [
+    "Verify V5 funding amounts with nonempty income/debit rows; signed cashflow interpretation is conservative and conflict rejects",
+    "FundingCostRequest and fills lack credential-bound account/margin scope provenance",
+    "Payment creation time versus assessment time, delay and retention coverage remain unconfirmed",
+    "Production attribution/resolver not wired; default paper and net NULL remain"
+  ],
+  "readerCoverage": {
+    "lines": 100,
+    "statements": 98.21,
+    "functions": 100,
+    "branches": 96.2
+  },
+  "privateSources": [
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-bill-pagination/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-bill-pagination-without-anchor/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-funding-reader-real/report.json"
+  ]
+}

@@ -436,5 +436,15 @@
     "unknownUsageReservations": 0,
     "realOrders": 0,
     "newDeepSeekRequests": 0
+  },
+  "htxFundingSource20261004": {
+    "report": "docs/htx-funding-source-2026-10-04.json",
+    "sourceReaderImplemented": true,
+    "productionResolverWired": false,
+    "targetedTests": 29,
+    "verifyTests": 957,
+    "fundingRows": 0,
+    "knownZeroAsserted": false,
+    "exchangeActions": 0
   }
 }

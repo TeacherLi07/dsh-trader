@@ -59,3 +59,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04：v6证据诊断反馈
 
 [诊断反馈验收](draft-evidence-feedback-2026-10-04.md)：928测试，新鲜真实Context三阶段3次WS、cached97536/150031；另将旧真实DeepSeek的非空错误draft交给teacherli critic/final，只读2次，原DB不变，final5条声明路径可用。新draft诊断为空，非空回放另验；第一次误选空诊断样本的守卫失败/API0保留。没有新增DS请求、repair或订单，参考上界分别0.02392672/0.02714558 USD，网关账单未核验；funding/经济/长期缺口保留。
+
+## 2026-10-04：V5资金费来源读取器
+
+[来源验收](htx-funding-source-2026-10-04.md)：官方动态合同已取得，非空普通账单2+2条核验prev游标；from=0拒绝保留。来源读取器29用例，全库83文件/957测试通过，UID hash绑定的只读CLI返回funding0行且knownDecisionFundingCost=false。没有模型或交易请求。生产resolver尚待账户/数量归因与非空支付证据，net仍NULL，未冒充接线完成。

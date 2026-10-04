@@ -546,3 +546,5 @@ HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已
 **2026-10-04 R5当前生产链**：teacherli/Luna/max真实1431 bar/9 series的单轮critique通过结构校验，3次actual socket ID与SQLite reservation匹配，cached97536/149840（65.09%）、参考上界0.02026172 USD，未知预留/repair/重放调用/订单0。final误引用空挂单元素被eligibility降decision_only；draft诊断漏传正单独修复，不修改原样本。见 `docs/responses-ws-identity-2026-10-04.md`，不代表经济验收或资金费已知。
 
 **2026-10-04 R5诊断反馈**：prompt v6把已算出的draft evidenceIssues作为末尾材料传给critic/final，不新增模型调用、不放宽事实闸。928测试通过；新行情完整链3次WS/缓存97536/150031，旧真实DS非空draft在teacherli只读回放2次，原DB不变。原v5坏引用由final引入，不声称诊断漏传导致这条错误。新链/回放final均无无效路径，范围与前置空样本拒绝见 `docs/draft-evidence-feedback-2026-10-04.md`；不是经济通过。
+
+**2026-10-04 R4资金费来源合同**：已从官方动态文档核验V5账单type30/31、毫秒时间、from/direct分页；真实账单2+2条证明prev严格排除锚点，from=0业务1067/省略成功。严格读取器和只读CLI已实现，957测试/29来源用例通过；真实funding0行不生成known-zero。生产resolver尚待账户范围/历史数量归因、实际assessment时点和非空收支样本，见 `docs/htx-funding-source-2026-10-04.md`。旧NULL结果和默认paper保持。
