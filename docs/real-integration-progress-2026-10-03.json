@@ -395,5 +395,14 @@
     "ttftImprovementProven": false,
     "cacheBenefitScope": "historical complete-prefix reuse; latency/economic benefit not proven",
     "featureRecoveryEvidence": "feature-recovery-2026-10-04.json"
+  },
+  "htxV5ReadOnlyRecheck20261004": {
+    "passed": true,
+    "report": "docs/htx-auth-diagnostics-2026-10-04.json",
+    "equity": 24.904121200514755,
+    "positions": 0,
+    "openOrders": 0,
+    "realExchangeOrdersSubmitted": 0,
+    "rootCauseConfirmed": false
   }
 }

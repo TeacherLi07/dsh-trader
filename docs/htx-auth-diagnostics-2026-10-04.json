@@ -1,5 +1,5 @@
 {
-  "updatedAt": "2026-10-04T03:18:37.594962+00:00",
+  "updatedAt": "2026-10-04T07:44:43.483Z",
   "credentialsReference": "/workspace/dsh-trader/.env; user confirmed whitelist is for this key",
   "proxy": "http://host.docker.internal:7890",
   "actualProxySocketVerified": true,
@@ -57,6 +57,49 @@
   "privateSources": [
     "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-key-metadata-probe/report.json",
     "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-proxy-routing-diagnostics/report.json",
-    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-proxy-recheck/report.json"
-  ]
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-proxy-recheck/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-only-recheck/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-v5-only-recheck/broker-report.json"
+  ],
+  "v5AuthenticationCurrentlyPassed": true,
+  "latestV5OnlyRecheck": {
+    "at": "2026-10-04T07:42:54.791Z",
+    "proxy": "http://host.docker.internal:7890",
+    "credentialSource": "/workspace/dsh-trader/.env",
+    "readOnly": true,
+    "executedActions": [],
+    "results": [
+      {
+        "host": "api.hbdm.vn",
+        "path": "/v5/account/balance",
+        "code": 200,
+        "message": "Success",
+        "hasData": true
+      },
+      {
+        "host": "api.hbdm.com",
+        "path": "/v5/account/balance",
+        "code": 200,
+        "message": "Success",
+        "hasData": true
+      }
+    ]
+  },
+  "productionBrokerReadOnly": {
+    "at": "2026-10-04T07:44:43.483Z",
+    "passed": true,
+    "readOnly": true,
+    "executedActions": [],
+    "equity": 24.904121200514755,
+    "positions": 0,
+    "openOrders": 0,
+    "privatePaths": [
+      "/v5/account/balance",
+      "/v5/algo/order/opens",
+      "/v5/trade/order/opens",
+      "/v5/trade/position/opens"
+    ],
+    "nonemptyProtectionExercised": false
+  },
+  "credentialSynchronizationReportedByUser": true
 }
