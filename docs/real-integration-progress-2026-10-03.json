@@ -377,34 +377,16 @@
   },
   "legacyDeepSeekStatus": "blocked_on_provider_balance",
   "latestUpdate": {
-    "at": "2026-10-03T13:26:56.217942+00:00",
-    "model": "gpt-6-luna",
-    "reasoningEffort": "max",
-    "transport": "Responses WS",
-    "detail": "r5-luna-teacherli-2026-10-03.json",
-    "stableSession": {
-      "status": "stopped_on_unknown_rate_limited_ws_outcome",
-      "completedFullWorkflowSamples": 2,
-      "failedSamples": 1,
-      "providerWsRequests": 9,
-      "knownUsageCalls": 8,
-      "unknownUsageCalls": 1,
-      "cacheReadFraction": 0.012594324985051808
+    "at": "2026-10-04T03:18:37.594962+00:00",
+    "verification": {
+      "command": "pnpm verify",
+      "files": 81,
+      "tests": 891,
+      "passed": true
     },
-    "localVerification": {
-      "files": 78,
-      "tests": 878,
-      "command": "pnpm verify"
-    },
-    "htxLatestRead": "HTTP 200 business code 401 Incorrect IP address; no new orders; previous successful live runtime evidence retained",
-    "terminalReplay": {
-      "runs": 3,
-      "replayCalls": 6,
-      "providerCalls": 0,
-      "networkCalls": 0,
-      "budgetUnchanged": true,
-      "originalDbUnmodified": true
-    },
-    "economicAndLongTermAcceptance": "incomplete"
+    "contextPrefixEvidence": "context-prefix-verification-2026-10-04.json",
+    "htxEvidence": "htx-auth-diagnostics-2026-10-04.json",
+    "liveCacheBenefitConfirmed": false,
+    "latestContractReadPassed": false
   }
 }

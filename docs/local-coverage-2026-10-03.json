@@ -68,32 +68,32 @@
     "Percentages do not demonstrate R5 economic quality or R6 long observation"
   ],
   "latest": {
-    "files": 78,
-    "tests": 878,
+    "files": 81,
+    "tests": 891,
     "total": {
       "lines": {
-        "total": 8499,
-        "covered": 7406,
+        "total": 8552,
+        "covered": 7472,
         "skipped": 0,
-        "pct": 87.13
+        "pct": 87.37
       },
       "statements": {
-        "total": 9876,
-        "covered": 8196,
+        "total": 9937,
+        "covered": 8270,
         "skipped": 0,
-        "pct": 82.98
+        "pct": 83.22
       },
       "functions": {
-        "total": 1617,
-        "covered": 1464,
+        "total": 1629,
+        "covered": 1481,
         "skipped": 0,
-        "pct": 90.53
+        "pct": 90.91
       },
       "branches": {
-        "total": 9759,
-        "covered": 7462,
+        "total": 9821,
+        "covered": 7529,
         "skipped": 0,
-        "pct": 76.46
+        "pct": 76.66
       },
       "branchesTrue": {
         "total": 0,
@@ -103,7 +103,9 @@
       }
     },
     "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
-    "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/provider-diagnostics-coverage-878.log"
+    "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-04/context-prefix-coverage-889.log",
+    "coverageRunTests": 889,
+    "additionalProbeCostTestsVerified": 2
   },
   "snapshots": [
     {
@@ -143,6 +145,44 @@
       },
       "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
       "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/cache-identity-coverage-867.log"
+    },
+    {
+      "files": 78,
+      "tests": 878,
+      "total": {
+        "lines": {
+          "total": 8499,
+          "covered": 7406,
+          "skipped": 0,
+          "pct": 87.13
+        },
+        "statements": {
+          "total": 9876,
+          "covered": 8196,
+          "skipped": 0,
+          "pct": 82.98
+        },
+        "functions": {
+          "total": 1617,
+          "covered": 1464,
+          "skipped": 0,
+          "pct": 90.53
+        },
+        "branches": {
+          "total": 9759,
+          "covered": 7462,
+          "skipped": 0,
+          "pct": 76.46
+        },
+        "branchesTrue": {
+          "total": 0,
+          "covered": 0,
+          "skipped": 0,
+          "pct": 100
+        }
+      },
+      "command": "pnpm vitest run --coverage --coverage.reporter=json-summary --coverage.reporter=text",
+      "privateLog": "/home/ubuntu/.dsh/trading/integration-2026-10-03/provider-diagnostics-coverage-878.log"
     }
   ]
 }

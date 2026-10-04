@@ -1,0 +1,62 @@
+{
+  "updatedAt": "2026-10-04T03:18:37.594962+00:00",
+  "credentialsReference": "/workspace/dsh-trader/.env; user confirmed whitelist is for this key",
+  "proxy": "http://host.docker.internal:7890",
+  "actualProxySocketVerified": true,
+  "ipv4": "179.253.233.113",
+  "ipv6": "2605:52c0:2:1bc9:f8b0:8eff:fe48:f225",
+  "spotAccountQuery": {
+    "status": "ok",
+    "rows": 1
+  },
+  "keyMetadata": {
+    "at": "2026-10-03T15:28:56.104Z",
+    "proxy": "http://host.docker.internal:7890",
+    "readOnly": true,
+    "executedActions": [],
+    "uidReadCode": 200,
+    "metadataCode": 200,
+    "matchingKeyRows": [
+      {
+        "permission": "readOnly,trade",
+        "ipAddresses": "179.253.233.113,2605:52c0:2:1bc9:f8b0:8eff:fe48:f225",
+        "status": "normal",
+        "createTime": 1790132480000,
+        "hasCurrentAccessKeyMatch": true
+      }
+    ],
+    "keyMatches": 1
+  },
+  "latestV5": {
+    "ranAt": "2026-10-04T02:50:32.382Z",
+    "venue": "htx",
+    "symbol": "ADA/USDT:USDT",
+    "accountType": "swap",
+    "dbPath": "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-proxy-recheck/state.sqlite",
+    "dbExisted": false,
+    "credentials": {
+      "keyInjected": true,
+      "secretInjected": true
+    },
+    "report": null,
+    "error": "HTX request rejected (401): Incorrect IP address [IP地址错误]",
+    "readOnlyGuarantee": "本脚本只调用 getPositions/getOpenOrders/readOnlyBalance；executedActions 恒为空，绝不下单或撤单。"
+  },
+  "curlSameSignedV5": "HTTP200 business401 Incorrect IP address",
+  "officialAlternateHost": "api.hbdm.com also business401",
+  "independentHmacMatchesCcxt": true,
+  "inheritedCredentialOverride": false,
+  "workspaceAndDshCredentialPairsDiffer": true,
+  "otherCredentialPairUsed": false,
+  "legacyProbeConclusion": "User states legacy contract interfaces are obsolete; previous legacy403 is retained only as failed investigation, not valid authentication evidence",
+  "upstreamCcxtReviewed": "https://github.com/ccxt/ccxt/blob/master/ts/src/htx.ts",
+  "upstreamRoutingAndSigningMatch": true,
+  "readOnly": true,
+  "realExchangeOrdersSubmitted": 0,
+  "rootCauseConfirmed": false,
+  "privateSources": [
+    "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-key-metadata-probe/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-03/htx-proxy-routing-diagnostics/report.json",
+    "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-proxy-recheck/report.json"
+  ]
+}

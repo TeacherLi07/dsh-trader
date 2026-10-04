@@ -6,7 +6,7 @@
 
 | 项目 | 实测 |
 |---|---|
-| 本地完整检查 | 当前78文件 / 878用例；覆盖率最新计数见独立报告，历史统计保留 |
+| 本地完整检查 | 当前81文件 / 891用例；覆盖率最新计数见独立报告，历史统计保留 |
 | 历史DeepSeek最终Responses批量 | 目标52条，完成38条；122次可核验usage调用；4条因402失败并保持未知费用 |
 | 同运行时恢复探针 | 另1条完成；进程重新运行 --resume 后同runId、modelInvocations=0、真实provider请求=0 |
 | 历史DeepSeek开发调用 | 154次可核验usage，按官方价目估算1.895202540 USD；另0.223983300 USD未决上限预留，非已证实支出 |
@@ -30,3 +30,8 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 - [覆盖率](local-coverage-2026-10-03.md)：本地百分比与真实网络证据分开。
 
 早期自然语言DSL、seq=0、批评格式/长度、提示误写&&/||、错误provider兼容项与HTX首次失败均保留。现在复用计划校验器在阶段提交前使用唯一repair；prompt为decision-r3-v3，Flash/high/32768由真实wire请求确认。测试runner另修复当日预算绝对上限和触发at的持久化，避免重启改变run identity而重复计费。
+
+
+## 2026-10-04 补充
+
+[Context前缀与协议](context-prefix-verification-2026-10-04.md)完成固定cohort标识、工具集合和独立消息边界，81文件/891测试通过；3个真实冻结快照完整性与原DB不变，8次loopback不计付费模型样本。真实缓存/延迟改善待验证。[HTX鉴权对照](htx-auth-diagnostics-2026-10-04.md)确认代理、双栈出口、当前key权限及IP绑定；现货成功但V5合约仍业务401，根因未确认，原实盘成功证据保留。
