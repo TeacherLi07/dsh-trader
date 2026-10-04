@@ -1426,6 +1426,157 @@
     "privateGatewayAccountTypeAndVersion": "unverified",
     "extraPaidResearchCalls": 0,
     "evidence": "context-prefix-verification-2026-10-04.json",
-    "liveBenefitConfirmed": false
+    "liveBenefitConfirmed": true,
+    "benefitScope": "Historical complete-prefix KV reuse verified; TTFT improvement not proven"
+  },
+  "latestLiveValidation": {
+    "updatedAt": "2026-10-04T03:46:58.926163+00:00",
+    "scope": "historical provider replay; no forward/economic sample",
+    "sourceRunId": "run-0871934ef2dd393bd84f1ce54c540e919a45c3ef4c2b18f27b7939d2b2b791fc",
+    "sourceHash": "932de32d70b24d97440f9e6fff8d3e910d8892365a6ffcdd8645c743c6a3f8e3",
+    "sourceUnmodified": true,
+    "contextHash": "sha256:e11316a2f6025929e6579aabddd1a4ac587d15cb45615a30b3b271ede12f6967",
+    "historicalAsOf": 1791025590729,
+    "model": "sub2api:gpt-6-luna",
+    "reasoningEffort": "max",
+    "maxTokens": 32768,
+    "build": {
+      "schemaVersion": 1,
+      "gitCommit": "55633fee310f61a8721a34746921b4bf512cbc2c",
+      "artifactsHash": "sha256:de55e7ba74beaab0c1d8f41f4ea0b5e3aff7c4ed54bc1e13bca389ee3d62dac8"
+    },
+    "passed": true,
+    "providerRequests": 3,
+    "knownUsageCalls": 3,
+    "repairCalls": 0,
+    "outcome": "no_trade",
+    "inputTokens": 150112,
+    "cachedTokens": 97536,
+    "cacheReadFraction": 0.6497548497122149,
+    "outputTokens": 10252,
+    "calls": [
+      {
+        "index": 1,
+        "sentAt": 1791085052415,
+        "tool": "submit_decision_envelope",
+        "createdMs": 1543,
+        "visibleMs": 46998,
+        "inputTokens": 49425,
+        "cachedTokens": 0,
+        "outputTokens": 2893,
+        "reasoningTokens": 2150,
+        "cacheWriteTokens": 0,
+        "terminalMs": 59976,
+        "requestFieldsAttribution": {
+          "tools": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 1882,
+            "output_tokens": 0
+          },
+          "instructions": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0,
+            "input_tokens": 484,
+            "output_tokens": 0
+          }
+        },
+        "inputItemsAttribution": [
+          {
+            "inputTokens": 46932,
+            "cachedTokens": 0
+          },
+          {
+            "inputTokens": 125,
+            "cachedTokens": 0
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "sentAt": 1791085113406,
+        "tool": "submit_risk_critique",
+        "createdMs": 1466,
+        "visibleMs": 79247,
+        "inputTokens": 50178,
+        "cachedTokens": 48768,
+        "outputTokens": 3746,
+        "reasoningTokens": 3436,
+        "cacheWriteTokens": 0,
+        "terminalMs": 85850,
+        "requestFieldsAttribution": {
+          "tools": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1882,
+            "input_tokens": 1882,
+            "output_tokens": 0
+          },
+          "instructions": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 484,
+            "input_tokens": 484,
+            "output_tokens": 0
+          }
+        },
+        "inputItemsAttribution": [
+          {
+            "inputTokens": 46932,
+            "cachedTokens": 46402
+          },
+          {
+            "inputTokens": 878,
+            "cachedTokens": 0
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "sentAt": 1791085200268,
+        "tool": "submit_decision_envelope",
+        "createdMs": 1415,
+        "visibleMs": 55882,
+        "inputTokens": 50509,
+        "cachedTokens": 48768,
+        "outputTokens": 3613,
+        "reasoningTokens": 2470,
+        "cacheWriteTokens": 0,
+        "terminalMs": 75577,
+        "requestFieldsAttribution": {
+          "tools": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 1882,
+            "input_tokens": 1882,
+            "output_tokens": 0
+          },
+          "instructions": {
+            "cache_write_tokens": 0,
+            "cached_tokens": 484,
+            "input_tokens": 484,
+            "output_tokens": 0
+          }
+        },
+        "inputItemsAttribution": [
+          {
+            "inputTokens": 46932,
+            "cachedTokens": 46402
+          },
+          {
+            "inputTokens": 1209,
+            "cachedTokens": 0
+          }
+        ]
+      }
+    ],
+    "referenceEstimateUpperUsd": 0.02278372,
+    "standardReferenceUsd": 0.01135896,
+    "unresolvedUpperReservationUsd": 0,
+    "gatewayInvoiceVerified": false,
+    "realExchangeOrdersSubmitted": 0,
+    "noAutomaticResubmission": true,
+    "livePrefixReuseVerified": true,
+    "ttftImprovementProven": false,
+    "forwardEconomicSample": false,
+    "privateEvidenceDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-historical-prefix-v5",
+    "traceSha256": "b95685f49a626df9c672444eef0261b4619c8220882366148a0423924fb1c9b2"
   }
 }

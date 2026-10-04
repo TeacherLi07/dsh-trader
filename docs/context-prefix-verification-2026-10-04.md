@@ -22,7 +22,7 @@
 | 完整性 | 新文本解码后canonical JSON与原事实相同，原DB哈希不变 |
 | 恢复隔离 | 旧prompt/schema证据必须用匹配实现；新CLI在开始模型流程前拒绝版本混用 |
 
-字符前缀增长不是缓存token命中或延迟改善证明。8次loopback没有执行付费模型，也不计入R5真实行情样本。新布局的真实缓存收益仍待验证。
+字符前缀增长不是缓存token命中或延迟改善证明。8次loopback没有执行付费模型，也不计入R5真实行情样本。真实回放后两阶段已返回48768 cached tokens；见 [真实缓存补验](context-prefix-live-2026-10-04.md)。字节排列检查本身仍不代表服务端命中。
 
 复现本地协议捕获（输出父目录应为700，文件必须不存在）：
 
@@ -34,3 +34,6 @@ TRADER_CONTEXT_PREFIX_EVIDENCE=/private/new-ws-frames.json pnpm vitest run tests
 
 
 历史provider回放入口：`node scripts/context-prefix-model-check.mjs <已完成真实运行的DB> <新私有目录>`。只选费用已知、无workflow failure的原始快照；原asOf/hash保留，不启动交易服务，不算前向paper样本。三阶段加至多一次repair，上界最多4请求、32768输出tokens、max effort、官方参考总额0.30 USD；真实命中/延迟另写实测结果。
+
+
+短provider补验2请求/2次usage通过：具名双strict工具和后续developer消息均被真实服务接受，原Envelope校验通过；参考上界0.0008535 USD，未知预留0。该工具→工具结果→文本探针不作缓存率比较。

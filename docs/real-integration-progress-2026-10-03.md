@@ -35,3 +35,6 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04 补充
 
 [Context前缀与协议](context-prefix-verification-2026-10-04.md)完成固定cohort标识、工具集合和独立消息边界，81文件/891测试通过；3个真实冻结快照完整性与原DB不变，8次loopback不计付费模型样本。真实缓存/延迟改善待验证。[HTX鉴权对照](htx-auth-diagnostics-2026-10-04.md)确认代理、双栈出口、当前key权限及IP绑定；现货成功但V5合约仍业务401，根因未确认，原实盘成功证据保留。
+
+
+新布局的[真实历史回放](context-prefix-live-2026-10-04.md)已通过3阶段/3次usage：critic/final各48768 cached，合计64.98%；参考上界0.02278372 USD，未知预留0。仅验证全快照前缀复用与协议，未证明TTFT或经济效果；HTX V5当前鉴权仍另列。

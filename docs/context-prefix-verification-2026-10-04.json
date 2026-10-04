@@ -62,7 +62,7 @@
     "store:false; no previous_response_id",
     "Unknown fees retained, no automatic resubmission"
   ],
-  "liveCacheBenefitConfirmed": false,
+  "liveCacheBenefitConfirmed": true,
   "officialSources": [
     "https://openai.com/index/practical-guide-building-gpt-6/",
     "https://developers.openai.com/api/docs/guides/prompt-caching",
@@ -80,5 +80,42 @@
     "subagentCommit": "7835ada962624d3c7214642ef584b41d96365141",
     "integratedByRoot": true,
     "independentWorktree": "/workspace/.worktrees/provider-tool-choice"
-  }
+  },
+  "livePrefixReuseVerified": true,
+  "liveEvidence": "context-prefix-live-2026-10-04.json",
+  "namedDeveloperLiveProbe": {
+    "passed": true,
+    "model": "sub2api:gpt-6-luna",
+    "maxTokens": 8192,
+    "reasoningEffort": "max",
+    "submittedRequests": 2,
+    "contractValidated": true,
+    "namedToolChoice": true,
+    "toolCatalogSize": 2,
+    "knownUsageCalls": 2,
+    "referenceEstimateUsd": 0.0008535,
+    "unresolvedUpperReservationUsd": 0,
+    "rounds": [
+      {
+        "kind": "tool",
+        "usage": {
+          "inputTokens": 1966,
+          "outputTokens": 197,
+          "totalTokens": 2163,
+          "reasoningTokens": 117
+        }
+      },
+      {
+        "kind": "tool-result-history",
+        "usage": {
+          "inputTokens": 131,
+          "outputTokens": 242,
+          "totalTokens": 373,
+          "reasoningTokens": 233
+        }
+      }
+    ]
+  },
+  "ttftImprovementProven": false,
+  "cacheBenefitScope": "historical complete-prefix reuse; latency/economic benefit not proven"
 }

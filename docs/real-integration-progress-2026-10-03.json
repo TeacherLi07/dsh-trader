@@ -386,7 +386,13 @@
     },
     "contextPrefixEvidence": "context-prefix-verification-2026-10-04.json",
     "htxEvidence": "htx-auth-diagnostics-2026-10-04.json",
-    "liveCacheBenefitConfirmed": false,
-    "latestContractReadPassed": false
+    "liveCacheBenefitConfirmed": true,
+    "latestContractReadPassed": false,
+    "livePrefixReuseVerified": true,
+    "liveCacheEvidence": "context-prefix-live-2026-10-04.json",
+    "cachedTokens": 97536,
+    "actualInputTokens": 150112,
+    "ttftImprovementProven": false,
+    "cacheBenefitScope": "historical complete-prefix reuse; latency/economic benefit not proven"
   }
 }
