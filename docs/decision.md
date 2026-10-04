@@ -1984,3 +1984,8 @@ Sub2API WS 使用独立 adapter，复用 OpenAI ResponsesWS 与 pi-ai 的消息/
 Luna子代理完成只读调查，root复算API usage：10次真实input496944、cached6656，账本680742包含183798未决预留，不能作缓存率分母。4次hit各1664，首可见tool token中位43.464秒；reasoning占输出约77.2%，数据不足以把prefill与max推理精确拆开。
 
 Codex credits无单独cache-write费，API价目及网关账单分开报告。修复一个run内阶段/repair随机session：以runId共享provider会话，继续每次传完整事实，由OpenAI管理KV；没有previous_response_id或本地答案缓存。原未决费用和失败保持。原始逐请求证据、官方出处与验证范围见 [缓存调查](codex-cache-investigation-2026-10-03.md)。
+
+
+## 2026-10-04：历史修订恢复与重启数值一致性
+
+历史规则/模型/订单回调不能作为特征恢复手段。新增离线查看→重建→显式游标确认，唯一凭据保留输入/结果指纹和人工原因；新修订或投影改变拒绝旧确认，原PIT隔离观测不删除。只回灌50根是暖机，不等价恢复EMA/Wilder状态；1005根实测确认误差，生产冷启动改为分页恢复完整已处理前缀。真实归档副本与SIGKILL证据见 [恢复验收](feature-recovery-2026-10-04.md)，不改变执行授权或当前paper状态。

@@ -171,7 +171,7 @@ qty              = floorToStep(riskQuote / stopDistance)
 
 | 表组 | 表 | 不变量 |
 |---|---|---|
-| 行情 | `bars`, `features`, `bar_processing`, `market_observations` | 只处理已收盘 bar；PIT 观测按 event/available 双时间只追加；同一 bar 成功后才推进游标 |
+| 行情 | `bars`, `features`, `bar_processing`, `market_observations`, `market_feature_recoveries` | 只处理已收盘 bar；PIT 观测按 event/available 双时间只追加；同一 bar 成功后才推进游标 |
 | 判断 | `decision_contexts`, `decision_runs`, `decisions`, `plan_cards` | context 全文可复现；终态 run 由 SQLite trigger 禁止改写；一轮一个最终裁决；每标的一张 active 卡 |
 | 执行 | `order_intents`, `orders`, `fills` | client id 唯一；状态单向迁移；重复回报不重复成交 |
 | 学习 | `outcomes`, `lessons` | 一条决策至多一个结算和一个有证据 lesson |
@@ -179,7 +179,7 @@ qty              = floorToStep(riskQuote / stopDistance)
 | 运营 | `audit_events`, `config_versions`, `heartbeat`, `price_table`, `budget_ledger` | 审计 append-only；限额与成本版本化 |
 | 预测市场 | `pm_markets`, `pm_market_versions`, `pm_series`, `pm_quotes`, `pm_watches` | 当前投影可更新；历史市场元数据 append-only 并按本机 `available_at` 回放；概率序列与盘口分别同时约束 source event time 和本机可用时间；只读、别名有期限且有上限 |
 
-当前 schema 为 v10。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
+当前 schema 为 v11。v5 用 `decision_contexts` 取代只存 part hash 的 `context_snapshots`，保存 canonical context 或可核验的
 内容指针；用 `decision_runs` 取代一次性 `workflow_contexts` token，把 draft、critique、final、
 eligibility、模型版本、token、成本和耗时放在同一 run 根下。`decisions.run_id` 与 `plan_cards.run_id`
 必须回指该 run。v6 增加 `market_observations`，按 `event_time` 与 `available_at` 记录不可变行情修订，
@@ -202,6 +202,40 @@ R3 补足运行语义：run 必须绑定候选/提示词/模型版本与触发�
 run 不能授权开仓。同一 context 可用于多个对照 run，实验账户及其订单幂等域彼此隔离。
 结构修复额度按整个 run 计数，随阶段工件持久化并从拒绝审计补足；重启不能重置额度或重发已计费且输出已拒绝的原请求。
 恢复的 final 必须重新核验全部 critiqueResponses；Critic 输出的字段与长度由本地代码执行校验。
+
+v11增加人工特征恢复凭据，DDL合同如下。重建不确认处理游标，确认前输入/结果必须匹配，历史隔离观测不删除。
+
+```sql
+CREATE TABLE IF NOT EXISTS market_feature_recoveries (
+  recovery_id TEXT PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  result_hash TEXT NOT NULL,
+  marker_seq INTEGER NOT NULL CHECK (marker_seq > 0),
+  through_close_time INTEGER NOT NULL CHECK (through_close_time >= 0),
+  affected_bars INTEGER NOT NULL CHECK (affected_bars > 0),
+  rebuilt_at INTEGER NOT NULL CHECK (rebuilt_at >= through_close_time),
+  confirmed_at INTEGER CHECK (confirmed_at IS NULL OR confirmed_at >= rebuilt_at),
+  rebuild_reason TEXT NOT NULL CHECK (length(trim(rebuild_reason)) > 0),
+  confirm_reason TEXT,
+  CHECK ((confirmed_at IS NULL AND confirm_reason IS NULL) OR
+    (confirmed_at IS NOT NULL AND confirm_reason IS NOT NULL AND length(trim(confirm_reason)) > 0))
+);
+CREATE TRIGGER IF NOT EXISTS market_feature_recoveries_no_delete
+  BEFORE DELETE ON market_feature_recoveries BEGIN
+    SELECT RAISE(ABORT, 'feature recovery evidence is immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS market_feature_recoveries_confirm_once
+  BEFORE UPDATE ON market_feature_recoveries
+  WHEN OLD.confirmed_at IS NOT NULL OR NEW.confirmed_at IS NULL
+    OR NEW.recovery_id IS NOT OLD.recovery_id OR NEW.symbol IS NOT OLD.symbol
+    OR NEW.timeframe IS NOT OLD.timeframe OR NEW.result_hash IS NOT OLD.result_hash
+    OR NEW.marker_seq IS NOT OLD.marker_seq OR NEW.through_close_time IS NOT OLD.through_close_time
+    OR NEW.affected_bars IS NOT OLD.affected_bars OR NEW.rebuilt_at IS NOT OLD.rebuilt_at
+    OR NEW.rebuild_reason IS NOT OLD.rebuild_reason
+  BEGIN SELECT RAISE(ABORT, 'feature recovery can only be confirmed once'); END;
+
+```
 
 ### 4.2 权威顺序
 
@@ -465,7 +499,7 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 
 **结算成本数据缺口**：生产 `SettlementScheduler` 当前没有注入 `FundingCostResolver`；因此即使成交手续费已核验，资金费与 `realized_net_pct` 仍安全地保持 NULL。进入 §10.4 经济验收前，必须接通权威 funding-payment 来源并验证覆盖区间/计价币；不得用 funding rate 快照或 0 代替已结算资金费。
 
-**未决运行的恢复入口缺口**：bar 修订隔离与模型调用未决 reservation 都会 fail-closed，但仓库当前没有对应的 feature-only 修复/游标确认命令，也没有用 provider usage/billing 证据核销未决 reservation 的审计流程。它们不能由运维直接删标记或盲目重试；启用长期无人值守运行前，需要补齐经核验、幂等且可审计的恢复入口。
+**未决运行的恢复入口**：bar修订的feature-only重建与显式游标确认命令已接入，schema v11保留不可修改的恢复凭据；完整历史分页重启、PIT、幂等、拒绝与真实SIGKILL均已补验，见 `docs/feature-recovery-2026-10-04.md`。先停profile，查看计划、重建、单独确认，再重启；原隔离观测不删除，新bar不跳过。模型调用未决reservation仍缺用provider usage/billing证据核销的审计流程，不能删除预留或盲目重发。
 
 **2026-10-03 真实工程测试进度**：早期 6 条模型判断/19 次调用已保留完整 usage、失败和原始脱敏 trace，估算合计 0.202095972 USD；其中指定 Flash/high/32k 的 2 条判断完成。
 HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已完成非空仓位 + 原生 SL/TP 的 merged 查询、保留保护撤单、reduce-only 平仓及空仓后撤保护。

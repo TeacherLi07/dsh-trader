@@ -32,3 +32,8 @@ plugins/exec、supervisor、ui、commands 与 predictions/runtime 的本地行�
 ## Context前缀补验（2026-10-04）
 
 完整verify为81文件/891测试。覆盖率采样在随后2条probe-cost测试添加前为80文件/889测试：行87.37%、语句83.22%、函数90.91%、分支76.66%；真实网络效果仍单列。
+
+
+## 特征恢复与重启补验
+
+82文件/900测试通过；行87.22%、语句83.12%、函数90.56%、分支76.62%。原始计数见JSON.latest；SIGKILL、真实bar副本与零回调证据另见feature-recovery验收。

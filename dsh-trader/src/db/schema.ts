@@ -17,7 +17,7 @@
  * 正式纳入版本边界；v6 增加双时间、只追加的行情观测归档；v7 为 W2/W3 触发队列增加
  * 有界重试、退避和重启恢复；v8 让结算成本/基准可显式未知并记录估值类型；v9 为 PM 元数据保存按本机获知时间回放的 append-only 版本；v10 为 PM 盘口补本机可用时刻。
  */
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 11
 
 export interface SqliteLike {
   exec(sql: string): unknown
@@ -279,6 +279,37 @@ CREATE TABLE IF NOT EXISTS triggers (
   claimed_at INTEGER,
   last_error TEXT
 );
+
+-- 人工特征恢复凭据：重建和游标确认分开，唯一键防止重复恢复重放历史回调。
+CREATE TABLE IF NOT EXISTS market_feature_recoveries (
+  recovery_id TEXT PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  result_hash TEXT NOT NULL,
+  marker_seq INTEGER NOT NULL CHECK (marker_seq > 0),
+  through_close_time INTEGER NOT NULL CHECK (through_close_time >= 0),
+  affected_bars INTEGER NOT NULL CHECK (affected_bars > 0),
+  rebuilt_at INTEGER NOT NULL CHECK (rebuilt_at >= through_close_time),
+  confirmed_at INTEGER CHECK (confirmed_at IS NULL OR confirmed_at >= rebuilt_at),
+  rebuild_reason TEXT NOT NULL CHECK (length(trim(rebuild_reason)) > 0),
+  confirm_reason TEXT,
+  CHECK ((confirmed_at IS NULL AND confirm_reason IS NULL) OR
+    (confirmed_at IS NOT NULL AND confirm_reason IS NOT NULL AND length(trim(confirm_reason)) > 0))
+);
+
+CREATE TRIGGER IF NOT EXISTS market_feature_recoveries_no_delete
+  BEFORE DELETE ON market_feature_recoveries BEGIN
+    SELECT RAISE(ABORT, 'feature recovery evidence is immutable');
+  END;
+CREATE TRIGGER IF NOT EXISTS market_feature_recoveries_confirm_once
+  BEFORE UPDATE ON market_feature_recoveries
+  WHEN OLD.confirmed_at IS NOT NULL OR NEW.confirmed_at IS NULL
+    OR NEW.recovery_id IS NOT OLD.recovery_id OR NEW.symbol IS NOT OLD.symbol
+    OR NEW.timeframe IS NOT OLD.timeframe OR NEW.result_hash IS NOT OLD.result_hash
+    OR NEW.marker_seq IS NOT OLD.marker_seq OR NEW.through_close_time IS NOT OLD.through_close_time
+    OR NEW.affected_bars IS NOT OLD.affected_bars OR NEW.rebuilt_at IS NOT OLD.rebuilt_at
+    OR NEW.rebuild_reason IS NOT OLD.rebuild_reason
+  BEGIN SELECT RAISE(ABORT, 'feature recovery can only be confirmed once'); END;
 
 CREATE TABLE IF NOT EXISTS audit_events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,

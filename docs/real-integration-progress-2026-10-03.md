@@ -38,3 +38,8 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 
 
 新布局的[真实历史回放](context-prefix-live-2026-10-04.md)已通过3阶段/3次usage：critic/final各48768 cached，合计64.98%；参考上界0.02278372 USD，未知预留0。仅验证全快照前缀复用与协议，未证明TTFT或经济效果；HTX V5当前鉴权仍另列。
+
+
+## 修订恢复补验
+
+[特征恢复](feature-recovery-2026-10-04.md)补齐只重建特征和显式游标确认：159根真实bar副本、53根受影响、模型/网络/订单回调0，原DB与预算不变；另过SIGKILL与1005根分页重启数值一致性。最新82文件/900测试通过。HTX V5鉴权、资金费来源和模型未决账单核销继续单列。

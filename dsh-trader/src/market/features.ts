@@ -476,7 +476,7 @@ export class FeaturePipeline {
 
   /**
    * 进程重启后回灌：用归档里的已收盘 bar 重建增量状态。
-   * 回灌长度取 FEATURE_WARMUP_BARS，覆盖 EMA50 和 ADX 双窗口，避免重启后长时间空窗。
+   * 传入完整已处理前缀才能精确恢复 EMA/Wilder；FEATURE_WARMUP_BARS 只说明最小暖机长度。
    */
   warmUp(candles: readonly Candle[], snapshots: readonly FeatureSnapshot[] = []): void {
     const byOpen = new Map<string, FeatureSnapshot>()
@@ -489,6 +489,22 @@ export class FeaturePipeline {
       this.#engineFor(candle.symbol, candle.timeframe).onClosedCandle(candle, snapshot?.derivatives)
       const key = `${candle.symbol}|${candle.timeframe}`
       this.#lastOpenTimes.set(key, candle.openTime)
+    }
+  }
+
+  /** 只回灌成功处理的完整历史；分批取数据，不写投影、不调用规则或订单。 */
+  restoreProcessed(archive: import('./archive.js').BarArchive, symbol: string, timeframe: string): number {
+    let since = 0, count = 0
+    for (;;) {
+      const candles = archive.processedClosedBars(symbol, timeframe, since)
+      if (candles.length === 0) return count
+      const snapshots = candles.map(candle => this.archive.get(symbol, timeframe, candle.openTime))
+        .filter((snapshot): snapshot is FeatureSnapshot => snapshot !== undefined)
+      this.warmUp(candles, snapshots)
+      count += candles.length
+      const last = candles.at(-1)!.openTime
+      if (!Number.isSafeInteger(last) || last >= Number.MAX_SAFE_INTEGER) throw Error('特征恢复游标不能安全前进')
+      since = last + 1
     }
   }
 

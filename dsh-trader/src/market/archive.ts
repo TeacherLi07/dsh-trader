@@ -220,6 +220,15 @@ export class BarArchive {
     return rows.map(toCandle).reverse()
   }
 
+  /** 冷启动按页回灌完整已处理前缀；截取50根只能暖机，不能恢复EMA/Wilder的原始状态。 */
+  processedClosedBars(symbol: string, timeframe: string, since: number, limit = 1000): readonly Candle[] {
+    const rows = this.#statements.get(`SELECT b.symbol,b.timeframe,b.open_time,b.close_time,b.open,b.high,b.low,b.close,b.volume,b.closed
+      FROM bars b JOIN bar_processing p ON p.symbol=b.symbol AND p.timeframe=b.timeframe AND p.open_time=b.open_time
+      WHERE b.symbol=? AND b.timeframe=? AND b.closed=1 AND b.open_time>=? ORDER BY b.open_time LIMIT ?`)
+      .all(symbol,timeframe,since,limit) as BarRow[]
+    return rows.map(toCandle)
+  }
+
   /** 处理游标之后的已收盘 bar，按时间升序返回；成功回调后才写入 bar_processing。 */
   unprocessedClosedBars(symbol: string, timeframe: string, limit = 1_000): readonly Candle[] {
     const rows = this.#statements

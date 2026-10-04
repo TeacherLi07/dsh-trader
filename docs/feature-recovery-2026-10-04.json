@@ -1,0 +1,160 @@
+{
+  "updatedAt": "2026-10-04T07:01:17.471702+00:00",
+  "schemaVersion": 11,
+  "verification": {
+    "command": "pnpm verify",
+    "files": 82,
+    "tests": 900,
+    "passed": true
+  },
+  "realBarsCopyAcceptance": {
+    "passed": true,
+    "source": "/home/ubuntu/.dsh/trading/integration-2026-10-03/teacherli-stable-session-v6/paper.sqlite",
+    "sourceHash": "932de32d70b24d97440f9e6fff8d3e910d8892365a6ffcdd8645c743c6a3f8e3",
+    "sourceUnmodified": true,
+    "symbol": "ADA/USDT:USDT",
+    "timeframe": "15m",
+    "realBars": 159,
+    "syntheticCursorAndRevisionFixture": true,
+    "affectedBars": 53,
+    "receipt": {
+      "recovery_id": "sha256:0743588256c180cff7da2b54206b83c5fc1b95b8f5c96d1c65c417ceafc55384",
+      "symbol": "ADA/USDT:USDT",
+      "timeframe": "15m",
+      "result_hash": "sha256:6297f5de86790ec9433dc128b34934966896d54fdb3e425cda506f8db769531d",
+      "marker_seq": 4359,
+      "through_close_time": 1791025200000,
+      "affected_bars": 53,
+      "rebuilt_at": 1791097277382,
+      "confirmed_at": 1791097277383,
+      "rebuild_reason": "真实数据副本故障注入，仅重建特征",
+      "confirm_reason": "确认跳过受影响历史回调"
+    },
+    "audits": [
+      {
+        "kind": "market.features_rebuilt"
+      },
+      {
+        "kind": "market.feature_cursor_confirmed"
+      }
+    ],
+    "modelCalls": 0,
+    "networkCalls": 0,
+    "executionCallbacks": 0,
+    "newOrderIntents": 0,
+    "budgetUnchanged": true,
+    "restartRestoredBars": 159
+  },
+  "cliAcceptance": {
+    "passed": true,
+    "inspect": {
+      "recoveryId": "sha256:455e8c8b35d3f429ebd0f606e1a8f1c8037bbcfd9e2a9aaaf5fa42561db9eb6a",
+      "symbol": "ADA/USDT:USDT",
+      "timeframe": "1h",
+      "markerSeq": 131,
+      "throughCloseTime": 216000000,
+      "firstPendingOpenTime": 180000000,
+      "bars": 60,
+      "affectedBars": 10,
+      "missingDerivativeInputs": 60
+    },
+    "receipt": {
+      "recovery_id": "sha256:455e8c8b35d3f429ebd0f606e1a8f1c8037bbcfd9e2a9aaaf5fa42561db9eb6a",
+      "symbol": "ADA/USDT:USDT",
+      "timeframe": "1h",
+      "result_hash": "sha256:6401f35d363e2892757deb31541aeeb9f91fd47e91d8951ddd52f0e101f6111c",
+      "marker_seq": 131,
+      "through_close_time": 216000000,
+      "affected_bars": 10,
+      "rebuilt_at": 1791096481403,
+      "confirmed_at": 1791096481503,
+      "rebuild_reason": "CLI fixture rebuild",
+      "confirm_reason": "CLI fixture confirm"
+    },
+    "networkCalls": 0,
+    "modelCalls": 0
+  },
+  "sigkill": {
+    "sourceTest": "tests/feature-recovery.test.ts",
+    "actualSignal": "SIGKILL",
+    "rebuiltBeforeKill": true,
+    "remainedIsolatedAfterRestart": true,
+    "repeatRebuildNoWrites": true,
+    "explicitCursorConfirmationRequired": true
+  },
+  "restartNumericalRegression": {
+    "processedBars": 1005,
+    "moreThanOneSqlPage": true,
+    "nextSnapshotEqualsUninterruptedState": true,
+    "truncated50BarEma50WasDifferent": true
+  },
+  "offlineStartup": {
+    "status": "passed",
+    "broker": "paper",
+    "commands": [
+      "halt",
+      "resume"
+    ],
+    "halt": {
+      "kind": "success",
+      "text": "已暂停交易并撤销普通挂单，保护单保留。"
+    },
+    "resume": {
+      "kind": "success",
+      "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+    },
+    "equityQuote": 24.914,
+    "modelCalls": 0,
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "command": "dsh --profile trade",
+    "isolatedProfile": true,
+    "output": ""
+  },
+  "originalSourceModified": false,
+  "productionRecoveryExecuted": false,
+  "privateReport": "/home/ubuntu/.dsh/trading/integration-2026-10-04/feature-recovery-real-bars-final/report.json",
+  "coverage": {
+    "lines": {
+      "total": 8657,
+      "covered": 7551,
+      "skipped": 0,
+      "pct": 87.22
+    },
+    "statements": {
+      "total": 10106,
+      "covered": 8401,
+      "skipped": 0,
+      "pct": 83.12
+    },
+    "functions": {
+      "total": 1674,
+      "covered": 1516,
+      "skipped": 0,
+      "pct": 90.56
+    },
+    "branches": {
+      "total": 9953,
+      "covered": 7626,
+      "skipped": 0,
+      "pct": 76.62
+    },
+    "branchesTrue": {
+      "total": 0,
+      "covered": 0,
+      "skipped": 0,
+      "pct": 100
+    }
+  },
+  "secretScan": {
+    "at": "2026-10-04T07:16:44.092Z",
+    "files": 1039,
+    "bytes": 553558661,
+    "currentCredentialRefs": 4,
+    "credentialMatches": 0,
+    "privatePermissionViolations": 0,
+    "passed": true
+  }
+}

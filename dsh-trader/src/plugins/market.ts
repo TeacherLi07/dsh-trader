@@ -19,7 +19,6 @@ import type { CcxtExchangeLike } from '../market/ccxt-source.js'
 import { FeatureArchive } from '../market/feature-archive.js'
 import { MarketObservationStore } from '../market/observations.js'
 import {
-  FEATURE_WARMUP_BARS,
   FeaturePipeline,
   type FeatureDerivatives,
 } from '../market/features.js'
@@ -208,9 +207,7 @@ export function apply(ctx: Context, config: MarketConfig): void {
       }
       for (const symbol of config.symbols) {
         for (const timeframe of config.timeframes) {
-          const processed = bars.recentProcessedClosedBars(symbol, timeframe, FEATURE_WARMUP_BARS)
-          const snapshots = featureArchive.recent(symbol, timeframe, FEATURE_WARMUP_BARS)
-          pipeline.warmUp(processed, snapshots)
+          pipeline.restoreProcessed(bars, symbol, timeframe)
         }
       }
 

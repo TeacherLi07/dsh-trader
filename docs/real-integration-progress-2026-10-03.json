@@ -380,8 +380,8 @@
     "at": "2026-10-04T03:18:37.594962+00:00",
     "verification": {
       "command": "pnpm verify",
-      "files": 81,
-      "tests": 891,
+      "files": 82,
+      "tests": 900,
       "passed": true
     },
     "contextPrefixEvidence": "context-prefix-verification-2026-10-04.json",
@@ -393,6 +393,7 @@
     "cachedTokens": 97536,
     "actualInputTokens": 150112,
     "ttftImprovementProven": false,
-    "cacheBenefitScope": "historical complete-prefix reuse; latency/economic benefit not proven"
+    "cacheBenefitScope": "historical complete-prefix reuse; latency/economic benefit not proven",
+    "featureRecoveryEvidence": "feature-recovery-2026-10-04.json"
   }
 }

@@ -42,6 +42,7 @@ describe('schema (plan §4.1 invariants)', () => {
       'market_observations',
       'bars',
       'bar_processing',
+      'market_feature_recoveries',
       'features',
       'decision_contexts',
       'decision_runs',
@@ -90,7 +91,7 @@ describe('schema (plan §4.1 invariants)', () => {
     `)
 
     migrate(db)
-    expect(db.pragma('user_version', { simple: true })).toBe(10)
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION)
     const columns = db.prepare('PRAGMA table_info(pm_quotes)').all() as { name: string }[]
     expect(columns.map((column) => column.name)).toContain('available_at')
     expect(db.prepare('SELECT available_at FROM pm_quotes WHERE token_id = ?').get('legacy-token'))
