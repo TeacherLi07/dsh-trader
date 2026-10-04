@@ -1,0 +1,161 @@
+{
+  "date": "2026-10-04",
+  "promptVersion": "decision-r3-v6",
+  "verify": {
+    "passed": true,
+    "testFiles": 82,
+    "tests": 928,
+    "command": "pnpm verify"
+  },
+  "childCommit": "de5d9662ad27b91465fe744008e5e638a9f25c58",
+  "offlineNonemptyRegression": {
+    "invalidPath": "/sections/portfolio/value/openOrders/0",
+    "availableZeroLeaf": "/sections/portfolio/value/account/openOrders",
+    "criticAndFinalDiagnosticsDelivered": true,
+    "calls": 3,
+    "repairs": 0,
+    "finalStillInvalidRemainsDecisionOnly": true,
+    "newPlanOrIntentOrPosition": 0
+  },
+  "freshRuntime": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-runtime-draft-evidence-v6",
+    "passed": true,
+    "samples": [
+      {
+        "index": 0,
+        "source": "W1",
+        "symbol": "ADA/USDT:USDT",
+        "runId": "run-f9ba660b81d69fb46b4693aa39baa9d149cb9d5e0b592d76e6b10aa052e227c6",
+        "status": "completed",
+        "replayed": false,
+        "outcome": "no_trade",
+        "eligibility": {
+          "state": "decision_only",
+          "reasons": [],
+          "validatedEvidencePaths": []
+        },
+        "reason": null
+      }
+    ],
+    "providerRequests": 3,
+    "wsReservationMatches": {
+      "observed": 3,
+      "matched": 3
+    },
+    "realBars": 1431,
+    "series": 9,
+    "draftEvidenceIssues": [],
+    "finalEvidenceIssues": [],
+    "finalClaimCount": 4,
+    "criticIssueCount": 2,
+    "diagnosticMaterialsPresentInBothStages": true,
+    "unchangedCommonPrefix": true,
+    "calls": [
+      {
+        "stage": "strategist",
+        "tokens": {
+          "tokensCached": 0,
+          "tokensIn": 49315,
+          "tokensOut": 2071
+        },
+        "durationMs": 41475,
+        "referenceUsd": 0.013881999999999999
+      },
+      {
+        "stage": "risk-critic",
+        "tokens": {
+          "tokensCached": 48768,
+          "tokensIn": 50102,
+          "tokensOut": 6557
+        },
+        "durationMs": 121104,
+        "referenceUsd": 0.0062266100000000005
+      },
+      {
+        "stage": "strategist",
+        "tokens": {
+          "tokensCached": 48768,
+          "tokensIn": 50614,
+          "tokensOut": 3175
+        },
+        "durationMs": 69952,
+        "referenceUsd": 0.0038181099999999996
+      }
+    ],
+    "cost": {
+      "day": "2026-10-04",
+      "scope": "global",
+      "tokens_in": 150031,
+      "tokens_out": 11803,
+      "tokens_cached": 97536,
+      "est_usd": 0.02392672,
+      "cost_known": 1
+    },
+    "cacheRatio": 0.650105644833401,
+    "repairCalls": 0,
+    "replayAdditionalRequests": 0,
+    "realExchangeOrdersSubmitted": 0,
+    "paperOrders": []
+  },
+  "nonemptyHistoricalReplay": {
+    "privateDirectory": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-nonempty-diagnostic-real-ds-draft-v6",
+    "passed": true,
+    "scope": "readonly historical replay of actual invalid DeepSeek draft through teacherli Luna/max; no economic sample",
+    "source": "/home/ubuntu/.dsh/trading/integration-2026-10-03/responses-final-3/paper.sqlite",
+    "sourceModel": "deepseek-responses/deepseek-flash",
+    "sourceRunId": "run-a7c05cc0666f3a9f4f960bfaec7d972311c4ebcef59662cf5f6c49dba284813f",
+    "sourceHash": "b9fa5f08801479f05bbf7e6770ce7f5b0db98c0fd33222d3fe4597c3d92fe42e",
+    "sourceUnmodified": true,
+    "sourceContextHash": "sha256:90a9d3c6bf7ef30688ba87649f7d7419222a749253f42ac6fd6461b89b86f665",
+    "originalEvidenceIssues": [
+      "claims[2] 引用缺失/过期/非叶子事实：/sections/mandate/value/missing/1"
+    ],
+    "nonemptyDiagnosticsReachedBothStages": true,
+    "providerRequests": 2,
+    "finalEvidenceIssues": [],
+    "finalClaimCount": 5,
+    "finalOutcome": "no_trade",
+    "repairCalls": 0,
+    "referenceEstimateUsd": 0.02714558,
+    "unknownReservationUsd": 0,
+    "rounds": [
+      {
+        "stage": "risk-critic",
+        "usage": {
+          "inputTokens": 53491,
+          "outputTokens": 7196,
+          "totalTokens": 62351,
+          "cacheReadTokens": 1664,
+          "reasoningTokens": 6331
+        }
+      },
+      {
+        "stage": "strategist",
+        "usage": {
+          "inputTokens": 4260,
+          "outputTokens": 8321,
+          "totalTokens": 64421,
+          "cacheReadTokens": 51840,
+          "reasoningTokens": 5884
+        }
+      }
+    ],
+    "newDeepSeekRequests": 0,
+    "executionCallbacks": 0,
+    "gatewayInvoiceVerified": false
+  },
+  "failedPrecondition": {
+    "privateReport": "/home/ubuntu/.dsh/trading/integration-2026-10-04/luna-nonempty-draft-diagnostic-v6/precondition-failure.json",
+    "reason": "selected first v5 draft had zero diagnostics; bad citation was introduced by final",
+    "requests": 0
+  },
+  "evidenceHashes": {
+    "freshReport": "d6051238d4acf28a5f9498fb18a6064f6f5c8fc4c31f3139411a2648c8c97b46",
+    "historicalReport": "9b2f9e07dbf877ead22d0fcb93611b24565522d0dd09c774555a9e588d4eaf52"
+  },
+  "limitations": [
+    "No causal before/after quality or TTFT claim",
+    "Historical source is not a new economic sample",
+    "Funding source, actual gateway invoices, independent economic test and R6 long-term observation remain incomplete"
+  ]
+}

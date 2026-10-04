@@ -1997,3 +1997,7 @@ Codex credits无单独cache-write费，API价目及网关账单分开报告。�
 ## 2026-10-04：外部账单核销与失败保留
 
 费用核销是停止profile后的审计操作：完整归因一致、单次请求身份对应、外部最终usage/USD账单由操作者审阅，文件hash不冒充来源认证。核销凭据不可修改，和费用聚合/审计同事务；本地已观察到生成时不接受矛盾的零费用未受理记录。原终态与失败保留，相同请求不重发；旧数据证据不足仍保持未决。非空fixture、SIGKILL与范围见 [核销验收](model-billing-reconciliation-2026-10-04.md)。
+
+## 2026-10-04：把代码证据诊断交给后续模型阶段
+
+已有draft evidenceIssues不应在只取candidate时丢失。现作为末尾材料给critic/final，保留公共前缀与冻结事实，继续由原资格闸检查最终引用。提示版本v6；新的真实链和一条真正非空的旧DeepSeek draft在teacherli的只读回放均通过，前置空样本失败也保留。原v5错误由final引入，不把这条样本当作诊断漏传的因果证据。见 [诊断反馈](draft-evidence-feedback-2026-10-04.md)。

@@ -544,3 +544,5 @@ HTX 最小一张 FIL 约 0.105 USD，处于真实权益 2% 损失包络内；已
 **2026-10-04 07:44 UTC V5复测**：指定代理下两个域名的V5余额与生产HtxBroker余额/持仓/merged挂单读取成功，权益24.904121200514755 USDT，持仓0/挂单0/交易动作0。当前鉴权阻塞解除，此前401根因仍未确认；本轮空仓不增加非空保护证据，详见 `docs/htx-auth-diagnostics-2026-10-04.md`。
 
 **2026-10-04 R5当前生产链**：teacherli/Luna/max真实1431 bar/9 series的单轮critique通过结构校验，3次actual socket ID与SQLite reservation匹配，cached97536/149840（65.09%）、参考上界0.02026172 USD，未知预留/repair/重放调用/订单0。final误引用空挂单元素被eligibility降decision_only；draft诊断漏传正单独修复，不修改原样本。见 `docs/responses-ws-identity-2026-10-04.md`，不代表经济验收或资金费已知。
+
+**2026-10-04 R5诊断反馈**：prompt v6把已算出的draft evidenceIssues作为末尾材料传给critic/final，不新增模型调用、不放宽事实闸。928测试通过；新行情完整链3次WS/缓存97536/150031，旧真实DS非空draft在teacherli只读回放2次，原DB不变。原v5坏引用由final引入，不声称诊断漏传导致这条错误。新链/回放final均无无效路径，范围与前置空样本拒绝见 `docs/draft-evidence-feedback-2026-10-04.md`；不是经济通过。

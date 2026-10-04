@@ -55,3 +55,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-04：实际WS身份与完整生产链
 
 [真实WS证据](responses-ws-identity-2026-10-04.md)：短探针2次、完整生产critique 3次，全部teacherli/Luna/max；后者header-ID与SQLite reservation 3/3匹配，cached97536/149840（65.09%），参考上界0.02026172 USD，repair/未知预留/重放新增调用/订单均0。final错误引用空挂单数组元素，被资格闸降decision_only；draft诊断漏传正在单独修复。pnpm verify 82文件/926测试。V5生产broker重建后仍读取成功；funding样本0和经济/长期验收缺口保留。
+
+## 2026-10-04：v6证据诊断反馈
+
+[诊断反馈验收](draft-evidence-feedback-2026-10-04.md)：928测试，新鲜真实Context三阶段3次WS、cached97536/150031；另将旧真实DeepSeek的非空错误draft交给teacherli critic/final，只读2次，原DB不变，final5条声明路径可用。新draft诊断为空，非空回放另验；第一次误选空诊断样本的守卫失败/API0保留。没有新增DS请求、repair或订单，参考上界分别0.02392672/0.02714558 USD，网关账单未核验；funding/经济/长期缺口保留。

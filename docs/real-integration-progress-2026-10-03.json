@@ -425,5 +425,16 @@
     "unresolvedUsage": 0,
     "realExchangeOrdersSubmitted": 0,
     "modelEvidenceIssuePreserved": true
+  },
+  "draftEvidenceFeedback20261004": {
+    "report": "docs/draft-evidence-feedback-2026-10-04.json",
+    "promptVersion": "decision-r3-v6",
+    "verifyTests": 928,
+    "freshProviderRequests": 3,
+    "nonemptyHistoricalProviderRequests": 2,
+    "sourceUnmodified": true,
+    "unknownUsageReservations": 0,
+    "realOrders": 0,
+    "newDeepSeekRequests": 0
   }
 }

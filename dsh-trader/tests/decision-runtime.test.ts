@@ -23,7 +23,7 @@ import { MarketObservationStore } from '../src/market/observations.js'
 import { normalizeCandles, timeframeMs } from '../src/market/normalize.js'
 import { PlanStore } from '../src/plan/store.js'
 import { decisionRunId, runDecisionRuntime } from '../src/agents/decision-runtime.js'
-import { DECISION_ENVELOPE_SCHEMA_VERSION } from '../src/agents/decision-envelope.js'
+import { DECISION_ENVELOPE_SCHEMA_VERSION, isDecisionEvidencePathAvailable } from '../src/agents/decision-envelope.js'
 import { buildDecisionContext } from '../src/agents/decision-context-builder.js'
 import { DecisionContextStore } from '../src/agents/decision-context-store.js'
 import { DecisionRunStore } from '../src/agents/decision-run-store.js'
@@ -59,8 +59,10 @@ class FakeDecisionModel implements DecisionModel {
 
 class SequencedDecisionModel implements DecisionModel {
   calls = 0
+  readonly requests: StructuredGenerateOptions[] = []
   constructor(private readonly outputs: readonly unknown[]) {}
   async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push(options)
     const output = this.outputs[this.calls]
     this.calls += 1
     const tool = options.tools?.find(tool => tool.name === options.toolChoice?.name) ?? options.tools?.[0]
@@ -1199,6 +1201,48 @@ describe('R3 decision runtime', () => {
       }
       expect(decision).toMatchObject({ action: 'open', executed: 1 })
       expect(decision.size_qty * 5).toBeCloseTo(1, 6) // equity 1000 × configured 0.2% × envelope riskFraction 0.5
+    } finally {
+      db.close()
+    }
+  })
+
+  it('keeps invalid final evidence decision-only after giving the critic and final the draft diagnostic', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const clock = new ReplayClock(AS_OF)
+    const paper = new PaperBroker({ clock, book: { price: () => 102 }, initialEquityQuote: 1_000, slippageBps: 0, feeBps: 0 })
+    const runtime = makeRuntime(db, paper, clock)
+    seedExecutableContext(db, runtime)
+    const invalidPath = '/sections/portfolio/value/openOrders/0'
+    const existingLeaf = '/sections/portfolio/value/account/openOrders'
+    const snapshot = await buildDecisionContext(runtime.ports, SYMBOL, '1h')
+    expect(isDecisionEvidencePathAvailable(snapshot, invalidPath)).toBe(false)
+    expect(isDecisionEvidencePathAvailable(snapshot, existingLeaf)).toBe(true)
+    const candidate = {
+      outcome: 'act', thesis: '账户快照显示没有普通挂单', rejectedAlternatives: [],
+      claims: [{ kind: 'observation', statement: '当前普通挂单数为 0', evidencePaths: [invalidPath] }],
+      uncertainties: [], confidence: 0.6, riskFraction: 0.5,
+      immediateAction: { action: 'open', side: 'long', method: 'market', stop: { method: 'structure', level: 95 } },
+    }
+    const model = new SequencedDecisionModel([candidate, { issues: [], uncertainties: [] }, candidate])
+    const diagnostic = `claims[0] 引用缺失/过期/非叶子事实：${invalidPath}`
+    try {
+      const result = await runDecisionRuntime({
+        ...runtime, model, config: { ...config, strategy: 'critique' },
+        trigger: { ...trigger, id: 'w1-draft-evidence-diagnostic' }, symbol: SYMBOL, timeframe: '1h',
+      })
+
+      expect(result).toMatchObject({ status: 'review', eligibility: { state: 'decision_only' }, envelope: { outcome: 'act' } })
+      expect(result.eligibility?.reasons).toContain(diagnostic)
+      expect(result.envelope?.claims[0]?.evidencePaths).toEqual([invalidPath])
+      expect(model.calls).toBe(3)
+      expect(model.requests).toHaveLength(3)
+      expect(JSON.stringify(model.requests[1]?.messages.at(-1)?.content)).toContain(diagnostic)
+      expect(JSON.stringify(model.requests[2]?.messages.at(-1)?.content)).toContain(diagnostic)
+      expect(runtime.plans.count(SYMBOL)).toBe(0)
+      expect(runtime.journal.intentIds()).toEqual([])
+      expect(await paper.getPositions()).toEqual([])
     } finally {
       db.close()
     }

@@ -82,7 +82,7 @@ interface ToolSchema {
   readonly parameters: Record<string, unknown>
 }
 
-export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v5' as const
+export const DECISION_WORKFLOW_PROMPT_VERSION = 'decision-r3-v6' as const
 const ENVELOPE_NAME = DECISION_ENVELOPE_TOOL.name
 
 const CRITIQUE_TOOL: ToolSchema = {
@@ -121,10 +121,12 @@ const STAGE_INSTRUCTIONS = {
     '你是独立 RiskCritic，只指出可由冻结事实核验的缺口、反例、组合风险与执行风险。',
     '不得改写 draft、决定仓位或授权交易；只用 submit_risk_critique 返回带稳定 critiqueId 的问题。',
     'evidencePaths 使用 DecisionContext 的 JSON Pointer（例如 /sections/portfolio/value/account/equityQuote）。',
+    '若阶段材料包含 draftEvidenceIssues，这是代码依据同一冻结 context 对 draft 引用作出的核验诊断；请检查对应声明能否由当前事实支持，不要把诊断本身当成市场事实或推断方向。',
   ].join('\n'),
   final: [
     '你是 critique 候选的最终 Strategist。结合冻结事实、draft 与 RiskCritic 问题，提交唯一最终 DecisionEnvelope。',
     'critiqueResponses 必须对每个 critiqueId 恰好回应一次，accept/reject 均须说明理由；批评意见本身不授权或否决动作。',
+    '若阶段材料包含 draftEvidenceIssues，这是代码基于同一冻结 context 对 draft 引用作出的核验诊断。逐条复核当前冻结事实：若确有真实叶子，最终 claims 改用该路径；若当前事实不支持，则删除该 claim，或改为 assumption、移除无效 evidencePaths 并在 uncertainties 保留必要不确定性。不得编造路径、把诊断当作事实或改写已保存的 draft 工件；这些诊断不规定最终 outcome。',
     'runId/contextHash/symbol/timeframe 身份由代码绑定，不要在结果里输出这些字段。',
   ].join('\n'),
 } as const
@@ -499,6 +501,7 @@ export async function runDecisionWorkflowStages(input: {
     }
     if (draftArtifact === undefined) throw new Error('critique draft stage 未产出')
     const draft = draftArtifact.value
+    const draftEvidenceIssues = [...draftArtifact.evidenceIssues]
     draftResult = draft
 
     let critiqueArtifact = storedCritique(input.resume?.critique)
@@ -506,7 +509,7 @@ export async function runDecisionWorkflowStages(input: {
       const generated = await callAndValidate({
         modelStage: 'risk-critic', tool: CRITIQUE_TOOL,
         instructions: STAGE_INSTRUCTIONS.critic,
-        materials: [{ draft }],
+        materials: [{ draft }, { draftEvidenceIssues }],
         validate: (raw) => {
           const parsed = parseCritique(raw, input.context)
           return parsed.ok
@@ -525,7 +528,7 @@ export async function runDecisionWorkflowStages(input: {
       const generated = await callAndValidate({
         modelStage: 'strategist', tool: DECISION_ENVELOPE_TOOL,
         instructions: STAGE_INSTRUCTIONS.final,
-        materials: [{ draft }, { critique }],
+        materials: [{ draft }, { draftEvidenceIssues }, { critique }],
         validate: (raw) => {
           const parsed = parseDecisionEnvelopeCandidate(raw, input.context)
           if (!parsed.ok) return { ok: false, errors: parsed.errors }

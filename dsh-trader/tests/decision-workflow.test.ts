@@ -2,11 +2,17 @@ import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { StructuredGenerateOptions } from '../src/llm-options.js'
 import { freezeDecisionContext, serializeDecisionContextForPrompt } from '../src/agents/decision-context.js'
-import type { DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.js'
+import { isDecisionEvidencePathAvailable, type DecisionEnvelopeCandidate } from '../src/agents/decision-envelope.js'
 import { canonicalJson, fingerprint } from '../src/util/canonical.js'
 import { renderDecisionRequest } from '../src/agents/decision-request.js'
 import { compileExpression } from '../src/plan/dsl.js'
-import { runDecisionWorkflowStages, toLedgerUsage, type DecisionModel, type DecisionWorkflowResume } from '../src/agents/decision-workflow.js'
+import {
+  DECISION_WORKFLOW_PROMPT_VERSION,
+  runDecisionWorkflowStages,
+  toLedgerUsage,
+  type DecisionModel,
+  type DecisionWorkflowResume,
+} from '../src/agents/decision-workflow.js'
 
 const AS_OF = 1_700_000_000_000
 const SYMBOL = 'BTC/USDT:USDT'
@@ -26,6 +32,19 @@ function context() {
       history: { asOf: AS_OF, source: 'fixture', missing: [], value: [] },
       lessons: { asOf: null, source: 'fixture', missing: [], value: null },
       predictions: { asOf: null, source: 'fixture', missing: ['disabled'], value: null },
+    },
+  })
+}
+
+function contextWithEmptyOpenOrders() {
+  const base = context()
+  return freezeDecisionContext({
+    symbol: base.symbol,
+    primaryTimeframe: base.primaryTimeframe,
+    asOf: base.asOf,
+    sections: {
+      ...base.sections,
+      portfolio: { asOf: AS_OF, source: 'fixture', missing: [], value: { account: { openOrders: 0 }, openOrders: [] } },
     },
   })
 }
@@ -103,6 +122,65 @@ describe('R3 Decision workflow', () => {
     expect(result.calls.map((call) => call.stage)).toEqual(['strategist', 'risk-critic', 'strategist'])
     expect(result.critique?.issues[0]?.critiqueId).toBe('crit-stop')
     expect(result.final?.critiqueResponses).toMatchObject([{ critiqueId: 'crit-stop', disposition: 'accept' }])
+  })
+
+  it('passes nonempty draft evidence diagnostics to critic/final as stage materials and keeps the same safety check', async () => {
+    expect(DECISION_WORKFLOW_PROMPT_VERSION).toBe('decision-r3-v6')
+    const frozen = contextWithEmptyOpenOrders()
+    const invalidPath = '/sections/portfolio/value/openOrders/0'
+    const validLeaf = '/sections/portfolio/value/account/openOrders'
+    expect(isDecisionEvidencePathAvailable(frozen, invalidPath)).toBe(false)
+    expect(isDecisionEvidencePathAvailable(frozen, validLeaf)).toBe(true)
+    const badClaim = { kind: 'observation', statement: '当前没有普通挂单', evidencePaths: [invalidPath] }
+    const draft = envelope({ claims: [badClaim] })
+    const critic = { issues: [], uncertainties: [] }
+    const final = envelope({ claims: [badClaim], critiqueResponses: [] })
+    const model = new FakeDecisionModel([draft, critic, final])
+    const result = await runDecisionWorkflowStages({ strategy: 'critique', context: frozen, model, route })
+    const diagnostic = `claims[0] 引用缺失/过期/非叶子事实：${invalidPath}`
+
+    expect(result.failure).toBeUndefined()
+    expect(result.repairCalls).toBe(0)
+    expect(result.calls).toHaveLength(3)
+    expect(model.requests).toHaveLength(3)
+    expect(result.draft?.claims[0]?.evidencePaths).toEqual([invalidPath])
+    expect(result.final?.claims[0]?.evidencePaths).toEqual([invalidPath])
+    expect(result.evidenceIssues).toContain(diagnostic)
+    expect(model.requests.map(request => request.toolChoice?.name)).toEqual([
+      'submit_decision_envelope', 'submit_risk_critique', 'submit_decision_envelope',
+    ])
+
+    const first = model.requests[0]!
+    const publicPrefix = (request: StructuredGenerateOptions) => request.messages.slice(0, 2).map((message) => ({
+      role: message.role,
+      content: message.content,
+      source: message.source,
+    }))
+    for (const [index, request] of model.requests.entries()) {
+      expect(request.tools).toEqual(first.tools)
+      expect(publicPrefix(request)).toEqual(publicPrefix(first))
+      expect(request.messages[2]?.role).toBe('system')
+      const stageTail = JSON.stringify(request.messages[2]?.content)
+      if (index === 0) {
+        expect(stageTail).not.toContain('draftEvidenceIssues')
+        continue
+      }
+      expect(stageTail).toContain('draftEvidenceIssues')
+      expect(stageTail).toContain(diagnostic)
+      expect(JSON.stringify(request.messages[1]?.content)).not.toContain(diagnostic)
+
+      const call = result.calls[index]!
+      const payload = {
+        promptVersion: call.promptVersion,
+        messages: call.request['messages'],
+        outputSchema: call.request['tools'],
+        toolChoice: request.toolChoice,
+      }
+      const serialized = canonicalJson(payload)
+      expect(call.requestChars).toBe(serialized.length)
+      expect(call.estimatedInputTokens).toBe(Buffer.byteLength(serialized, 'utf8') + 4_096)
+      expect(call.requestHash).toBe(fingerprint({ contextHash: frozen.contextHash, requestPayload: payload }))
+    }
   })
 
   it('一次 critique 的各阶段和 repair 共享会话，完整冻结 context 与独立角色材料仍逐次发送', async () => {
