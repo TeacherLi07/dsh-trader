@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-04",
+  "task": "R5 model request correlation and atomic accounting",
+  "providerChildCommit": "90b1efde5d16543d2dfaa1ffa33ba39c7e6f7b8f",
+  "checks": {
+    "pnpmVerify": {
+      "passed": true,
+      "testFiles": 82,
+      "tests": 910
+    },
+    "newRootRegressions": {
+      "cases": 5,
+      "sameCohortDistinctRequestIds": true,
+      "completeOutputMissingUsageHeldAcrossRestart": true,
+      "runUpdateFailureRollsBackLedger": true,
+      "auditInsertFailureRollsBackLedgerAndRun": true,
+      "providerResponseIdPreserved": true
+    },
+    "newProviderRegressions": {
+      "cases": 5,
+      "realDshStreamLoopback": true,
+      "paidNetworkRequests": 0
+    }
+  },
+  "liveRequestsForThisChange": 0,
+  "unknownHistoricalReservationsCleared": 0,
+  "limitations": [
+    "External provider usage/billing reconciliation entry remains pending",
+    "Successful response IDs are not added as nonstandard stream chunks",
+    "Provider billing invoice has not been verified"
+  ]
+}

@@ -34,6 +34,7 @@ const SYMBOL = 'BTC/USDT:USDT'
 class FakeDecisionModel implements DecisionModel {
   calls = 0
   readonly sessionIds: Array<string | undefined> = []
+  readonly clientRequestIds: Array<string | undefined> = []
   constructor(
     private readonly output: unknown,
     private readonly onStream?: () => void,
@@ -42,6 +43,7 @@ class FakeDecisionModel implements DecisionModel {
   async *stream(options: StructuredGenerateOptions): AsyncIterable<StreamChunk> {
     this.calls += 1
     this.sessionIds.push(options.sessionId)
+    this.clientRequestIds.push(options.clientRequestId)
     this.onStream?.()
     if (this.includeUsage) yield { type: 'usage', usage: { inputTokens: 300, outputTokens: 80, totalTokens: 380 } } as StreamChunk
     yield {
@@ -200,6 +202,103 @@ const config = {
 }
 
 describe('R3 decision runtime', () => {
+  it('binds each transport request to its persisted attempt while sharing the cache cohort', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const runtime = makeRuntime(db)
+    const model = new FakeDecisionModel(noTrade)
+    try {
+      for (const id of ['correlation-first', 'correlation-second']) {
+        expect((await runDecisionRuntime({ ...runtime, model, config, trigger: { ...trigger, id }, symbol: SYMBOL, timeframe: '1h' })).status).toBe('completed')
+      }
+      expect(model.calls).toBe(2)
+      expect(new Set(model.sessionIds).size).toBe(1)
+      expect(new Set(model.clientRequestIds).size).toBe(2)
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_accounted' ORDER BY seq").all() as { payload_json: string }[]
+      expect(rows).toHaveLength(2)
+      for (const [i, row] of rows.entries()) {
+        const payload = JSON.parse(row.payload_json)
+        expect(payload).toMatchObject({
+          callAttemptId: model.clientRequestIds[i], clientRequestId: model.clientRequestIds[i],
+          provider: config.route.provider, model: config.route.model, accountingVersion: 1,
+          ledgerDay: '2026-09-20', request: { clientRequestId: model.clientRequestIds[i] },
+        })
+        expect(payload.ledgerEntries).toHaveLength(2)
+      }
+    } finally { db.close() }
+  })
+
+  it('keeps a complete tool output without usage unresolved, stops critique and denies calls after restart', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-missing-usage-'))
+    const path = join(directory, 'state.sqlite')
+    let db = new Database(path)
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const model = new FakeDecisionModel(noTrade, undefined, false)
+    const bounded = { ...config, strategy: 'critique' as const, dailyTokenCap: 1_000_000 }
+    try {
+      const first = await runDecisionRuntime({ ...makeRuntime(db), model, config: bounded, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(first.status).toBe('review')
+      expect(first.reason).toContain('模型未返回可核验 usage')
+      expect(model.calls).toBe(1)
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_unresolved'").all() as { payload_json: string }[]
+      expect(rows).toHaveLength(1)
+      expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({ settled: false, costKnown: false, response: { structuredOutput: noTrade } })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind IN ('model_call_accounted','model_stage_persisted')").get()).toEqual({ n: 0 })
+      db.close()
+      db = new Database(path)
+      const replay = await runDecisionRuntime({ ...makeRuntime(db), model, config: bounded, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(replay).toMatchObject({ replayed: true, status: 'review', reason: first.reason })
+      const later = await runDecisionRuntime({ ...makeRuntime(db), model, config: bounded, trigger: { ...trigger, id: 'later' }, symbol: SYMBOL, timeframe: '1h' })
+      expect(later.reason).toContain('未知成本跨重启')
+      expect(model.calls).toBe(1)
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reserved'").get()).toEqual({ n: 1 })
+    } finally { db.close(); rmSync(directory, { recursive: true, force: true }) }
+  })
+
+  it.each(['run-update', 'audit-insert'])('rolls back all accounting on %s failure and retains the reservation', async (failurePoint) => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    if (failurePoint === 'run-update') db.exec(`CREATE TRIGGER injected_failure BEFORE UPDATE ON decision_runs
+      WHEN NEW.tokens_in IS NOT NULL BEGIN SELECT RAISE(ABORT, 'injected run accounting failure'); END`)
+    else db.exec(`CREATE TRIGGER injected_failure BEFORE INSERT ON audit_events
+      WHEN NEW.kind = 'model_call_accounted' BEGIN SELECT RAISE(ABORT, 'injected audit accounting failure'); END`)
+    const model = new FakeDecisionModel(noTrade)
+    try {
+      const runtime = makeRuntime(db)
+      const first = await runDecisionRuntime({ ...runtime, model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(first.status).toBe('review')
+      expect(first.reason).toContain('injected')
+      expect(model.calls).toBe(1)
+      expect(db.prepare('SELECT COUNT(*) AS n FROM budget_ledger').get()).toEqual({ n: 0 })
+      expect(new DecisionRunStore(db).get(first.runId)).toMatchObject({ tokensIn: null, tokensOut: null, costUsd: null })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_reserved'").get()).toEqual({ n: 1 })
+      expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind IN ('model_call_accounted','model_stage_persisted')").get()).toEqual({ n: 0 })
+      db.exec('DROP TRIGGER injected_failure')
+      const later = await runDecisionRuntime({ ...runtime, model, config, trigger: { ...trigger, id: `after-${failurePoint}` }, symbol: SYMBOL, timeframe: '1h' })
+      expect(later.reason).toContain('未知成本跨重启')
+      expect(model.calls).toBe(1)
+    } finally { db.close() }
+  })
+
+  it('retains a provider response ID on an unresolved attempt', async () => {
+    const db = new Database(':memory:')
+    migrate(db)
+    new PriceTableStore(db).seed(DEEPSEEK_PRICE_SEED)
+    const model: DecisionModel = { async *stream() {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'OUTCOME_UNKNOWN', message: 'disconnect after response.created', requestId: 'resp_test_123' } } } as unknown as StreamChunk
+    } }
+    try {
+      const result = await runDecisionRuntime({ ...makeRuntime(db), model, config, trigger, symbol: SYMBOL, timeframe: '1h' })
+      expect(result.status).toBe('review')
+      const rows = db.prepare("SELECT payload_json FROM audit_events WHERE kind = 'model_call_unresolved'").all() as { payload_json: string }[]
+      expect(rows).toHaveLength(1)
+      expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({ providerResponseId: 'resp_test_123', accountingVersion: 1 })
+    } finally { db.close() }
+  })
+
   it('binds prompt/schema versions, route and output budgets while keeping retries on the same identity', () => {
     const identity = {
       trigger,
@@ -800,7 +899,9 @@ describe('R3 decision runtime', () => {
           symbol: SYMBOL, timeframe: '1h',
         })
         expect(result).toMatchObject({ status: 'review', eligibility: { state: 'decision_only' } })
-        expect(result.eligibility?.reasons).toContain('model call cost or usage is unknown')
+        expect(result.reason).toContain('模型未返回可核验 usage')
+        expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_call_unresolved'").get()).toEqual({ n: 1 })
+        expect(db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE kind = 'model_stage_persisted'").get()).toEqual({ n: 0 })
         expect(new DecisionRunStore(db).get(result.runId)).toMatchObject({ status: 'review', costKnown: false })
         expect(runtime.plans.count(SYMBOL)).toBe(0)
         expect(runtime.journal.intentIds()).toEqual([])

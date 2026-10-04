@@ -270,6 +270,46 @@ afterEach(async () => {
 })
 
 describe('Sub2API Responses WebSocket provider', () => {
+  it('经 DSH stream 把单次 clientRequestId 发到请求头，同时保持 cohort/cache 身份固定', async () => {
+    const gateway = await startGateway((socket) => sendResponseCompleted(socket))
+    const context = new Context()
+    const llmFiber = await context.plugin(LlmRuntime)
+    const registration = context.llm.registerAdapter(
+      [SUB2API_RESPONSES_WS_PROVIDER],
+      adapter(gateway.baseURL),
+    )
+    const cohortId = 'decision-r5-cohort-v1' as NonNullable<GenerateOptions['sessionId']>
+    const clientRequestIds = ['attempt-001', 'attempt-002'] as const
+    try {
+      const base = requestOptions({ sessionId: cohortId })
+      // DSH 在 adapter 边界补齐默认值时会复制选项；扩展关联 ID 必须跟着保留。
+      delete base.maxTokens
+      delete base.reasoningEffort
+      for (const clientRequestId of clientRequestIds) {
+        const options: StructuredGenerateOptions = { ...base, clientRequestId }
+        const chunks: StreamChunk[] = []
+        for await (const chunk of context.llm.stream(options)) chunks.push(chunk)
+        expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+      }
+
+      expect(gateway.requests).toHaveLength(2)
+      expect(gateway.handshakes()).toBe(2)
+      expect(gateway.httpFallbacks).toEqual([])
+      expect(gateway.upgradeHeaders.map((headers) => headers.requestId)).toEqual([...clientRequestIds])
+      for (const headers of gateway.upgradeHeaders) {
+        expect(headers.sessionId).toBe(cohortId)
+        expect(headers.threadId).toBe(cohortId)
+      }
+      const bodies = gateway.requests as Array<{ prompt_cache_key: string; client_metadata: { session_id: string; thread_id: string }; input: unknown[]; tools: unknown[] }>
+      expect(bodies.every((body) => body.prompt_cache_key === cohortId)).toBe(true)
+      expect(bodies.every((body) => body.client_metadata.session_id === cohortId && body.client_metadata.thread_id === cohortId)).toBe(true)
+      expect(bodies.every((body) => body.input.length > 0 && body.tools.length > 0)).toBe(true)
+    } finally {
+      registration()
+      await llmFiber.dispose()
+    }
+  })
+
   it('通过 DSH ctx.llm.stream 保留具名选择并在两个 strict 工具中强制第二个', async () => {
     const gateway = await startGateway((socket) => sendResponseCompleted(socket, '{"verdict":"clear"}', 'submit_risk_review'))
     const context = new Context()
@@ -462,7 +502,8 @@ describe('Sub2API Responses WebSocket provider', () => {
     const session = gateway.upgradeHeaders[0]?.sessionId
     expect(session).toBeTruthy()
     expect(gateway.upgradeHeaders[0]?.threadId).toBe(session)
-    expect(gateway.upgradeHeaders[0]?.requestId).toBe(session)
+    expect(gateway.upgradeHeaders[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(gateway.upgradeHeaders[0]?.requestId).not.toBe(session)
     expect(gateway.requests[0]).toMatchObject({ prompt_cache_key: session, client_metadata: { session_id: session, thread_id: session } })
     expect(gateway.httpFallbacks).toEqual([])
     expect(gateway.requests).toHaveLength(1)
@@ -685,6 +726,35 @@ describe('Sub2API Responses WebSocket provider', () => {
     const finish = chunks.at(-1)
     if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected unresolved provider error finish')
     expect(finish.reason.failure.message).toMatch(/outcome and cost are unresolved/)
+  })
+
+  it('在 response.created 后断线时把 provider response.id 放进未知终态 failure.requestId', async () => {
+    const providerId = 'resp_correlation_01'
+    const gateway = await startGateway((socket) => {
+      socket.send(JSON.stringify({
+        type: 'response.created', sequence_number: 0,
+        response: { id: providerId, object: 'response', status: 'in_progress', model: WIRE_MODEL_ID, output: [] },
+      }))
+      socket.close(1011, 'upstream interrupted after response creation')
+    })
+    const context = new Context()
+    const llmFiber = await context.plugin(LlmRuntime)
+    const registration = context.llm.registerAdapter([SUB2API_RESPONSES_WS_PROVIDER], adapter(gateway.baseURL))
+    try {
+      const chunks: StreamChunk[] = []
+      for await (const chunk of context.llm.stream(requestOptions())) chunks.push(chunk)
+
+      expect(gateway.requests).toHaveLength(1)
+      expect(gateway.handshakes()).toBe(1)
+      expect(gateway.httpFallbacks).toEqual([])
+      const finish = chunks.at(-1)
+      if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected unresolved provider error finish')
+      expect(finish.reason.failure).toMatchObject({ code: 'OUTCOME_UNKNOWN', requestId: providerId })
+      expect(finish.reason.failure.message).toContain('outcome and cost are unresolved')
+    } finally {
+      registration()
+      await llmFiber.dispose()
+    }
   })
 
   it('保留真实限流关闭码和原因并脱敏，已发送的 1013 请求仍保持未知且不重发', async () => {

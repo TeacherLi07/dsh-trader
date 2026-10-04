@@ -71,6 +71,11 @@ export interface DecisionWorkflowResume {
 
 export type DecisionWorkflowStageName = 'draft' | 'critique' | 'final'
 
+/** 请求身份来自已落盘的 reservation，不能让传输层另外生成而失去账单关联。 */
+export interface DecisionCallIdentity {
+  readonly clientRequestId: string
+}
+
 interface ToolSchema {
   readonly name: string
   readonly description: string
@@ -187,7 +192,7 @@ async function callStructuredTool(input: {
   readonly instructions: string
   readonly materials?: readonly unknown[]
   readonly signal?: AbortSignal
-  readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
+  readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<DecisionCallIdentity | void>
   readonly onFailure?: (call: DecisionModelCall) => Promise<void>
 }): Promise<DecisionModelCall> {
   const promptVersion = `${DECISION_WORKFLOW_PROMPT_VERSION}:${input.stage}:${input.tool.name}`
@@ -201,6 +206,7 @@ async function callStructuredTool(input: {
     ...(input.materials === undefined ? {} : { materials: input.materials }),
     outputSchema: DECISION_WORKFLOW_TOOLS,
   })
+  const identity = await input.beforeCall?.(request, input.stage)
   const options: StructuredGenerateOptions = {
     provider: input.route.provider,
     model: input.route.model,
@@ -211,6 +217,7 @@ async function callStructuredTool(input: {
     temperature: 0,
     ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId as NonNullable<GenerateOptions['sessionId']> }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
+    ...(identity === undefined ? {} : { clientRequestId: identity.clientRequestId }),
   }
   const providerRequestTrace: Readonly<Record<string, unknown>> = {
     provider: options.provider,
@@ -218,6 +225,7 @@ async function callStructuredTool(input: {
     maxTokens: options.maxTokens,
     temperature: options.temperature,
     ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+    ...(options.clientRequestId === undefined ? {} : { clientRequestId: options.clientRequestId }),
     promptVersion,
     requestHash: request.requestHash,
     requestChars: request.requestChars,
@@ -227,7 +235,6 @@ async function callStructuredTool(input: {
     toolChoice: options.toolChoice,
     outputSchema: DECISION_WORKFLOW_TOOLS,
   }
-  await input.beforeCall?.(request, input.stage)
   let output: unknown
   let usage: TokenUsage | null = null
   let toolCallCount = 0
@@ -375,7 +382,7 @@ export async function runDecisionWorkflowStages(input: {
   readonly route: DecisionModelRoute
   readonly signal?: AbortSignal
   readonly resume?: DecisionWorkflowResume
-  readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<void>
+  readonly beforeCall?: (request: RenderedDecisionRequest, stage: DecisionModelCall['stage']) => Promise<DecisionCallIdentity | void>
   readonly onModelFailure?: (call: DecisionModelCall) => Promise<void>
   readonly onModelCall?: (call: DecisionModelCall) => Promise<void>
   readonly onStage?: (stage: DecisionWorkflowStageName, artifact: unknown, requestHash: string) => Promise<void>

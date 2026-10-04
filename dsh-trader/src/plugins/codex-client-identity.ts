@@ -6,11 +6,16 @@ import { arch, release, type } from 'node:os'
 export const DEFAULT_CODEX_VERSION = '0.160.0'
 export const CODEX_ORIGINATOR = 'codex_cli_rs'
 
-export function codexClientIdentity(sessionId: string = randomUUID(), version: string = DEFAULT_CODEX_VERSION) {
+export function codexClientIdentity(
+  sessionId: string = randomUUID(),
+  version: string = DEFAULT_CODEX_VERSION,
+  clientRequestId: string = randomUUID(),
+) {
   if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(version) || version.length > 64) {
     throw new Error('Codex client version must be a valid bounded release identifier')
   }
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(sessionId)) throw new Error('Codex session identity must be a bounded header-safe identifier')
+  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(clientRequestId)) throw new Error('Codex request identity must be a bounded header-safe identifier')
   const architecture = arch() === 'x64' ? 'x86_64' : arch() === 'arm64' ? 'aarch64' : arch()
   // UA 首段必须与 originator 配套；Sub2API 的 PairCodexClientIdentity 会检查这组关系。
   const userAgent = `${CODEX_ORIGINATOR}/${version} (${type()} ${release()}; ${architecture})`
@@ -18,8 +23,9 @@ export function codexClientIdentity(sessionId: string = randomUUID(), version: s
     sessionId,
     headers: {
       'User-Agent': userAgent, originator: CODEX_ORIGINATOR, version,
-      'session-id': sessionId, 'thread-id': sessionId, 'x-client-request-id': sessionId,
+      'session-id': sessionId, 'thread-id': sessionId, 'x-client-request-id': clientRequestId,
     },
     body: { prompt_cache_key: sessionId, client_metadata: { session_id: sessionId, thread_id: sessionId } },
+    clientRequestId,
   }
 }

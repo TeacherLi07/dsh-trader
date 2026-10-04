@@ -8,6 +8,7 @@ import {
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
+  ProviderRequestId,
   ToolCallId,
   assertUsableApiKey,
   resolveRetryPolicy,
@@ -366,6 +367,7 @@ function chunksFromPiEvent(
   input: {
     readonly authoritativeUsage?: TokenUsage
     readonly failureCode: string
+    readonly providerRequestId?: ProviderRequestId
     readonly strictToolSchemas?: ReadonlyMap<string, JsonSchemaObject>
   },
 ): readonly StreamChunk[] {
@@ -420,19 +422,46 @@ function chunksFromPiEvent(
       ]
     case 'error':
       if (input.failureCode === 'OUTCOME_UNKNOWN') {
-        return [{ type: 'finish', reason: { kind: 'error', failure: { code: input.failureCode, message: event.error.errorMessage ?? 'Sub2API WebSocket outcome unresolved' } } }]
+        return [{ type: 'finish', reason: { kind: 'error', failure: {
+          code: input.failureCode,
+          message: event.error.errorMessage ?? 'Sub2API WebSocket outcome unresolved',
+          ...(input.providerRequestId === undefined ? {} : { requestId: input.providerRequestId }),
+        } } }]
       }
       return [{
         type: 'finish',
         reason: event.reason === 'aborted'
-          ? { kind: 'aborted', failure: { code: 'ABORTED', message: 'Sub2API WebSocket request aborted' } }
-          : { kind: 'error', failure: { code: input.failureCode, message: event.error.errorMessage ?? 'Sub2API WebSocket request failed' } },
+          ? { kind: 'aborted', failure: {
+            code: 'ABORTED', message: 'Sub2API WebSocket request aborted',
+            ...(input.providerRequestId === undefined ? {} : { requestId: input.providerRequestId }),
+          } }
+          : { kind: 'error', failure: {
+            code: input.failureCode,
+            message: event.error.errorMessage ?? 'Sub2API WebSocket request failed',
+            ...(input.providerRequestId === undefined ? {} : { requestId: input.providerRequestId }),
+          } },
       }]
   }
 }
 
 function responseIsTerminal(event: ResponseStreamEvent): boolean {
   return event.type === 'response.completed' || event.type === 'response.incomplete' || event.type === 'response.failed'
+}
+
+function responseRequestId(event: ResponseStreamEvent): ProviderRequestId | undefined {
+  let id: string
+  switch (event.type) {
+    case 'response.created':
+    case 'response.completed':
+    case 'response.incomplete':
+    case 'response.failed':
+      id = event.response.id
+      break
+    default:
+      return undefined
+  }
+  if (typeof id !== 'string' || id.length === 0 || id.length > 256 || /[\u0000-\u001f\u007f]/.test(id)) return undefined
+  return ProviderRequestId(id)
 }
 
 function validateToolChoice(options: GenerateOptions): StructuredGenerateOptions['toolChoice'] {
@@ -598,7 +627,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     const configuredModel = this.#models.get(options.model)
     if (configuredModel === undefined) throw new LlmError(`Sub2API WebSocket model is not configured: ${options.model}`, 'UNKNOWN_MODEL')
 
-    const identity = codexClientIdentity(options.sessionId?.toString(), this.#codexVersion)
+    const identity = codexClientIdentity(options.sessionId?.toString(), this.#codexVersion, options.clientRequestId)
     const model = piModel(configuredModel, this.#baseURL)
     const request = makeResponseCreateEvent(options, toolChoice, configuredModel, model, identity, this.#strictTools)
     const strictToolSchemas = this.#strictTools && options.tools !== undefined
@@ -630,6 +659,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
     const assistantEvents = new AssistantMessageEventStream()
     let requestSent = false
     let terminalEvent: ResponseStreamEvent['type'] | undefined
+    let providerRequestId: ProviderRequestId | undefined
     let authoritativeUsage: TokenUsage | undefined
     let failureCode = 'PROVIDER_ERROR'
     let abortListener: (() => void) | undefined
@@ -640,6 +670,8 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
         if (next.done) break
         const raw = next.value
         if (raw.type === 'message' && raw.message !== undefined) {
+          const observedRequestId = responseRequestId(raw.message)
+          if (providerRequestId === undefined && observedRequestId !== undefined) providerRequestId = observedRequestId
           if (responseIsTerminal(raw.message)) {
             terminalEvent = raw.message.type
             if (raw.message.type === 'response.completed' || raw.message.type === 'response.incomplete') {
@@ -702,7 +734,7 @@ export class Sub2ApiResponsesWebSocketAdapter extends LlmAdapter {
         })
 
       for await (const event of assistantEvents) {
-        for (const chunk of chunksFromPiEvent(event, { authoritativeUsage, failureCode, strictToolSchemas })) yield chunk
+        for (const chunk of chunksFromPiEvent(event, { authoritativeUsage, failureCode, providerRequestId, strictToolSchemas })) yield chunk
       }
       await processing
     } finally {

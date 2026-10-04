@@ -6,4 +6,6 @@ import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
  */
 export interface StructuredGenerateOptions extends GenerateOptions {
   readonly toolChoice?: { readonly type: 'function'; readonly name: string }
+  /** 单次模型尝试 ID；provider 将其用于请求关联 header，而不改变 cohort/cache 身份。 */
+  readonly clientRequestId?: string
 }

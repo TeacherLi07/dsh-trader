@@ -28,6 +28,7 @@ import {
   runDecisionWorkflowStages,
   toLedgerUsage,
   type DecisionModel,
+  type DecisionCallIdentity,
   type DecisionModelCall,
   type DecisionModelRoute,
   type DecisionStrategy,
@@ -315,60 +316,78 @@ export async function runDecisionRuntime(input: {
     const reserve = reservations.get(call.requestHash)
     if (reserve === undefined) throw new Error(`模型调用缺少已持久化 reservation：${call.requestHash}`)
     const startedAt = callStartedAt.get(call.requestHash)
-    callStartedAt.delete(call.requestHash)
-    const callDurationMs = startedAt === undefined ? null : Math.max(0, ports.clock.now() - startedAt)
+    const accountedAt = ports.clock.now()
+    const callDurationMs = startedAt === undefined ? null : Math.max(0, accountedAt - startedAt)
     const usage = call.failure === undefined ? toLedgerUsage(call.usage) : null
-    const ledgerResult = ledger.record({
-      at: ports.clock.now(),
-      scopes: [GLOBAL_SCOPE, symbolScope(symbol)],
-      model: config.route.model,
-      usage,
-      estimatedTokens: reserve.tokens,
-      reservedUsd: reserve.usd,
-    }, prices.isStale(ports.clock.now()) ? [] : prices.all())
-    const actualTokens = usage ?? { tokensIn: reserve.tokens, tokensOut: 0, tokensCached: 0 }
-    cumulativeCostKnown = cumulativeCostKnown && ledgerResult.costKnown
-    const current = runStore.get(runId)
-    if (current?.status === 'running') {
-      runStore.update(runId, {
-        tokensIn: (current.tokensIn ?? 0) + actualTokens.tokensIn,
-        tokensOut: (current.tokensOut ?? 0) + actualTokens.tokensOut,
-        tokensCached: (current.tokensCached ?? 0) + actualTokens.tokensCached,
-        costUsd: (current.costUsd ?? 0) + ledgerResult.estUsd,
-        costKnown: cumulativeCostKnown,
-        modelVersion: `${config.route.provider}/${config.route.model}`,
-        promptVersion,
-        durationMs: priorDurationMs + ports.clock.now() - runStartedAt,
-      }, ports.clock.now())
+    const settled = call.failure === undefined && usage !== null
+    // 三份凭据必须同时提交，否则崩溃后无法区分“未记账”和“已扣费但审计丢失”。
+    let costKnown: boolean
+    try {
+      costKnown = ports.db.transaction(() => {
+        const ledgerResult = ledger.record({
+          at: accountedAt,
+          scopes: [GLOBAL_SCOPE, symbolScope(symbol)],
+          model: config.route.model,
+          usage,
+          estimatedTokens: reserve.tokens,
+          reservedUsd: reserve.usd,
+        }, prices.isStale(accountedAt) ? [] : prices.all())
+        const actualTokens = usage ?? { tokensIn: reserve.tokens, tokensOut: 0, tokensCached: 0 }
+        const nextCostKnown = cumulativeCostKnown && ledgerResult.costKnown
+        const current = runStore.get(runId)
+        if (current?.status !== 'running') throw new Error(`decision run 在模型记账前已终结：${runId}`)
+        runStore.update(runId, {
+          tokensIn: (current.tokensIn ?? 0) + actualTokens.tokensIn,
+          tokensOut: (current.tokensOut ?? 0) + actualTokens.tokensOut,
+          tokensCached: (current.tokensCached ?? 0) + actualTokens.tokensCached,
+          costUsd: (current.costUsd ?? 0) + ledgerResult.estUsd,
+          costKnown: nextCostKnown,
+          modelVersion: `${config.route.provider}/${config.route.model}`,
+          promptVersion,
+          durationMs: priorDurationMs + accountedAt - runStartedAt,
+        }, accountedAt)
+        const finish = call.response['finish']
+        const failure = isRecord(finish) ? finish['failure'] : undefined
+        const providerResponseId = isRecord(failure) && typeof failure['requestId'] === 'string' ? failure['requestId'] : null
+        journal.appendAudit({
+          actor: 'system', kind: settled ? 'model_call_accounted' : 'model_call_unresolved',
+          payload: {
+            runId, trigger: trigger.id, stage: call.stage, promptVersion: call.promptVersion,
+            requestHash: call.requestHash, callAttemptId: reserve.attemptId, requestChars: call.requestChars,
+            clientRequestId: reserve.attemptId, providerResponseId,
+            provider: config.route.provider, model: config.route.model,
+            accountingVersion: 1, ledgerDay: dayKey(accountedAt), ledgerEntries: ledgerResult.entries,
+            settled,
+            estimatedInputTokens: call.estimatedInputTokens,
+            durationMs: callDurationMs,
+            request: sanitizeModelTrace(call.request),
+            responseHash: fingerprint(call.response),
+            response: sanitizeModelTrace({
+              response: call.response,
+              ...(call.output === undefined ? {} : { structuredOutput: call.output }),
+            }),
+            tokens: actualTokens, estUsd: ledgerResult.estUsd, costKnown: ledgerResult.costKnown,
+            ...(call.failure === undefined ? {} : { error: sanitizeModelTrace(call.failure) }),
+            warnings: ledgerResult.warnings,
+          },
+          ts: accountedAt,
+        })
+        return nextCostKnown
+      }).immediate()
+    } catch (error) {
+      cumulativeCostKnown = false
+      throw error
     }
-    const settled = call.failure === undefined
-    journal.appendAudit({
-      actor: 'system', kind: settled ? 'model_call_accounted' : 'model_call_unresolved',
-      payload: {
-        runId, trigger: trigger.id, stage: call.stage, promptVersion: call.promptVersion,
-        requestHash: call.requestHash, callAttemptId: reserve.attemptId, requestChars: call.requestChars,
-        settled,
-        estimatedInputTokens: call.estimatedInputTokens,
-        durationMs: callDurationMs,
-        request: sanitizeModelTrace(call.request),
-        responseHash: fingerprint(call.response),
-        response: sanitizeModelTrace({
-          response: call.response,
-          ...(call.output === undefined ? {} : { structuredOutput: call.output }),
-        }),
-        tokens: actualTokens, estUsd: ledgerResult.estUsd, costKnown: ledgerResult.costKnown,
-        ...(call.failure === undefined ? {} : { error: sanitizeModelTrace(call.failure) }),
-        warnings: ledgerResult.warnings,
-      },
-      ts: ports.clock.now(),
-    })
+    cumulativeCostKnown = costKnown
+    callStartedAt.delete(call.requestHash)
     reservations.delete(call.requestHash)
     if (settled) completedCalls.set(call.requestHash, reserve.attemptId)
+    else if (call.failure === undefined) throw new Error('模型未返回可核验 usage；调用费用未决，禁止保存 stage 或继续请求')
   }
 
   let budgetDenied: string | undefined
   let unresolvedReservationDenied = false
-  const beforeCall = async (request: { readonly requestHash: string; readonly requestChars: number; readonly estimatedInputTokens: number }, stage: string): Promise<void> => {
+  const beforeCall = async (request: { readonly requestHash: string; readonly requestChars: number; readonly estimatedInputTokens: number }, stage: string): Promise<DecisionCallIdentity> => {
     if (trigger.expiresAt !== undefined && ports.clock.now() >= trigger.expiresAt) {
       throw new Error('触发器在模型调用前已过期，拒绝使用陈旧事件判断')
     }
@@ -453,6 +472,8 @@ export async function runDecisionRuntime(input: {
         actor: 'system', kind: 'model_call_reserved',
         payload: {
           runId, trigger: trigger.id, stage, requestHash: request.requestHash, callAttemptId: attemptId,
+          clientRequestId: attemptId, provider: config.route.provider, model: config.route.model,
+          accountingVersion: 1, reservedDay: dayKey(now), scopes: [GLOBAL_SCOPE, symbolScope(symbol)],
           requestChars: request.requestChars, estimatedInputTokens: request.estimatedInputTokens,
           estimatedTokens: preflight.estimatedTokens, reservedUsd: preflight.estimateUsd,
           dailyBudgetUsd: config.dailyBudgetUsd ?? null, dailyTokenCap: config.dailyTokenCap ?? null,
@@ -474,6 +495,7 @@ export async function runDecisionRuntime(input: {
     }
     reservations.set(request.requestHash, reserve.reservation)
     callStartedAt.set(request.requestHash, now)
+    return { clientRequestId: reserve.reservation.attemptId }
   }
 
   const rejectedOutputs = reservationStatements.get(`SELECT COUNT(*) AS n FROM audit_events
