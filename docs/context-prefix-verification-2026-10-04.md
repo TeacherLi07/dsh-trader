@@ -31,3 +31,6 @@ TRADER_CONTEXT_PREFIX_EVIDENCE=/private/new-ws-frames.json pnpm vitest run tests
 ```
 
 短provider探针同时补修：usage先记账再校验输出；有终态但schema失败仍保留参考费用；无终态保留上界。每次最多2请求、max8192、max effort、官方参考上界总额0.05 USD；原ws/report存在则拒绝重发，未宣称网关实付已核验。
+
+
+历史provider回放入口：`node scripts/context-prefix-model-check.mjs <已完成真实运行的DB> <新私有目录>`。只选费用已知、无workflow failure的原始快照；原asOf/hash保留，不启动交易服务，不算前向paper样本。三阶段加至多一次repair，上界最多4请求、32768输出tokens、max effort、官方参考总额0.30 USD；真实命中/延迟另写实测结果。
