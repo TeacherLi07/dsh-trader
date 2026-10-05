@@ -378,6 +378,22 @@ describe('LocalStateReader（只读本地状态）', () => {
     db.close()
   })
 
+  it('本地实际成交或非终态累计成交缺方向时拒绝镜像，不能默认buy', () => {
+    const db = seeded()
+    const reader = new LocalStateReader(db)
+    expect(reader.positions()).toHaveLength(1)
+    db.prepare('UPDATE order_intents SET side = NULL WHERE client_order_id = ?').run('co-filled')
+    expect(() => reader.positions()).toThrow(/成交方向/)
+    db.prepare('UPDATE order_intents SET side = ? WHERE client_order_id = ?').run('buy', 'co-filled')
+    new DecisionJournal(db).recordOrder({ orderId: 'missing-side-partial', venue: 'paper',
+      clientOrderId: 'co-created', symbol: SYMBOL, status: 'partial', qty: 1, filledQty: 0.2,
+      avgPrice: 100, updatedAt: NOW + 4000 })
+    expect(reader.positions()[0]?.qty).toBeCloseTo(0.25)
+    db.prepare('UPDATE order_intents SET side = NULL WHERE client_order_id = ?').run('co-created')
+    expect(() => reader.positions()).toThrow(/成交方向/)
+    db.close()
+  })
+
   it('空库 ⇒ 空挂单/空持仓（不编造）', () => {
     const db = new Database(':memory:')
     migrate(db)

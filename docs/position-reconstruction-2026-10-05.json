@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-05",
+  "verify": {
+    "passed": true,
+    "files": 85,
+    "tests": 1017
+  },
+  "coverage": {
+    "statements": 83.72,
+    "branches": 77.47,
+    "functions": 91.18,
+    "lines": 87.78
+  },
+  "positionPrimitiveCoverage": {
+    "statements": 100.0,
+    "functions": 100.0,
+    "branches": 100.0
+  },
+  "regressionsBefore": {
+    "failed": 16,
+    "passed": 0
+  },
+  "intermediateFailure": {
+    "failed": 2,
+    "reason": "test fixture compared negative zero with exact positive zero; corrected to numeric closeness"
+  },
+  "cases": [
+    "long/short opening, addition, partial reduction, close and reversal",
+    "unknown direction, bad quantity/price/basis and overflow rejected",
+    "paper validates order side/quantity before mutation",
+    "paper cash equity matches realized PnL after zero/positive fees",
+    "real and pending-partial local mirror never default missing side to buy",
+    "client id replay leaves cash unchanged"
+  ],
+  "realHistory": {
+    "directory": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-real-history",
+    "fills": 2,
+    "finalPosition": {
+      "qty": 0,
+      "avgPrice": 0
+    },
+    "grossQuote": 3.0000000000018903e-05,
+    "flatBookCashFlowQuote": 3.0000000000016125e-05,
+    "tolerance": 7.500133847315738e-16,
+    "sourceUnchanged": true,
+    "currentAccountIdentityProven": false,
+    "fundingCostKnown": false
+  },
+  "offlineStartup": {
+    "status": "passed",
+    "broker": "paper",
+    "commands": [
+      "halt",
+      "resume"
+    ],
+    "halt": {
+      "kind": "success",
+      "text": "已暂停交易并撤销普通挂单，保护单保留。"
+    },
+    "resume": {
+      "kind": "success",
+      "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+    },
+    "equityQuote": 24.914,
+    "modelCalls": 0,
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "command": "dsh --profile trade",
+    "isolatedProfile": true,
+    "output": ""
+  },
+  "rawLogs": [
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-engineering/regressions-before.log",
+      "sha256": "80c1a2887307c8fc142f2c3316b126ff125c77158b3e3b35b18af2b188f03b81"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-engineering/intermediate-verify.log",
+      "sha256": "3a8ab6e2b052d02c3980624a1f167dc95453f50478834d075e369ab0e691b884"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-engineering/verify.log",
+      "sha256": "948aad1c1df02d602928de5b3be8734046e91dabd13e2023954dbab55f0e9592"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-engineering/coverage.log",
+      "sha256": "f136dcee6ee2046f4fed36809e0a14a13d8f67a09fd89aa4ec5f10c441f2e12f"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/position-reconstruction-engineering/offline-startup.json",
+      "sha256": "0c5cedb3743647211fa1021c8475146418448a055590b54298e00061ea84bad6"
+    }
+  ],
+  "networkRequestsThisChange": 0,
+  "paidModelRequestsThisChange": 0,
+  "exchangeActionsThisChange": 0,
+  "limitations": [
+    "Archived real execution data validates arithmetic, not current UID or economic performance",
+    "Funding payment timing/ownership/coverage and production resolver remain incomplete"
+  ]
+}

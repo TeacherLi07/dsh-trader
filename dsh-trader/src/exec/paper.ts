@@ -9,6 +9,7 @@
  */
 
 import type { Clock } from '../clock.js'
+import { applyPositionFill } from './position.js'
 import type {
   AccountSnapshot,
   Broker,
@@ -220,6 +221,12 @@ export class PaperBroker implements Broker {
       return this.#ack(this.#orders.get(existing) as PaperOrder)
     }
 
+    if ((request.side !== 'buy' && request.side !== 'sell') ||
+        !Number.isFinite(request.qty) || request.qty <= 0) {
+      // 不先取abs或从数量符号猜方向，否则持仓与现金可能记成相反交易。
+      throw new Error('paper订单方向或数量无效')
+    }
+
     const order: PaperOrder = {
       orderId: `paper-${++this.#sequence}`,
       clientOrderId: request.clientOrderId,
@@ -362,6 +369,7 @@ export class PaperBroker implements Broker {
       position = { qty: 0, avgPrice: 0 }
       this.#positions.set(order.symbol, position)
     }
+    const next = applyPositionFill(position, { qty: Math.abs(signed), price, side: order.side })
     const notional = Math.abs(signed) * price
     const fee = (notional * (this.options.feeBps ?? 5)) / 10_000
 
@@ -371,23 +379,16 @@ export class PaperBroker implements Broker {
     const feeDay = Math.floor(at / DAY_MS) * DAY_MS
     this.#realizedByDay.set(feeDay, (this.#realizedByDay.get(feeDay) ?? 0) - fee)
 
-    if (position.qty === 0 || Math.sign(position.qty) === Math.sign(signed)) {
-      const newQty = position.qty + signed
-      position.avgPrice =
-        newQty === 0 ? 0 : (position.avgPrice * Math.abs(position.qty) + price * Math.abs(signed)) / Math.abs(newQty)
-      position.qty = newQty
-    } else {
-      const closing = Math.min(Math.abs(signed), Math.abs(position.qty))
-      const direction = Math.sign(position.qty)
-      const gross = (price - position.avgPrice) * closing * direction
+    if (next.closedQty > 0) {
+      const gross = next.realizedGrossQuote
       const net = gross - fee
       this.#realizedPnl += gross
       const day = Math.floor(at / DAY_MS) * DAY_MS
       this.#realizedByDay.set(day, (this.#realizedByDay.get(day) ?? 0) + gross)
       this.#consecutiveLosses = net < 0 ? this.#consecutiveLosses + 1 : 0
-      position.qty += signed
-      if (position.qty === 0) position.avgPrice = 0
     }
+    position.qty = next.qty
+    position.avgPrice = next.avgPrice
 
     this.#cash -= signed * price
     this.#cash -= fee

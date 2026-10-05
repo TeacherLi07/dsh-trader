@@ -183,7 +183,7 @@ export class LocalStateReader {
       .get(
         `SELECT symbol, qty, price, side, account_scope_hash FROM (
            SELECT oi.symbol AS symbol, f.qty AS qty, f.price AS price,
-                  COALESCE(oi.side, 'buy') AS side, f.ts AS fill_ts, f.fill_id AS fill_id,
+                  oi.side AS side, f.ts AS fill_ts, f.fill_id AS fill_id,
                   oi.account_scope_hash AS account_scope_hash
            FROM fills f
            JOIN orders o ON o.order_id = f.order_id
@@ -191,7 +191,7 @@ export class LocalStateReader {
            UNION ALL
            -- 非终态累计成交尚未进入 fills；在本地仓位镜像中只取该订单最新累计量。
            SELECT oi.symbol AS symbol, o.filled_qty AS qty, o.avg_price AS price,
-                  COALESCE(oi.side, 'buy') AS side, o.updated_at AS fill_ts, o.order_id AS fill_id,
+                  oi.side AS side, o.updated_at AS fill_ts, o.order_id AS fill_id,
                   oi.account_scope_hash AS account_scope_hash
            FROM orders o
            JOIN order_intents oi ON oi.client_order_id = o.client_order_id
@@ -199,13 +199,13 @@ export class LocalStateReader {
              AND NOT EXISTS (SELECT 1 FROM fills f WHERE f.order_id = o.order_id)
          ) ORDER BY fill_ts ASC, fill_id ASC`,
       )
-      .all() as { symbol: string; qty: number; price: number; side: string; account_scope_hash: string | null }[]
+      .all() as { symbol: string; qty: number; price: number; side: string | null; account_scope_hash: string | null }[]
     this.#assertScope(rows)
 
     const bySymbol = new Map<string, { qty: number; price: number; side: string }[]>()
     for (const row of rows) {
       const list = bySymbol.get(row.symbol) ?? []
-      list.push({ qty: row.qty, price: row.price, side: row.side })
+      list.push({ qty: row.qty, price: row.price, side: row.side ?? '' })
       bySymbol.set(row.symbol, list)
     }
 

@@ -14,6 +14,7 @@
 import type { Clock } from '../clock.js'
 import type { BarArchive } from '../market/archive.js'
 import { fingerprint } from '../util/canonical.js'
+import { applyPositionFill } from '../exec/position.js'
 import type {
   DecisionJournal,
   FillView,
@@ -220,26 +221,14 @@ export function computeSettlement(
 /**
  * 由一串成交重建持仓（数量 + 均价）—— 用于给 `reduce`/`close` 决策找回**真实入场**。
  * 与 `PaperBroker.#fill` 同一套均价规则：加仓按量加权，减仓不改均价，反向不会"翻仓
- * 却留着旧均价"（数量符号翻转时均价归零）。
+ * 却留着旧均价"（新方向的均价为超出旧仓部分的实际成交价）。
  */
 export function reconstructPosition(
   fills: readonly { readonly qty: number; readonly price: number; readonly side: string }[],
 ): { readonly qty: number; readonly avgPrice: number } {
-  let qty = 0
-  let avgPrice = 0
-  for (const fill of fills) {
-    const signed = fill.side === 'sell' ? -Math.abs(fill.qty) : Math.abs(fill.qty)
-    if (qty === 0 || Math.sign(qty) === Math.sign(signed)) {
-      const next = qty + signed
-      avgPrice = next === 0 ? 0 : (avgPrice * Math.abs(qty) + fill.price * Math.abs(signed)) / Math.abs(next)
-      qty = next
-    } else {
-      qty += signed
-      if (qty === 0) avgPrice = 0
-      // 部分平仓不改剩余持仓的均价
-    }
-  }
-  return { qty, avgPrice }
+  let position = { qty: 0, avgPrice: 0 }
+  for (const fill of fills) position = applyPositionFill(position, fill)
+  return { qty: position.qty, avgPrice: position.avgPrice }
 }
 
 interface PositionAccounting {
@@ -258,7 +247,7 @@ function reconstructPositionAccounting(fills: readonly FillView[]): PositionAcco
   let openedAt: number | null = null
 
   for (const fill of fills) {
-    const size = Math.abs(fill.qty)
+    const size = fill.qty
     if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
       throw new Error(`成交数量或价格无效：${fill.fillId}`)
     }
@@ -318,7 +307,7 @@ function weightedFillPrice(fills: readonly FillView[], expectedSide?: 'buy' | 's
   let notional = 0
   for (const fill of fills) {
     if (fill.side.toLowerCase() !== side) throw new Error('同一决策的成交方向不一致，拒绝净额归因')
-    const size = Math.abs(fill.qty)
+    const size = fill.qty
     if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
       throw new Error(`成交数量或价格无效：${fill.fillId}`)
     }
@@ -376,7 +365,7 @@ function accountOpenDecisionFills(
     left.fillId.localeCompare(right.fillId))
 
   for (const fill of ordered) {
-    const size = Math.abs(fill.qty)
+    const size = fill.qty
     if (!Number.isFinite(size) || size <= 0 || !Number.isFinite(fill.price) || fill.price <= 0) {
       throw new Error(`成交数量或价格无效：${fill.fillId}`)
     }
