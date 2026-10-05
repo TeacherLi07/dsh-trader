@@ -407,6 +407,9 @@ cache token、耗时和成本；反思成本回指来源决策。调用前按剩
 生产为 Docker 单进程；容器负责 restart，进程内不启动第二个 watchdog。UI 只读。
 旧外部 watchdog 实现和脚本已删除，历史证据保留；命令 broker 只从执行组合根读取。
 构建先清理 lib/，避免删除的代码仍被旧产物带入运行包。离线真启动复现入口：`node scripts/offline-startup-check.mjs`。
+部署 bundle 必须与官方 base/web 合成后验证唯一 id；已有官方 provider 按 id 覆盖，不再 insert。
+回归入口 `pnpm vitest run tests/profile-startup.test.ts`；真实 trade Web 与认证接口另列
+[启动证据](docs/trade-profile-startup-2026-10-05.md)，不把精简离线 fixture 当作部署 profile 已验。
 
 2026-10-03：负责人授权真实 provider/交易所测试并要求 deepseek-flash、thinking high 与较高 token 上限。
 开发探针使用 32,768 输出、最多 2,000 万日 token 和DeepSeek 合计 5 USD 测试预算（跨探针累计，剩余额度重新分配；Sub2API 网关账单未核验）；当前生产日预算仍未配置。

@@ -8,42 +8,42 @@
 #
 # 包安装进 profile 后，`dsh-trader/plugins/*` 由 package.json 的 exports 解析。
 
-- insert:
-    # DSH base 默认 dormant 挂载此 provider-neutral adapter。显式覆写其 route 配置，
-    # 直接调用 DeepSeek 官方 Responses HTTP/SSE；provider secrets 仍由 credential ref 解析。
-    - id: llm-pi-ai
-      name: '@deepseek-ai/dsh-llm-pi-ai'
-      config:
-        providers:
-          deepseek-responses:
-            apiKeyEnv: DEEPSEEK_API_KEY
-            api: openai-responses
-            baseURL: https://api.deepseek.com
-            reasoning: high
-            compat: { supportsStrictMode: false }
-            transport: sse
-            retryPolicy: { mode: normal, maxRetries: 0 }
-            models:
-              - id: deepseek-flash
-                name: DeepSeek Flash
-                contextWindow: 1048576
-                maxTokens: 393216
-                reasoningEfforts: { high: high, max: max }
-          deepseek-r5-responses:
-            apiKeyEnv: TRADER_R5_API_KEY
-            api: openai-responses
-            baseURL: https://api.deepseek.com
-            reasoning: high
-            compat: { supportsStrictMode: false }
-            transport: sse
-            retryPolicy: { mode: normal, maxRetries: 0 }
-            models:
-              - id: deepseek-flash
-                name: DeepSeek Flash
-                contextWindow: 1048576
-                maxTokens: 393216
-                reasoningEfforts: { high: high, max: max }
+# DSH base 已挂载此 adapter，必须按 id 覆盖；insert 会与官方条目重复而拒绝启动。
+# 直接调用 DeepSeek 官方 Responses HTTP/SSE；provider secrets 仍由 credential ref 解析。
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      deepseek-responses:
+        apiKeyEnv: DEEPSEEK_API_KEY
+        api: openai-responses
+        baseURL: https://api.deepseek.com
+        reasoning: high
+        compat: { supportsStrictMode: false }
+        transport: sse
+        retryPolicy: { mode: normal, maxRetries: 0 }
+        models:
+          - id: deepseek-flash
+            name: DeepSeek Flash
+            contextWindow: 1048576
+            maxTokens: 393216
+            reasoningEfforts: { high: high, max: max }
+      deepseek-r5-responses:
+        apiKeyEnv: TRADER_R5_API_KEY
+        api: openai-responses
+        baseURL: https://api.deepseek.com
+        reasoning: high
+        compat: { supportsStrictMode: false }
+        transport: sse
+        retryPolicy: { mode: normal, maxRetries: 0 }
+        models:
+          - id: deepseek-flash
+            name: DeepSeek Flash
+            contextWindow: 1048576
+            maxTokens: 393216
+            reasoningEfforts: { high: high, max: max }
 
+- insert:
     # 仅设置真实 Sub2API gateway/model 时启用。模型 alias 与 wireModelId 分离，
     # 保证缺少独立价格的 sub2api:<id> 不会误中 DeepSeek 官方价目表。
     - id: llm-sub2api-responses-ws

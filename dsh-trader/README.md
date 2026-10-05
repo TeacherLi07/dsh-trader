@@ -83,7 +83,13 @@ dsh plugin --profile trade add /workspace/dsh-trader
 
 # 3) 离线校验插件树（不启动）
 dsh --profile trade --dump-config
+
+# 4) 前台启动 paper 页面（3081 被容器普通 Web 占用时用 3082）
+TRADER_MODE=paper TRADER_LIVE_ARMED=0 dsh --profile trade --port 3082 --no-open
 ```
+
+打开终端打印的认证 URL，侧栏选择 **Trade Console**。端口转发时保留 URL 的查询参数；
+直接访问无认证参数的根地址可能返回 401。运行模式与独立 live 数据库要求见 [plan §8](../plan.md#8-模式成本与运行)。
 
 ## 目录
 

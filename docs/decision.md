@@ -2021,3 +2021,7 @@ Codex credits无单独cache-write费，API价目及网关账单分开报告。�
 ## 2026-10-05：非空资金费记录与评估时点分开证明
 
 只读 V5 已取得同账户的一条正现金流收入。附近公共 funding 事件与私人账单创建时间相差4877ms，没有共同评估标识，不能直接按最近事件或创建时刻取仓位。保留收入证据，继续等待数量/ownership 和准确时点合同；见 [非空资金费](htx-funding-nonempty-2026-10-05.md)。
+
+## 2026-10-05：部署组合使用官方 provider 单实例
+
+已有的官方 adapter 按 id 覆盖，项目 insert 只新增自有插件。精简启动 fixture 曾掩盖 llm-pi-ai 重复注册；新增官方 base/web/trader 合成回归，并用当前部署 profile 核验认证页面和状态接口。全新临时 home 的 Web 草稿探针超时另列，未包装成成功；见 [部署启动验收](trade-profile-startup-2026-10-05.md)。

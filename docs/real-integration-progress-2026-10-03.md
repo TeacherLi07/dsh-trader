@@ -79,3 +79,7 @@ DeepSeek返回HTTP402 Insufficient Balance，四个batch均停止；只读余额
 ## 2026-10-05：归档新增真实 funding 收入
 
 [非空来源](htx-funding-nonempty-2026-10-05.md)：10-04 只读发现一条 SUI-USDT/cross/USDT type30 收入，金额+0.000794100514755；严格查询1行后明确空页，执行与账单同账户范围。附近公共 funding_time 与账单 created_time 差4877ms，未认定为相同评估事件。没有付费模型或交易动作；decision费用仍未知，生产resolver和经济/长期缺口保留。
+
+## 2026-10-05：部署 Web profile 修复
+
+[启动验收](trade-profile-startup-2026-10-05.md)：官方 provider 改为按 id 覆盖，实际三层 bundle 163 条 id 全唯一，llm-pi-ai 从 2 条降为 1 条。86 文件 / 1018 测试通过；当前 trade profile 的 paper ready、认证页面/公告客户端资源/账户与周期接口 HTTP 200，模型和订单意图增量 0，测试进程已停止。全新临时 home 的完整 Web 探针超时没有计为通过；原精简离线探针仅作局部证据。

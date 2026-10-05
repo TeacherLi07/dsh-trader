@@ -128,6 +128,7 @@ node scripts/seed-prices.mjs [dbPath]                # 价目表种子（幂等�
 | HTX 现货与 USDT 永续是**两个账户** | `fetchBalance()` 默认读现货；跑 `BTC/USDT:USDT` 时现货通常为 0 ⇒ 系统"以为没钱"，sizing 推出 qty=0 | 显式 `accountType: swap`（`fetchBalance({type})` + exchange `defaultType`）；实测同一 key 现货 0 / swap 24.914 |
 | 永续的 `amount`/`contracts` 是**张数** | ccxt 合约的 `createOrder` 与 `fetchPositions` 都用张数；直接传基础币会差一个 `contractSize`（BTC 1000×、ADA 10×） | `CcxtBroker` 按 `contractSize` 换算并用 `amountToPrecision` 对齐；inverse 直接拒绝 |
 | cordis 的 `ctx.X` 必须已声明 | 读未注册的 `ctx.tradePorts` 会抛 `cannot get property "tradePorts" without inject`，**整个 plugin tree 加载失败**（单测测不到） | 插件间用模块级注册表（`getExecPorts()`）或 `inject`；改完必须真启动一次 `dsh --profile trade` |
+| 官方 provider 重复注册 | dsh-base 已有 llm-pi-ai；包 patch 再 insert 同 id 会导致整个 Web 启动失败 | 按 id 覆盖官方条目；回归用实际 base/web/trader 三层合成，精简插件 fixture 不能替代真实 profile 启动 |
 | `everyMs` 窗口的游标语义 | `dueWindows(specs, since, now)` 从 `since` 起算下一发；调用方若每轮把 `since` 跟到 `now`，窗口**永不触发**（实测 W1 11 分钟没动） | 只在**触发后**把游标推进到 `fireTs`（`tests/supervisor-windows.test.ts` 同时钉住错/对两种用法） |
 | `ctx.agents.create` 必须给 `meta.cwd` | 缺 cwd 时系统提示的 persona-suffix 段 `{{cwd}}` 无值，回合在模型调用前抛错；错误被 agent-loop 的 `kick()` 吞掉，只表现为"6ms、无 assistant/message" | create 传 `meta: { cwd }`（resume 沿用会话持久化的 cwd）；并显式监听 `agent/error` 落审计 |
 | HTX 市价单 `createOrder` **不回填成交** | 响应是 open/new（`state:'acked'`），而 execute-action 只在 `filled` 时记 fill/登记结算/挂保护单 ⇒ 真实成交被当没成交 | 下单后有界轮询 `fetchOrder` 回填（`CcxtBroker.#awaitFill`，默认 6×700ms，可配） |

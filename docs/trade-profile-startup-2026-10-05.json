@@ -1,0 +1,171 @@
+{
+  "date": "2026-10-05",
+  "fix": "override existing official llm-pi-ai by id instead of inserting duplicate",
+  "composition": {
+    "bundles": [
+      "@deepseek-ai/dsh-base",
+      "@deepseek-ai/dsh-web-app",
+      "dsh-trader"
+    ],
+    "beforePiAiEntries": 2,
+    "entryCount": 163,
+    "uniqueIds": 163,
+    "afterPiAiEntries": 1,
+    "webserverEntries": 1,
+    "deepseekRoutes": [
+      "deepseek-responses",
+      "deepseek-r5-responses"
+    ],
+    "warnings": []
+  },
+  "verify": {
+    "passed": true,
+    "files": 86,
+    "tests": 1018
+  },
+  "targeted": {
+    "passed": true,
+    "files": 2,
+    "tests": 5
+  },
+  "deployedProfileWeb": {
+    "status": "passed",
+    "mode": "paper",
+    "startup": "ready",
+    "http": {
+      "unauthorized": 401,
+      "authentication": 303,
+      "index": {
+        "status": 200,
+        "bytes": 27940
+      },
+      "traderAsset": {
+        "status": 200,
+        "bytes": 11443,
+        "url": "/plugins/??dsh-trader/client.js&rev=f5d1e97891fe27fd-44"
+      },
+      "/api/trade/state": {
+        "status": 200,
+        "bytes": 1326
+      },
+      "/api/trade/cycles?limit=8": {
+        "status": 200,
+        "bytes": 2475
+      }
+    },
+    "before": {
+      "modelCalls": 0,
+      "intents": 0
+    },
+    "equityQuote": 24.914,
+    "after": {
+      "modelCalls": 0,
+      "intents": 0
+    },
+    "modelCallsAdded": 0,
+    "intentsAdded": 0
+  },
+  "offlineMinimal": {
+    "status": "passed",
+    "broker": "paper",
+    "commands": [
+      "halt",
+      "resume"
+    ],
+    "halt": {
+      "kind": "success",
+      "text": "已暂停交易并撤销普通挂单，保护单保留。"
+    },
+    "resume": {
+      "kind": "success",
+      "text": "已人工恢复交易资格；不会自动撤单或开仓。"
+    },
+    "equityQuote": 24.914,
+    "modelCalls": 0,
+    "providerModels": [
+      "sub2api:offline-luna"
+    ],
+    "networkAttempts": 0,
+    "command": "dsh --profile trade",
+    "isolatedProfile": true,
+    "output": ""
+  },
+  "startupTestProcessesStopped": true,
+  "port3082Released": true,
+  "freshIsolatedFullWebVerified": false,
+  "discardedProbeLimitations": [
+    "Full Web startup in an empty temporary DSH_HOME timed out with settings/credentials/workspace initialization still pending; cause not established; not counted as passed and draft script was removed.",
+    "Individual unadvertised /plugins/dsh-trader/client.js and /plugins/trade-ui-client/client.js returned 404; final probe fetched the HTML-advertised revisioned combo resource successfully."
+  ],
+  "promptPrefixChanged": false,
+  "rawLogs": [
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/before-duplicate.log",
+      "sha256": "b44648adf55dca5f8955f607fd497bc734aa76cc54dbf2cda067a479c8fb0089"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/targeted.log",
+      "sha256": "63511507e2de32e87ef8ea91577c3bdb4a92a2fec645482b218a6c85fc2148ae"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/verify.log",
+      "sha256": "7b0f2f1a3dc7ed20971f741676e2aa7d4afa313cb2315ca9c63f6ede64bf1b7e"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/composition.json",
+      "sha256": "5540ae21a05c2e0af8a296e692ecea0181eb5b42a93d0ed4952641d0bcec17c3"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/http.json",
+      "sha256": "77dc3ec7a9940a5020bf273348a1dd11557b60fce1397edf91e2384feffdfc61"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/offline-minimal.json",
+      "sha256": "0c5cedb3743647211fa1021c8475146418448a055590b54298e00061ea84bad6"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/web-startup-sanitized.log",
+      "sha256": "9767913a66355bbe1b6295146383a2b531530c3252d8b602a74e345bbfd07645"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-fifth-2026-10-05.stderr",
+      "sha256": "b8aa80b33c82ea85271043ac62e0814db04ff2936c895468ab673cd0633751a1"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-fourth-2026-10-05.stderr",
+      "sha256": "b8aa80b33c82ea85271043ac62e0814db04ff2936c895468ab673cd0633751a1"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-third-2026-10-05.stderr",
+      "sha256": "f4a213c2c17442bbeb67ed7f7831cd661e06f70e00be009f3d64cdc7d56fa1fc"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-2026-10-05.stderr",
+      "sha256": "f4a213c2c17442bbeb67ed7f7831cd661e06f70e00be009f3d64cdc7d56fa1fc"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-sixth-2026-10-05.stderr",
+      "sha256": "b8aa80b33c82ea85271043ac62e0814db04ff2936c895468ab673cd0633751a1"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-second-2026-10-05.stderr",
+      "sha256": "4c11ecb8d71388f72db33dceebc669ccc4c2b8816f893c6ac235fcbbbffa12f8"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-bundle-startup-seventh-2026-10-05.stderr",
+      "sha256": "b8aa80b33c82ea85271043ac62e0814db04ff2936c895468ab673cd0633751a1"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-profile-startup-after-first-2026-10-05.log",
+      "sha256": "3d6f80a1a879666ab0c56d57f88f9a8908567407170d2c95a0d187d5706b232a"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-profile-startup-after-second-2026-10-05.log",
+      "sha256": "afdbfb59050851b3ef7f7b6544d7b9e525f32a3dfac1e06e71dd11fe8caaf4bd"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-05/trade-profile-startup/discarded-profile-startup-after-third-2026-10-05.log",
+      "sha256": "ed9a5bd6157621f2abcd10cace2ee671af357be0c5f3b3131a163cd5524ba867"
+    }
+  ]
+}

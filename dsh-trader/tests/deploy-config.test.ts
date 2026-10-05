@@ -22,7 +22,7 @@ describe('部署配置：运行模式来自启动参数', () => {
 
   it('生产默认 route 使用 Responses SSE，R5 固定 route 使用隔离 key', () => {
     expect(patch).toContain('l3: { provider: deepseek-responses, model: deepseek-flash }')
-    expect(patch).toContain(`          ${R5_FIXED_PROVIDER}:`)
+    expect(patch).toMatch(new RegExp(`^\\s+${R5_FIXED_PROVIDER}:`, 'm'))
     expect(patch).toMatch(/api: openai-responses/)
     expect(patch).toMatch(/reasoning: high/)
     expect(patch).toMatch(/compat: \{ supportsStrictMode: false \}/)
