@@ -542,6 +542,11 @@ R6 的 14 天零事故验证必须有非空成交、持仓、算法保护单和�
 新运行使用独立数据库并保留旧库，不自动改归属。支付数量归因、assessment/发布时间与非空收支
 来源仍阻塞 funding 生产接线；见 [账户范围验收](docs/execution-account-scope-2026-10-04.md)。
 
+2026-10-04 后续已取得一条真实 SUI funding 收入（type30、正现金流），严格读取到明确末页；
+公共 funding_time 与私人 created_time 相差4877ms，但缺共同 assessment 标识，未当作精确归因。
+数量/decision 归属、支出样本、完整区间覆盖和生产 resolver 仍未完成；见
+[非空资金费证据](docs/htx-funding-nonempty-2026-10-05.md)。
+
 **未决运行的恢复入口**：bar修订的feature-only重建与显式游标确认命令已接入，schema v11保留不可修改的恢复凭据；完整历史分页重启、PIT、幂等、拒绝与真实SIGKILL均已补验，见 `docs/feature-recovery-2026-10-04.md`。先停profile，查看计划、重建、单独确认，再重启；原隔离观测不删除，新bar不跳过。模型费用核销入口 `scripts/model-billing-reconciliation.mjs` 已接入 schema v12：停profile后默认只读查看，人工审阅外部账单与usage证据、校验原文件hash，再以精确planHash和原因apply；完整聚合审计对不上或历史缺少单次请求身份/原子记账凭据仍拒绝。原失败/终态run不改写，相同原请求不能重发。旧真实未知账单没有核销，凭据缺口仍是阻塞项；验收见 `docs/model-billing-reconciliation-2026-10-04.md`。
 
 **2026-10-03 真实工程测试进度**：早期 6 条模型判断/19 次调用已保留完整 usage、失败和原始脱敏 trace，估算合计 0.202095972 USD；其中指定 Flash/high/32k 的 2 条判断完成。

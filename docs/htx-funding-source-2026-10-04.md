@@ -21,6 +21,6 @@ HTTP_PROXY=http://host.docker.internal:7890 HTTPS_PROXY=http://host.docker.inter
 
 ## 尚未完成的合同
 
-读取器的paginationExhausted只表示游标收到明确空页，不证明历史留存、延迟发布与每个decision持仓归因完整。当前fills缺账户/保证金范围来源，FundingCostRequest也没有完整账户范围；不能把同合约汇总账单分给一笔决策。还需要确认账单created_time是否就是持仓评估时点，并取得非空资金费收支记录。
+读取器的paginationExhausted只表示游标收到明确空页，不证明历史留存、延迟发布与每个decision持仓归因完整。后续已完成[账户来源基础](execution-account-scope-2026-10-04.md)，并获得[一条真实收入及时间对照](htx-funding-nonempty-2026-10-05.md)；首轮空样本记录保留。数量/decision归因、支出样本与准确评估时点仍未完成，不能把同合约汇总账单分给一笔决策。
 
 现有SettlementScheduler在没有resolver时会保存gross、将net/funding置NULL；临时API或分页错误应保持pending而非写成未知终态。生产resolver本轮尚未接线，未把空历史当作0。paper不能查询live账单为自身虚拟持仓补成本。净收益/独立经济验收仍阻塞，默认paper不变。

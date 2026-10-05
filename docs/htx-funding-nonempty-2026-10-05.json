@@ -1,0 +1,85 @@
+{
+  "evidenceDate": "2026-10-04",
+  "documentedDate": "2026-10-05",
+  "inventory": {
+    "queryWindowsDays": [
+      2,
+      7,
+      30
+    ],
+    "rowsPerWindow": [
+      0,
+      0,
+      1
+    ],
+    "sameCredentialBoundScope": true
+  },
+  "strictReader": {
+    "passed": true,
+    "pages": 2,
+    "nonemptyPaymentRows": 1,
+    "explicitEmptyTerminalPage": true,
+    "payment": {
+      "id": "1956619226",
+      "type": "30",
+      "currency": "USDT",
+      "contractCode": "SUI-USDT",
+      "marginMode": "cross",
+      "createdAt": 1788969604877,
+      "cashFlowQuote": 0.000794100514755
+    },
+    "evidenceHash": "sha256:db5f6ee7964c9850ed5339306c9b800c24a3339fd477190ccbe0d2928a7643f3",
+    "knownDecisionFundingCost": false
+  },
+  "publicHistoryControl": {
+    "rows": 1,
+    "contractCode": "SUI-USDT",
+    "fundingRate": "0.0001",
+    "nearestFundingTime": 1788969600000,
+    "billCreatedAt": 1788969604877,
+    "createdMinusNearestMs": 4877,
+    "billAssessmentLinkConfirmed": false
+  },
+  "officialSources": [
+    "https://www.htx.com/oplt/api/open_api/interface/detail?interface_id=8cb89359-77b5-11ed-9966-19b930b8bee",
+    "https://www.htx.com/oplt/api/open_api/interface/detail?interface_id=8cb89359-77b5-11ed-9966-19b97ea5941",
+    "https://www.htx.com/support/en-us/detail/900001326466"
+  ],
+  "sources": [
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/funding-account-inventory/report.json",
+      "sha256": "bc6e9d05f055c4ece202d72fea36f642950b9ac9ebc9884a21e790d2f824aea4"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-funding-sui-nonempty/report.json",
+      "sha256": "2d9bd77c52e9e12cfd7dae498debc1ef15fa9a697d34c5c75739c45539cf34f4"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/htx-funding-sui-nonempty/responses.jsonl",
+      "sha256": "406105798552b590cc199c0c69859a6cb060a1987259f2a8137f3a5bdd2e72a4"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/funding-assessment-public-control/report.json",
+      "sha256": "7eefc9e3d352c0c1a2870ff9a3e9337e50e7af477f3171a605a08217929d422f"
+    },
+    {
+      "path": "/home/ubuntu/.dsh/trading/integration-2026-10-04/funding-assessment-public-control/official-funding-history.json",
+      "sha256": "b7fee6ea0516b6a2801219328a6d675b2798a7fb8e75822426f4f1553bdf0b22"
+    }
+  ],
+  "allExchangeMethodsReadOnly": true,
+  "exchangeActions": 0,
+  "paidModelRequests": 0,
+  "verified": [
+    "nonempty V5 funding income receipt and positive cash-flow sign",
+    "UID-derived scope agrees with execution binding",
+    "strict string-ID pagination advances to explicit empty page"
+  ],
+  "remaining": [
+    "nonempty expense receipt not observed",
+    "creation timestamp cannot directly establish position assessment time",
+    "public funding event and private receipt have no explicit shared assessment identifier",
+    "decision ownership/quantity conservation and full coverage remain unverified",
+    "production FundingCostResolver remains unwired; no economic or long-observation acceptance"
+  ]
+}
